@@ -15,6 +15,7 @@ import (
 	backupEngine "backup-platform/internal/backup/engine"
 	backupHttpapi "backup-platform/internal/backup/httpapi"
 	backupRepo "backup-platform/internal/backup/repository"
+	backupRetention "backup-platform/internal/backup/retention"
 	backupScheduler "backup-platform/internal/backup/scheduler"
 	backupService "backup-platform/internal/backup/service"
 	backupVerification "backup-platform/internal/backup/verification"
@@ -258,6 +259,12 @@ func run() error {
 
 	resourceMutexManager := backupWorker.NewPerResourceMutexManager()
 	resConnFinder := &resourceConnectorFinderAdapter{repo: resourceRepository, db: db}
+	retentionProcessor := backupRetention.NewProcessor(
+		backupRepository,
+		localStorageProvider,
+		auditRecorder,
+		log,
+	)
 	workerPool := backupWorker.NewWorkerPool(
 		backupWorker.DefaultWorkerPoolConfig(),
 		backupRepository,
@@ -271,6 +278,7 @@ func run() error {
 		resourceMutexManager,
 		log,
 	)
+	workerPool.SetRetentionManager(retentionProcessor)
 	workerPool.Start(backgroundCtx)
 
 	staleReaper := backupWorker.NewStaleRunReaper(backupRepository, 30*time.Second, log)

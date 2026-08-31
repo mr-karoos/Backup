@@ -16,6 +16,7 @@ import (
 
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/engine"
+	"backup-platform/internal/backup/retention"
 	"backup-platform/internal/backup/verification"
 	"backup-platform/internal/connector"
 	credDomain "backup-platform/internal/credential/domain"
@@ -424,6 +425,32 @@ func (r *fakeWorkerRepo) GetRunDetail(ctx context.Context, orgID, runID uuid.UUI
 func (r *fakeWorkerRepo) ListRuns(ctx context.Context, orgID uuid.UUID, filter domain.RunFilter) ([]*domain.BackupRunWithStats, error) {
 	return nil, nil
 }
+func (r *fakeWorkerRepo) ListSuccessfulRunsForPlan(ctx context.Context, orgID, planID uuid.UUID) ([]*domain.BackupRun, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var res []*domain.BackupRun
+	for _, run := range r.runs {
+		if run.OrganizationID == orgID && run.Status == domain.RunStatusSuccess {
+			if job, ok := r.jobs[run.JobID]; ok && job.BackupPlanID != nil && *job.BackupPlanID == planID {
+				res = append(res, run)
+			}
+		}
+	}
+	sort.Slice(res, func(i, j int) bool {
+		var iEnded, jEnded time.Time
+		if res[i].EndedAt != nil {
+			iEnded = *res[i].EndedAt
+		}
+		if res[j].EndedAt != nil {
+			jEnded = *res[j].EndedAt
+		}
+		if iEnded.Equal(jEnded) {
+			return res[i].ID.String() > res[j].ID.String()
+		}
+		return iEnded.After(jEnded)
+	})
+	return res, nil
+}
 func (r *fakeWorkerRepo) GetArtifactByID(ctx context.Context, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -469,10 +496,14 @@ func (f *fakeCredentialVault) LoadCredentialForUse(ctx context.Context, orgID, c
 }
 
 type fakeCapability struct {
-	sqlDump string
+	sqlDump     string
+	errToReturn error
 }
 
 func (f *fakeCapability) BackupDatabase(ctx context.Context, target connector.Target, credPayload *payload.PayloadV1, databaseName string, dest io.Writer) error {
+	if f.errToReturn != nil {
+		return f.errToReturn
+	}
 	_, err := dest.Write([]byte(f.sqlDump))
 	return err
 }
@@ -2351,4 +2382,263 @@ func TestWorkerPool_MySQLDatabase_ModeAll_DiscoversAndDumpsAllDatabases(t *testi
 	if targetNames[0] != "analytics_db" || targetNames[1] != "app_db" {
 		t.Fatalf("expected artifacts for analytics_db and app_db, got %v", targetNames)
 	}
+}
+
+type fakeRetentionManager struct {
+	mu          sync.Mutex
+	calls       int
+	lastOrgID   uuid.UUID
+	lastPlanID  *uuid.UUID
+	lastRunID   uuid.UUID
+	errToReturn error
+}
+
+func (f *fakeRetentionManager) ApplyAfterSuccessfulRun(ctx context.Context, orgID uuid.UUID, planID *uuid.UUID, currentRunID uuid.UUID) (*retention.CleanupSummary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	f.lastOrgID = orgID
+	f.lastPlanID = planID
+	f.lastRunID = currentRunID
+	if f.errToReturn != nil {
+		return nil, f.errToReturn
+	}
+	return &retention.CleanupSummary{}, nil
+}
+
+func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
+	orgID := uuid.New()
+	resID := uuid.New()
+	credID := uuid.New()
+	planID := uuid.New()
+
+	timeoutSec := 10
+	resWithConn := &resDomain.ResourceWithConnector{
+		Resource: &resDomain.Resource{
+			ID:             resID,
+			OrganizationID: orgID,
+			Type:           resDomain.TypeUbuntuSSH,
+			Status:         resDomain.StatusActive,
+		},
+		Connector: &resDomain.ResourceConnector{
+			ID:           uuid.New(),
+			ResourceID:   resID,
+			CredentialID: credID,
+			Host:         "127.0.0.1",
+			Port:         22,
+			AuthType:     resDomain.AuthTypeSSHPassword,
+			Config: resDomain.ConnectorConfig{
+				Username:                 "user",
+				ConnectionTimeoutSeconds: &timeoutSec,
+			},
+		},
+	}
+
+	validPassJSON, _ := payload.EncodeV1("pass", nil)
+	storageDir := t.TempDir()
+	storageProvider, _ := local.NewLocalStorageProvider(storageDir)
+	_ = storageProvider.EnsureStorageRoot(context.Background())
+
+	t.Run("invokes retention on successful plan-triggered job", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		job := &domain.BackupJob{
+			ID:             uuid.New(),
+			OrganizationID: orgID,
+			ResourceID:     resID,
+			BackupPlanID:   &planID,
+			TriggerType:    domain.TriggerTypeScheduled,
+			BackupType:     domain.BackupTypeMySQLDatabase,
+			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:         domain.JobStatusPending,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		repo.jobs[job.ID] = job
+
+		capReg := connector.NewBackupCapabilityRegistry()
+		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{sqlDump: "-- MySQL dump\nCREATE DATABASE testdb;\n"})
+
+		retManager := &fakeRetentionManager{}
+		workerPool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			capReg,
+			nil,
+			engine.NewDirectStreamBackupEngine(),
+			storageProvider,
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			slog.Default(),
+		)
+		workerPool.SetRetentionManager(retManager)
+
+		workerPool.processNextAvailableJob(context.Background(), 1)
+
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+
+		if repo.finalizedJob == nil || repo.finalizedJob.Status != domain.JobStatusCompleted {
+			t.Fatalf("expected job to be completed")
+		}
+		if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusSuccess {
+			t.Fatalf("expected run to be success")
+		}
+
+		if retManager.calls != 1 {
+			t.Fatalf("expected retentionManager to be called once, got %d", retManager.calls)
+		}
+		if retManager.lastOrgID != orgID {
+			t.Errorf("expected retention orgID %s, got %s", orgID, retManager.lastOrgID)
+		}
+		if retManager.lastPlanID == nil || *retManager.lastPlanID != planID {
+			t.Errorf("expected retention planID %s, got %v", planID, retManager.lastPlanID)
+		}
+		if retManager.lastRunID != repo.finalizedRun.ID {
+			t.Errorf("expected retention currentRunID %s, got %s", repo.finalizedRun.ID, retManager.lastRunID)
+		}
+	})
+
+	t.Run("does not invoke retention for ad-hoc job without plan", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		job := &domain.BackupJob{
+			ID:             uuid.New(),
+			OrganizationID: orgID,
+			ResourceID:     resID,
+			BackupPlanID:   nil, // Ad-hoc job
+			TriggerType:    domain.TriggerTypeManual,
+			BackupType:     domain.BackupTypeMySQLDatabase,
+			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:         domain.JobStatusPending,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		repo.jobs[job.ID] = job
+
+		capReg := connector.NewBackupCapabilityRegistry()
+		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{sqlDump: "-- MySQL dump\nCREATE DATABASE testdb;\n"})
+
+		retManager := &fakeRetentionManager{}
+		workerPool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			capReg,
+			nil,
+			engine.NewDirectStreamBackupEngine(),
+			storageProvider,
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			slog.Default(),
+		)
+		workerPool.SetRetentionManager(retManager)
+
+		workerPool.processNextAvailableJob(context.Background(), 1)
+
+		if retManager.calls != 0 {
+			t.Errorf("expected retentionManager NOT to be called for ad-hoc job, got %d calls", retManager.calls)
+		}
+	})
+
+	t.Run("retention error does not mutate successful job/run status or delete artifacts", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		job := &domain.BackupJob{
+			ID:             uuid.New(),
+			OrganizationID: orgID,
+			ResourceID:     resID,
+			BackupPlanID:   &planID,
+			TriggerType:    domain.TriggerTypeScheduled,
+			BackupType:     domain.BackupTypeMySQLDatabase,
+			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:         domain.JobStatusPending,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		repo.jobs[job.ID] = job
+
+		capReg := connector.NewBackupCapabilityRegistry()
+		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{sqlDump: "-- MySQL dump\nCREATE DATABASE testdb;\n"})
+
+		retManager := &fakeRetentionManager{errToReturn: errors.New("retention processing failed")}
+		workerPool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			capReg,
+			nil,
+			engine.NewDirectStreamBackupEngine(),
+			storageProvider,
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			slog.Default(),
+		)
+		workerPool.SetRetentionManager(retManager)
+
+		workerPool.processNextAvailableJob(context.Background(), 1)
+
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+
+		if repo.finalizedJob == nil || repo.finalizedJob.Status != domain.JobStatusCompleted {
+			t.Fatalf("expected job to remain completed despite retention error, got: %+v", repo.finalizedJob)
+		}
+		if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusSuccess {
+			t.Fatalf("expected run to remain success despite retention error, got: %+v", repo.finalizedRun)
+		}
+
+		if len(repo.artifacts) == 0 {
+			t.Fatalf("expected newly created artifact to be preserved")
+		}
+		for _, art := range repo.artifacts {
+			if art.IsDeleted {
+				t.Errorf("new artifact must not be deleted on retention error")
+			}
+		}
+	})
+
+	t.Run("pipeline failure never calls retention", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		job := &domain.BackupJob{
+			ID:             uuid.New(),
+			OrganizationID: orgID,
+			ResourceID:     resID,
+			BackupPlanID:   &planID,
+			TriggerType:    domain.TriggerTypeScheduled,
+			BackupType:     domain.BackupTypeMySQLDatabase,
+			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:         domain.JobStatusPending,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		repo.jobs[job.ID] = job
+
+		// Failing capability
+		capReg := connector.NewBackupCapabilityRegistry()
+		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{errToReturn: errors.New("mysqldump failed: table locked")})
+
+		retManager := &fakeRetentionManager{}
+		workerPool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			capReg,
+			nil,
+			engine.NewDirectStreamBackupEngine(),
+			storageProvider,
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			slog.Default(),
+		)
+		workerPool.SetRetentionManager(retManager)
+
+		workerPool.processNextAvailableJob(context.Background(), 1)
+
+		if retManager.calls != 0 {
+			t.Errorf("expected retention NOT to be called on failed backup pipeline, got %d calls", retManager.calls)
+		}
+	})
 }

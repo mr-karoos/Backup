@@ -94,6 +94,9 @@ func (m *mockBackupRepo) GetRunDetail(ctx context.Context, orgID, runID uuid.UUI
 func (m *mockBackupRepo) ListRuns(ctx context.Context, orgID uuid.UUID, filter domain.RunFilter) ([]*domain.BackupRunWithStats, error) {
 	return nil, nil
 }
+func (m *mockBackupRepo) ListSuccessfulRunsForPlan(ctx context.Context, orgID, planID uuid.UUID) ([]*domain.BackupRun, error) {
+	return nil, nil
+}
 func (m *mockBackupRepo) GetArtifactByID(ctx context.Context, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, error) {
 	return nil, domain.ErrArtifactNotFound
 }

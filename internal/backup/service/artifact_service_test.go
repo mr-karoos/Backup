@@ -78,6 +78,9 @@ func (m *mockArtifactRepo) GetRunDetail(ctx context.Context, orgID, runID uuid.U
 func (m *mockArtifactRepo) ListRuns(ctx context.Context, orgID uuid.UUID, filter domain.RunFilter) ([]*domain.BackupRunWithStats, error) {
 	return nil, nil
 }
+func (m *mockArtifactRepo) ListSuccessfulRunsForPlan(ctx context.Context, orgID, planID uuid.UUID) ([]*domain.BackupRun, error) {
+	return nil, nil
+}
 func (m *mockArtifactRepo) GetLatestRunForJob(ctx context.Context, orgID, jobID uuid.UUID) (*domain.BackupRun, error) {
 	return nil, nil
 }

@@ -29,6 +29,7 @@ type BackupRepository interface {
 	GetRunByID(ctx context.Context, orgID, runID uuid.UUID) (*domain.BackupRun, error)
 	GetRunDetail(ctx context.Context, orgID, runID uuid.UUID) (*domain.BackupRunWithStats, error)
 	ListRuns(ctx context.Context, orgID uuid.UUID, filter domain.RunFilter) ([]*domain.BackupRunWithStats, error)
+	ListSuccessfulRunsForPlan(ctx context.Context, orgID, planID uuid.UUID) ([]*domain.BackupRun, error)
 	GetLatestRunForJob(ctx context.Context, orgID, jobID uuid.UUID) (*domain.BackupRun, error)
 	UpdateHeartbeat(ctx context.Context, orgID, runID uuid.UUID) error
 	FinalizeRunAndJob(

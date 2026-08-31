@@ -1016,6 +1016,42 @@ func (r *PostgresBackupRepository) ListRuns(ctx context.Context, orgID uuid.UUID
 	return runs, nil
 }
 
+// ListSuccessfulRunsForPlan returns all successful BackupRuns for a given plan within an organization,
+// ordered deterministically by ended_at DESC, id DESC.
+func (r *PostgresBackupRepository) ListSuccessfulRunsForPlan(ctx context.Context, orgID, planID uuid.UUID) ([]*domain.BackupRun, error) {
+	q := r.txManager.Querier()
+	query := `
+		SELECT r.id, r.organization_id, r.job_id, r.attempt_number, r.status,
+		       r.started_at, r.ended_at, r.heartbeat_at, r.lease_until, r.error_message,
+		       r.logs_summary, r.created_at, r.updated_at
+		FROM backup_runs r
+		JOIN backup_jobs j ON r.job_id = j.id AND r.organization_id = j.organization_id
+		WHERE r.organization_id = $1
+		  AND j.backup_plan_id = $2
+		  AND r.status = 'success'
+		ORDER BY r.ended_at DESC, r.id DESC;
+	`
+	rows, err := q.Query(ctx, query, orgID, planID)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying successful runs for plan: %w", err)
+	}
+	defer rows.Close()
+
+	var runs []*domain.BackupRun
+	for rows.Next() {
+		run, err := scanBackupRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("failed scanning successful backup run: %w", err)
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed reading successful backup run rows: %w", err)
+	}
+
+	return runs, nil
+}
+
 // GetLatestRunForJob retrieves the most recent BackupRun for a given job.
 func (r *PostgresBackupRepository) GetLatestRunForJob(ctx context.Context, orgID, jobID uuid.UUID) (*domain.BackupRun, error) {
 	q := r.txManager.Querier()

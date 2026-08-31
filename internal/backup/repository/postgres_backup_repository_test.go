@@ -916,6 +916,40 @@ func TestPostgresBackupRepository_ArtifactRepositoryRegression(t *testing.T) {
 			t.Fatalf("expected ErrArtifactNotFound, got: %v", err)
 		}
 	})
+
+	t.Run("ListSuccessfulRunsForPlan is organization-scoped, plan-scoped, filters status=success, and orders by ended_at DESC, id DESC", func(t *testing.T) {
+		var capturedSQL string
+		var capturedArgs []any
+
+		planID := uuid.New()
+		q := &mockQuerier{
+			queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				capturedSQL = sql
+				capturedArgs = args
+				return &mockEmptyRows{}, nil
+			},
+		}
+
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+		_, err := repo.ListSuccessfulRunsForPlan(context.Background(), orgID, planID)
+		if err != nil {
+			t.Fatalf("expected nil error, got: %v", err)
+		}
+
+		if !strings.Contains(capturedSQL, "WHERE r.organization_id = $1") ||
+			!strings.Contains(capturedSQL, "AND j.backup_plan_id = $2") ||
+			!strings.Contains(capturedSQL, "AND r.status = 'success'") {
+			t.Errorf("ListSuccessfulRunsForPlan WHERE clause mismatch, got SQL: %s", capturedSQL)
+		}
+
+		if !strings.Contains(capturedSQL, "ORDER BY r.ended_at DESC, r.id DESC") {
+			t.Errorf("ListSuccessfulRunsForPlan ORDER BY mismatch, got SQL: %s", capturedSQL)
+		}
+
+		if len(capturedArgs) != 2 || capturedArgs[0] != orgID || capturedArgs[1] != planID {
+			t.Errorf("unexpected arguments: %v", capturedArgs)
+		}
+	})
 }
 
 type mockEmptyRows struct{}

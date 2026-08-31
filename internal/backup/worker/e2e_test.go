@@ -271,6 +271,19 @@ func (r *memoryBackupRepo) GetRunDetail(ctx context.Context, orgID, runID uuid.U
 func (r *memoryBackupRepo) ListRuns(ctx context.Context, orgID uuid.UUID, filter domain.RunFilter) ([]*domain.BackupRunWithStats, error) {
 	return nil, nil
 }
+func (r *memoryBackupRepo) ListSuccessfulRunsForPlan(ctx context.Context, orgID, planID uuid.UUID) ([]*domain.BackupRun, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var res []*domain.BackupRun
+	for _, run := range r.runs {
+		if run.OrganizationID == orgID && run.Status == domain.RunStatusSuccess {
+			if job, ok := r.jobs[run.JobID]; ok && job.BackupPlanID != nil && *job.BackupPlanID == planID {
+				res = append(res, run)
+			}
+		}
+	}
+	return res, nil
+}
 func (r *memoryBackupRepo) GetArtifactByID(ctx context.Context, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

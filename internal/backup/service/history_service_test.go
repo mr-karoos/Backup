@@ -23,6 +23,10 @@ func (m *mockHistoryRepo) ListRuns(ctx context.Context, orgID uuid.UUID, filter 
 	return nil, nil
 }
 
+func (m *mockHistoryRepo) ListSuccessfulRunsForPlan(ctx context.Context, orgID, planID uuid.UUID) ([]*domain.BackupRun, error) {
+	return nil, nil
+}
+
 func (m *mockHistoryRepo) GetRunDetail(ctx context.Context, orgID, runID uuid.UUID) (*domain.BackupRunWithStats, error) {
 	if m.getRunDetailFunc != nil {
 		return m.getRunDetailFunc(ctx, orgID, runID)

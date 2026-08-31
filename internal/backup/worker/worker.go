@@ -10,6 +10,7 @@ import (
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/engine"
 	"backup-platform/internal/backup/repository"
+	"backup-platform/internal/backup/retention"
 	"backup-platform/internal/backup/verification"
 	"backup-platform/internal/connector"
 	"backup-platform/internal/connector/sshconn"
@@ -20,6 +21,11 @@ import (
 	"backup-platform/internal/storage"
 	"backup-platform/pkg/uuid"
 )
+
+// RetentionManager applies retention policy to expired runs after successful backup completion.
+type RetentionManager interface {
+	ApplyAfterSuccessfulRun(ctx context.Context, orgID uuid.UUID, planID *uuid.UUID, currentRunID uuid.UUID) (*retention.CleanupSummary, error)
+}
 
 // ResourceConnectorFinder fetches resource and connector configurations within an organization.
 type ResourceConnectorFinder interface {
@@ -69,6 +75,7 @@ type WorkerPool struct {
 	cancel                 context.CancelFunc
 	wg                     sync.WaitGroup
 	databaseDiscoverer     databaseDiscoverer
+	retentionManager       RetentionManager
 }
 
 // NewWorkerPool constructs a new WorkerPool instance.
@@ -116,6 +123,11 @@ func NewWorkerPool(
 		nowFunc:                time.Now,
 		databaseDiscoverer:     sshconn.NewSSHDatabaseDiscoverer(nil),
 	}
+}
+
+// SetRetentionManager injects a custom retention manager into the worker pool.
+func (p *WorkerPool) SetRetentionManager(rm RetentionManager) {
+	p.retentionManager = rm
 }
 
 // SetNowFunc sets the custom time supplier for testing.
@@ -366,6 +378,19 @@ func (p *WorkerPool) executeJobSafely(
 				slog.String("run_id", run.ID.String()),
 				slog.String("job_id", job.ID.String()),
 			)
+
+			// Post-Success Lifecycle: Apply Retention Policy if job is associated with a plan
+			if p.retentionManager != nil && job.BackupPlanID != nil {
+				retentionCtx, retentionCancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if _, retErr := p.retentionManager.ApplyAfterSuccessfulRun(retentionCtx, run.OrganizationID, job.BackupPlanID, run.ID); retErr != nil {
+					p.logger.Warn("retention policy execution completed with errors",
+						slog.String("org_id", run.OrganizationID.String()),
+						slog.String("plan_id", job.BackupPlanID.String()),
+						slog.String("run_id", run.ID.String()),
+					)
+				}
+				retentionCancel()
+			}
 		}
 		return
 	}
