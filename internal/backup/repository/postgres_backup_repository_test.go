@@ -648,3 +648,284 @@ func (r *mockRunsRows) Scan(dest ...any) error {
 	*(dest[3].(*int)) = curr.attempt
 	return nil
 }
+
+func TestPostgresBackupRepository_ListRuns_FiltersAndOrdering(t *testing.T) {
+	orgID := uuid.New()
+	resID := uuid.New()
+	jobID := uuid.New()
+	status := domain.RunStatusSuccess
+	now := time.Now()
+	fromDate := now.Add(-24 * time.Hour)
+	toDate := now
+
+	t.Run("applies all filters and deterministic ordering", func(t *testing.T) {
+		var capturedSQL string
+		var capturedArgs []any
+
+		q := &mockQuerier{
+			queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				capturedSQL = sql
+				capturedArgs = args
+				return &mockEmptyRows{}, nil
+			},
+		}
+
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+
+		filter := domain.RunFilter{
+			ResourceID: &resID,
+			JobID:      &jobID,
+			Status:     &status,
+			FromDate:   &fromDate,
+			ToDate:     &toDate,
+		}
+
+		_, err := repo.ListRuns(context.Background(), orgID, filter)
+		if err != nil {
+			t.Fatalf("expected nil error, got: %v", err)
+		}
+
+		if !strings.Contains(capturedSQL, "WHERE r.organization_id = $1") {
+			t.Errorf("expected SQL to be scoped by organization_id $1")
+		}
+		if !strings.Contains(capturedSQL, "AND j.resource_id = $2") {
+			t.Errorf("expected SQL to filter by resource_id $2")
+		}
+		if !strings.Contains(capturedSQL, "AND r.job_id = $3") {
+			t.Errorf("expected SQL to filter by job_id $3")
+		}
+		if !strings.Contains(capturedSQL, "AND r.status = $4") {
+			t.Errorf("expected SQL to filter by status $4")
+		}
+		if !strings.Contains(capturedSQL, "AND r.created_at >= $5") {
+			t.Errorf("expected SQL to filter by from_date $5")
+		}
+		if !strings.Contains(capturedSQL, "AND r.created_at <= $6") {
+			t.Errorf("expected SQL to filter by to_date $6")
+		}
+		if !strings.Contains(capturedSQL, "ORDER BY r.started_at DESC, r.id DESC") {
+			t.Errorf("expected deterministic ordering by started_at DESC, id DESC")
+		}
+
+		if len(capturedArgs) != 6 {
+			t.Fatalf("expected 6 arguments, got %d", len(capturedArgs))
+		}
+		if capturedArgs[0] != orgID {
+			t.Errorf("arg 0 mismatch: expected orgID %v, got %v", orgID, capturedArgs[0])
+		}
+		if capturedArgs[1] != resID {
+			t.Errorf("arg 1 mismatch: expected resID %v, got %v", resID, capturedArgs[1])
+		}
+		if capturedArgs[2] != jobID {
+			t.Errorf("arg 2 mismatch: expected jobID %v, got %v", jobID, capturedArgs[2])
+		}
+		if capturedArgs[3] != string(status) {
+			t.Errorf("arg 3 mismatch: expected status %v, got %v", string(status), capturedArgs[3])
+		}
+		if capturedArgs[4] != fromDate {
+			t.Errorf("arg 4 mismatch: expected fromDate %v, got %v", fromDate, capturedArgs[4])
+		}
+		if capturedArgs[5] != toDate {
+			t.Errorf("arg 5 mismatch: expected toDate %v, got %v", toDate, capturedArgs[5])
+		}
+	})
+}
+
+func TestPostgresBackupRepository_GetRunDetail_Aggregation(t *testing.T) {
+	orgID := uuid.New()
+	runID := uuid.New()
+	jobID := uuid.New()
+	resID := uuid.New()
+	now := time.Now()
+
+	t.Run("returns aggregated totals and run metadata", func(t *testing.T) {
+		q := &mockQuerier{
+			queryRowFunc: func(ctx context.Context, sql string, args ...any) pgx.Row {
+				if !strings.Contains(sql, "WHERE r.organization_id = $1 AND r.id = $2") {
+					t.Errorf("GetRunDetail must be scoped by organization_id and run_id")
+				}
+				if !strings.Contains(sql, "COALESCE(SUM(a.size_bytes), 0)::bigint AS total_artifact_size_bytes") {
+					t.Errorf("GetRunDetail must aggregate total_artifact_size_bytes")
+				}
+				if !strings.Contains(sql, "COUNT(a.id)::int AS artifacts_count") {
+					t.Errorf("GetRunDetail must count artifacts")
+				}
+
+				return &mockRow{
+					scanFunc: func(dest ...any) error {
+						*(dest[0].(*uuid.UUID)) = runID
+						*(dest[1].(*uuid.UUID)) = orgID
+						*(dest[2].(*uuid.UUID)) = jobID
+						*(dest[3].(*int)) = 1
+						*(dest[4].(*domain.RunStatus)) = domain.RunStatusSuccess
+						*(dest[5].(*time.Time)) = now
+						*(dest[6].(**time.Time)) = &now
+						*(dest[7].(*time.Time)) = now
+						*(dest[8].(*time.Time)) = now.Add(2 * time.Minute)
+						*(dest[9].(**string)) = nil
+						*(dest[10].(*[]byte)) = []byte("[]")
+						*(dest[11].(*time.Time)) = now
+						*(dest[12].(*time.Time)) = now
+						*(dest[13].(*uuid.UUID)) = resID
+						*(dest[14].(*int64)) = 52428800
+						*(dest[15].(*int)) = 2
+						return nil
+					},
+				}
+			},
+		}
+
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+		stat, err := repo.GetRunDetail(context.Background(), orgID, runID)
+		if err != nil {
+			t.Fatalf("expected nil error, got: %v", err)
+		}
+		if stat == nil || stat.Run.ID != runID || stat.ResourceID != resID {
+			t.Fatalf("unexpected run detail data")
+		}
+		if stat.TotalArtifactSizeBytes != 52428800 {
+			t.Errorf("expected total size 52428800, got %d", stat.TotalArtifactSizeBytes)
+		}
+		if stat.ArtifactsCount != 2 {
+			t.Errorf("expected count 2, got %d", stat.ArtifactsCount)
+		}
+	})
+
+	t.Run("returns ErrRunNotFound when pgx.ErrNoRows", func(t *testing.T) {
+		q := &mockQuerier{
+			queryRowFunc: func(ctx context.Context, sql string, args ...any) pgx.Row {
+				return &mockRow{
+					scanFunc: func(dest ...any) error {
+						return pgx.ErrNoRows
+					},
+				}
+			},
+		}
+
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+		_, err := repo.GetRunDetail(context.Background(), orgID, runID)
+		if !errors.Is(err, domain.ErrRunNotFound) {
+			t.Fatalf("expected ErrRunNotFound, got: %v", err)
+		}
+	})
+}
+
+func TestPostgresBackupRepository_ArtifactRepositoryRegression(t *testing.T) {
+	orgID := uuid.New()
+	artID := uuid.New()
+
+	t.Run("GetArtifactByID is organization scoped and returns ErrArtifactNotFound on no rows", func(t *testing.T) {
+		var capturedSQL string
+		var capturedArgs []any
+
+		q := &mockQuerier{
+			queryRowFunc: func(ctx context.Context, sql string, args ...any) pgx.Row {
+				capturedSQL = sql
+				capturedArgs = args
+				return &mockRow{
+					scanFunc: func(dest ...any) error {
+						return pgx.ErrNoRows
+					},
+				}
+			},
+		}
+
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+		_, err := repo.GetArtifactByID(context.Background(), orgID, artID)
+		if !errors.Is(err, domain.ErrArtifactNotFound) {
+			t.Fatalf("expected ErrArtifactNotFound, got: %v", err)
+		}
+
+		if !strings.Contains(capturedSQL, "WHERE organization_id = $1 AND id = $2") {
+			t.Errorf("GetArtifactByID must be scoped by organization_id $1 and id $2, got SQL: %s", capturedSQL)
+		}
+		if len(capturedArgs) != 2 || capturedArgs[0] != orgID || capturedArgs[1] != artID {
+			t.Errorf("unexpected arguments: %v", capturedArgs)
+		}
+	})
+
+	t.Run("ListArtifacts is organization scoped, excludes deleted, and orders deterministically", func(t *testing.T) {
+		var capturedSQL string
+		var capturedArgs []any
+
+		q := &mockQuerier{
+			queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				capturedSQL = sql
+				capturedArgs = args
+				return &mockEmptyRows{}, nil
+			},
+		}
+
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+		_, err := repo.ListArtifacts(context.Background(), orgID)
+		if err != nil {
+			t.Fatalf("expected nil error, got: %v", err)
+		}
+
+		if !strings.Contains(capturedSQL, "WHERE organization_id = $1 AND is_deleted = false") {
+			t.Errorf("ListArtifacts must filter is_deleted = false, got SQL: %s", capturedSQL)
+		}
+		if !strings.Contains(capturedSQL, "ORDER BY created_at DESC, id DESC") {
+			t.Errorf("ListArtifacts must order by created_at DESC, id DESC, got SQL: %s", capturedSQL)
+		}
+		if len(capturedArgs) != 1 || capturedArgs[0] != orgID {
+			t.Errorf("unexpected arguments: %v", capturedArgs)
+		}
+	})
+
+	t.Run("TombstoneArtifact updates is_deleted and deleted_at scoped by organization", func(t *testing.T) {
+		var capturedSQL string
+		var capturedArgs []any
+
+		q := &mockQuerier{
+			execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				capturedSQL = sql
+				capturedArgs = args
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			},
+		}
+
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+		err := repo.TombstoneArtifact(context.Background(), orgID, artID)
+		if err != nil {
+			t.Fatalf("expected nil error, got: %v", err)
+		}
+
+		if !strings.Contains(capturedSQL, "UPDATE backup_artifacts") ||
+			!strings.Contains(capturedSQL, "is_deleted = true") ||
+			!strings.Contains(capturedSQL, "deleted_at = NOW()") ||
+			!strings.Contains(capturedSQL, "WHERE id = $1 AND organization_id = $2") {
+			t.Errorf("TombstoneArtifact query mismatch, got SQL: %s", capturedSQL)
+		}
+
+		if len(capturedArgs) != 2 || capturedArgs[0] != artID || capturedArgs[1] != orgID {
+			t.Errorf("unexpected arguments: %v", capturedArgs)
+		}
+	})
+
+	t.Run("TombstoneArtifact returns ErrArtifactNotFound on 0 rows affected", func(t *testing.T) {
+		q := &mockQuerier{
+			execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				return pgconn.NewCommandTag("UPDATE 0"), nil
+			},
+		}
+
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+		err := repo.TombstoneArtifact(context.Background(), orgID, artID)
+		if !errors.Is(err, domain.ErrArtifactNotFound) {
+			t.Fatalf("expected ErrArtifactNotFound, got: %v", err)
+		}
+	})
+}
+
+type mockEmptyRows struct{}
+
+func (r *mockEmptyRows) Close()                                       {}
+func (r *mockEmptyRows) Err() error                                   { return nil }
+func (r *mockEmptyRows) CommandTag() pgconn.CommandTag                { return pgconn.NewCommandTag("") }
+func (r *mockEmptyRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (r *mockEmptyRows) RawValues() [][]byte                          { return nil }
+func (r *mockEmptyRows) Values() ([]any, error)                       { return nil, nil }
+func (r *mockEmptyRows) Conn() *pgx.Conn                              { return nil }
+func (r *mockEmptyRows) Next() bool                                   { return false }
+func (r *mockEmptyRows) Scan(dest ...any) error                       { return pgx.ErrNoRows }

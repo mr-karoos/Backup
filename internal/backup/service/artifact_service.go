@@ -130,15 +130,15 @@ func (s *ArtifactService) OpenArtifactDownload(
 	return artifact, reader, nil
 }
 
-// RecordDownloadAudit logs a successful download event.
+// RecordDownloadAudit logs a successful download event and returns an error if audit recording fails.
 func (s *ArtifactService) RecordDownloadAudit(
 	ctx context.Context,
 	orgID, userID, artifactID uuid.UUID,
 	sizeBytes int64,
 	clientIP, userAgent string,
-) {
+) error {
 	if s.auditRecorder == nil {
-		return
+		return nil
 	}
 
 	metaObj := map[string]any{
@@ -167,7 +167,14 @@ func (s *ArtifactService) RecordDownloadAudit(
 		Metadata:       metaBytes,
 	}
 
-	_ = s.auditRecorder.Record(ctx, entry)
+	if err := s.auditRecorder.Record(ctx, entry); err != nil {
+		s.logger.Error("failed recording audit log for artifact download",
+			slog.String("org_id", orgID.String()),
+			slog.String("artifact_id", artifactID.String()),
+		)
+		return err
+	}
+	return nil
 }
 
 // DeleteArtifact performs physical deletion first, then tombstones metadata, and records audit event upon success.
@@ -242,7 +249,12 @@ func (s *ArtifactService) DeleteArtifact(
 			UserAgent:      uaPtr,
 			Metadata:       metaBytes,
 		}
-		_ = s.auditRecorder.Record(ctx, entry)
+		if err := s.auditRecorder.Record(ctx, entry); err != nil {
+			s.logger.Error("failed recording audit log for artifact deletion",
+				slog.String("org_id", orgID.String()),
+				slog.String("artifact_id", artifactID.String()),
+			)
+		}
 	}
 
 	return nil

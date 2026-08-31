@@ -96,7 +96,7 @@ type mockArtifactManager struct {
 	listArtifactsFunc        func(ctx context.Context, role orgDomain.Role, orgID uuid.UUID) ([]*domain.BackupArtifact, error)
 	getArtifactFunc          func(ctx context.Context, role orgDomain.Role, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, error)
 	openArtifactDownloadFunc func(ctx context.Context, role orgDomain.Role, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, io.ReadCloser, error)
-	recordDownloadAuditFunc  func(ctx context.Context, orgID, userID, artifactID uuid.UUID, sizeBytes int64, clientIP, userAgent string)
+	recordDownloadAuditFunc  func(ctx context.Context, orgID, userID, artifactID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error
 	deleteArtifactFunc       func(ctx context.Context, role orgDomain.Role, orgID, userID, artifactID uuid.UUID, clientIP, userAgent string) error
 }
 
@@ -121,10 +121,11 @@ func (m *mockArtifactManager) OpenArtifactDownload(ctx context.Context, role org
 	return nil, nil, errors.New("not implemented")
 }
 
-func (m *mockArtifactManager) RecordDownloadAudit(ctx context.Context, orgID, userID, artifactID uuid.UUID, sizeBytes int64, clientIP, userAgent string) {
+func (m *mockArtifactManager) RecordDownloadAudit(ctx context.Context, orgID, userID, artifactID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error {
 	if m.recordDownloadAuditFunc != nil {
-		m.recordDownloadAuditFunc(ctx, orgID, userID, artifactID, sizeBytes, clientIP, userAgent)
+		return m.recordDownloadAuditFunc(ctx, orgID, userID, artifactID, sizeBytes, clientIP, userAgent)
 	}
+	return nil
 }
 
 func (m *mockArtifactManager) DeleteArtifact(ctx context.Context, role orgDomain.Role, orgID, userID, artifactID uuid.UUID, clientIP, userAgent string) error {
@@ -1015,7 +1016,7 @@ func TestHandler_BackupArtifacts(t *testing.T) {
 		}
 	})
 
-	t.Run("GET /api/v1/backup-artifacts/{id} returns 200 OK", func(t *testing.T) {
+	t.Run("GET /api/v1/backup-artifacts/{id} returns 200 OK with logical safe filename", func(t *testing.T) {
 		mockArt := &mockArtifactManager{
 			getArtifactFunc: func(ctx context.Context, role orgDomain.Role, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
 				return &domain.BackupArtifact{
@@ -1061,6 +1062,62 @@ func TestHandler_BackupArtifacts(t *testing.T) {
 		if _, exists := item["storage_reference"]; exists {
 			t.Errorf("security violation: storage_reference exposed in artifact detail")
 		}
+		if item["artifact_name"] != "mysql_prod_db.sql.gz" {
+			t.Errorf("expected logical artifact_name mysql_prod_db.sql.gz, got %v", item["artifact_name"])
+		}
+	})
+
+	t.Run("GET /api/v1/backup-artifacts formats website target paths to safe filenames", func(t *testing.T) {
+		mockArt := &mockArtifactManager{
+			listArtifactsFunc: func(ctx context.Context, role orgDomain.Role, oID uuid.UUID) ([]*domain.BackupArtifact, error) {
+				return []*domain.BackupArtifact{
+					{
+						ID:                 artID,
+						OrganizationID:     oID,
+						RunID:              runID,
+						ResourceID:         resID,
+						ArtifactType:       domain.ArtifactTypeFilesArchive,
+						Format:             domain.ArtifactFormatTarGzip,
+						TargetName:         "/var/www/example/public_html",
+						StorageReference:   "/srv/backup-platform/artifacts/secret_uuid.tar.gz",
+						SizeBytes:          2048,
+						ChecksumAlgorithm:  "sha256",
+						ChecksumHash:       "hash456",
+						VerificationStatus: domain.VerificationStatusVerified,
+						CreatedAt:          now,
+					},
+				}, nil
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, mockArt, nil)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts", nil)
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleMember,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.ListBackupArtifacts(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var rawEnvelope map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &rawEnvelope)
+		dataList := rawEnvelope["data"].([]any)
+		item := dataList[0].(map[string]any)
+		if item["artifact_name"] != "public_html.tar.gz" {
+			t.Errorf("expected logical artifact_name public_html.tar.gz, got %v", item["artifact_name"])
+		}
+		if strings.Contains(item["artifact_name"].(string), "/var/www") || strings.Contains(item["artifact_name"].(string), "secret_uuid") {
+			t.Errorf("security violation: raw path or storage reference leaked in artifact_name: %v", item["artifact_name"])
+		}
 	})
 }
 
@@ -1082,8 +1139,9 @@ func TestHandler_DownloadBackupArtifact(t *testing.T) {
 				}
 				return art, io.NopCloser(bytes.NewReader(payload)), nil
 			},
-			recordDownloadAuditFunc: func(ctx context.Context, oID, uID, aID uuid.UUID, sizeBytes int64, clientIP, userAgent string) {
+			recordDownloadAuditFunc: func(ctx context.Context, oID, uID, aID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error {
 				auditRecorded = true
+				return nil
 			},
 		}
 
@@ -1121,6 +1179,122 @@ func TestHandler_DownloadBackupArtifact(t *testing.T) {
 
 		if !auditRecorded {
 			t.Errorf("expected audit event to be recorded upon successful download")
+		}
+	})
+
+	t.Run("GET /api/v1/backup-artifacts/{id}/download website file artifact has matching Content-Disposition", func(t *testing.T) {
+		mockArt := &mockArtifactManager{
+			openArtifactDownloadFunc: func(ctx context.Context, role orgDomain.Role, oID, aID uuid.UUID) (*domain.BackupArtifact, io.ReadCloser, error) {
+				art := &domain.BackupArtifact{
+					ID:         aID,
+					Format:     domain.ArtifactFormatTarGzip,
+					TargetName: "/var/www/example/public_html",
+					SizeBytes:  int64(len(payload)),
+				}
+				return art, io.NopCloser(bytes.NewReader(payload)), nil
+			},
+			recordDownloadAuditFunc: func(ctx context.Context, oID, uID, aID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error {
+				return nil
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, mockArt, nil)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
+		req.SetPathValue("id", artID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleMember,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.DownloadBackupArtifact(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rec.Code)
+		}
+
+		disp := rec.Header().Get("Content-Disposition")
+		if !strings.Contains(disp, `filename="public_html.tar.gz"`) {
+			t.Errorf("expected Content-Disposition filename public_html.tar.gz, got %s", disp)
+		}
+	})
+
+	t.Run("interrupted stream DOES NOT record download audit", func(t *testing.T) {
+		var auditAttempted bool
+		mockArt := &mockArtifactManager{
+			openArtifactDownloadFunc: func(ctx context.Context, role orgDomain.Role, oID, aID uuid.UUID) (*domain.BackupArtifact, io.ReadCloser, error) {
+				art := &domain.BackupArtifact{
+					ID:         aID,
+					Format:     domain.ArtifactFormatSQLGzip,
+					TargetName: "prod_db",
+					SizeBytes:  10000, // Declared size is larger than actual reader payload
+				}
+				// Reader provides only 5 bytes, simulating an interrupted / short stream
+				return art, io.NopCloser(bytes.NewReader([]byte("short"))), nil
+			},
+			recordDownloadAuditFunc: func(ctx context.Context, oID, uID, aID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error {
+				auditAttempted = true
+				return nil
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, mockArt, nil)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
+		req.SetPathValue("id", artID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleMember,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.DownloadBackupArtifact(rec, req)
+
+		if auditAttempted {
+			t.Errorf("interrupted or incomplete download MUST NOT trigger download audit")
+		}
+	})
+
+	t.Run("audit failure during download is handled safely without crashing", func(t *testing.T) {
+		mockArt := &mockArtifactManager{
+			openArtifactDownloadFunc: func(ctx context.Context, role orgDomain.Role, oID, aID uuid.UUID) (*domain.BackupArtifact, io.ReadCloser, error) {
+				art := &domain.BackupArtifact{
+					ID:         aID,
+					Format:     domain.ArtifactFormatSQLGzip,
+					TargetName: "prod_db",
+					SizeBytes:  int64(len(payload)),
+				}
+				return art, io.NopCloser(bytes.NewReader(payload)), nil
+			},
+			recordDownloadAuditFunc: func(ctx context.Context, oID, uID, aID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error {
+				return errors.New("audit log database write failed")
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, mockArt, nil)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
+		req.SetPathValue("id", artID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleMember,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.DownloadBackupArtifact(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK since stream succeeded before audit recording, got %d", rec.Code)
 		}
 	})
 

@@ -1,6 +1,9 @@
 package httpapi
 
 import (
+	"fmt"
+	"path"
+	"strings"
 	"time"
 
 	"backup-platform/internal/backup/domain"
@@ -282,7 +285,7 @@ func toBackupArtifactResponse(a *domain.BackupArtifact) *BackupArtifactResponse 
 		ID:                 a.ID,
 		RunID:              a.RunID,
 		ResourceID:         a.ResourceID,
-		ArtifactName:       a.TargetName,
+		ArtifactName:       SafeArtifactFilename(a.TargetName, a.Format, a.ID),
 		SizeBytes:          a.SizeBytes,
 		ChecksumSHA256:     a.ChecksumHash,
 		CompressionType:    compType,
@@ -290,4 +293,38 @@ func toBackupArtifactResponse(a *domain.BackupArtifact) *BackupArtifactResponse 
 		VerifiedAt:         a.VerifiedAt,
 		CreatedAt:          a.CreatedAt,
 	}
+}
+
+// SafeArtifactFilename generates a deterministic, safe, logical filename for a backup artifact.
+// It maps database targets (e.g. "prod_db" -> "prod_db.sql.gz") and website file paths
+// (e.g. "/var/www/example/public_html" -> "public_html.tar.gz") without exposing internal
+// storage filesystem paths, storage references, or directory structures.
+func SafeArtifactFilename(targetName string, format domain.ArtifactFormat, artifactID uuid.UUID) string {
+	ext := ".bin"
+	switch format {
+	case domain.ArtifactFormatSQLGzip:
+		ext = ".sql.gz"
+	case domain.ArtifactFormatTarGzip:
+		ext = ".tar.gz"
+	}
+
+	clean := strings.TrimSpace(targetName)
+	clean = strings.ReplaceAll(clean, "\\", "/")
+	clean = path.Base(clean)
+	clean = strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
+			return r
+		}
+		return '_'
+	}, clean)
+
+	clean = strings.Trim(clean, "._-")
+	if clean == "" {
+		return fmt.Sprintf("backup_%s%s", artifactID.String(), ext)
+	}
+
+	if strings.HasSuffix(clean, ext) {
+		return clean
+	}
+	return fmt.Sprintf("%s%s", clean, ext)
 }

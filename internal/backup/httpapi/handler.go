@@ -9,7 +9,6 @@ import (
 	"mime"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -54,7 +53,7 @@ type BackupArtifactManager interface {
 	ListArtifacts(ctx context.Context, role orgDomain.Role, orgID uuid.UUID) ([]*domain.BackupArtifact, error)
 	GetArtifact(ctx context.Context, role orgDomain.Role, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, error)
 	OpenArtifactDownload(ctx context.Context, role orgDomain.Role, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, io.ReadCloser, error)
-	RecordDownloadAudit(ctx context.Context, orgID, userID, artifactID uuid.UUID, sizeBytes int64, clientIP, userAgent string)
+	RecordDownloadAudit(ctx context.Context, orgID, userID, artifactID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error
 	DeleteArtifact(ctx context.Context, role orgDomain.Role, orgID, userID, artifactID uuid.UUID, clientIP, userAgent string) error
 }
 
@@ -708,7 +707,7 @@ func (h *Handler) DownloadBackupArtifact(w http.ResponseWriter, r *http.Request)
 	}
 	defer reader.Close()
 
-	safeName := safeDownloadFilename(artifact.TargetName, artifact.Format, artifact.ID)
+	safeName := SafeArtifactFilename(artifact.TargetName, artifact.Format, artifact.ID)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, safeName))
 	w.Header().Set("Content-Type", "application/gzip")
 	if artifact.SizeBytes > 0 {
@@ -724,7 +723,12 @@ func (h *Handler) DownloadBackupArtifact(w http.ResponseWriter, r *http.Request)
 
 	clientIP := extractClientIP(r)
 	userAgent := sanitizeUserAgent(r.UserAgent())
-	h.artifactService.RecordDownloadAudit(r.Context(), tenantCtx.OrganizationID, tenantCtx.UserID, artifact.ID, artifact.SizeBytes, clientIP, userAgent)
+	if auditErr := h.artifactService.RecordDownloadAudit(r.Context(), tenantCtx.OrganizationID, tenantCtx.UserID, artifact.ID, artifact.SizeBytes, clientIP, userAgent); auditErr != nil {
+		reqLogger.Error("failed recording audit log for artifact download",
+			slog.String("org_id", tenantCtx.OrganizationID.String()),
+			slog.String("artifact_id", artifact.ID.String()),
+		)
+	}
 }
 
 // DeleteBackupArtifact handles DELETE /api/v1/backup-artifacts/{id}.
@@ -786,33 +790,4 @@ func sanitizeUserAgent(ua string) string {
 		return string(runes[:255])
 	}
 	return ua
-}
-
-func safeDownloadFilename(targetName string, format domain.ArtifactFormat, artifactID uuid.UUID) string {
-	ext := ".bin"
-	switch format {
-	case domain.ArtifactFormatSQLGzip:
-		ext = ".sql.gz"
-	case domain.ArtifactFormatTarGzip:
-		ext = ".tar.gz"
-	}
-
-	clean := strings.TrimSpace(targetName)
-	clean = filepath.Base(clean)
-	clean = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
-			return r
-		}
-		return '_'
-	}, clean)
-
-	clean = strings.Trim(clean, "._-")
-	if clean == "" {
-		return fmt.Sprintf("backup_%s%s", artifactID.String(), ext)
-	}
-
-	if strings.HasSuffix(clean, ext) {
-		return clean
-	}
-	return fmt.Sprintf("%s%s", clean, ext)
 }

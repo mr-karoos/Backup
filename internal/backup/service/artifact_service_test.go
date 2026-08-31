@@ -366,4 +366,79 @@ func TestArtifactService_DeleteArtifact(t *testing.T) {
 			t.Fatalf("expected ErrUnauthorizedRole for member, got: %v", err)
 		}
 	})
+
+	t.Run("completes delete successfully even if audit recording fails (no fake rollback)", func(t *testing.T) {
+		repo := &mockArtifactRepo{
+			getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+				return &domain.BackupArtifact{
+					ID:               aID,
+					OrganizationID:   oID,
+					StorageReference: "local://org/db.sql.gz",
+					TargetName:       "db1",
+					SizeBytes:        5000,
+					IsDeleted:        false,
+				}, nil
+			},
+			tombstoneArtifactFunc: func(ctx context.Context, oID, aID uuid.UUID) error {
+				return nil
+			},
+		}
+
+		stor := &mockStorageProvider{
+			deleteArtifactFunc: func(ctx context.Context, storageRef string) error {
+				return nil
+			},
+		}
+
+		auditSvc := &mockAuditService{
+			recordFunc: func(ctx context.Context, entry *auditDomain.AuditLog) error {
+				return errors.New("audit database unavailable")
+			},
+		}
+
+		svc := NewArtifactService(repo, stor, auditSvc, nil)
+		err := svc.DeleteArtifact(context.Background(), orgDomain.RoleAdmin, orgID, userID, artID, "127.0.0.1", "test")
+		if err != nil {
+			t.Fatalf("expected delete to succeed without fake rollback when audit fails, got: %v", err)
+		}
+	})
+}
+
+func TestArtifactService_RecordDownloadAudit(t *testing.T) {
+	orgID := uuid.New()
+	userID := uuid.New()
+	artID := uuid.New()
+
+	t.Run("records download audit successfully", func(t *testing.T) {
+		var recorded *auditDomain.AuditLog
+		auditSvc := &mockAuditService{
+			recordFunc: func(ctx context.Context, entry *auditDomain.AuditLog) error {
+				recorded = entry
+				return nil
+			},
+		}
+
+		svc := NewArtifactService(&mockArtifactRepo{}, &mockStorageProvider{}, auditSvc, nil)
+		err := svc.RecordDownloadAudit(context.Background(), orgID, userID, artID, 4096, "192.168.1.1", "curl/8.0")
+		if err != nil {
+			t.Fatalf("expected nil error, got: %v", err)
+		}
+		if recorded == nil || recorded.Action != auditDomain.ActionBackupDownload {
+			t.Fatalf("expected download audit record, got: %+v", recorded)
+		}
+	})
+
+	t.Run("returns error and logs when audit recording fails", func(t *testing.T) {
+		auditSvc := &mockAuditService{
+			recordFunc: func(ctx context.Context, entry *auditDomain.AuditLog) error {
+				return errors.New("audit db failure")
+			},
+		}
+
+		svc := NewArtifactService(&mockArtifactRepo{}, &mockStorageProvider{}, auditSvc, nil)
+		err := svc.RecordDownloadAudit(context.Background(), orgID, userID, artID, 4096, "192.168.1.1", "curl/8.0")
+		if err == nil {
+			t.Fatalf("expected error when audit recorder fails")
+		}
+	})
 }
