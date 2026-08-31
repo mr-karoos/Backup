@@ -884,3 +884,294 @@ func TestRetentionProcessor_TenantAndPlanIsolation(t *testing.T) {
 		t.Errorf("artB1 in org B must NOT be touched by org A retention processing")
 	}
 }
+
+func TestRetentionProcessor_FailClosedDependencies(t *testing.T) {
+	orgID := uuid.New()
+	planID := uuid.New()
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+
+	repo := newMockRepo()
+	repo.plans[planID] = &domain.BackupPlan{
+		ID:             planID,
+		OrganizationID: orgID,
+		RetentionCount: intPtr(1),
+	}
+
+	r0Ended := now.Add(-1 * time.Hour)
+	r1Ended := now.Add(-2 * time.Hour)
+	run0 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &r0Ended}
+	run1 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &r1Ended}
+
+	art1 := &domain.BackupArtifact{
+		ID:               uuid.New(),
+		OrganizationID:   orgID,
+		RunID:            run1.ID,
+		StorageReference: "local://art1",
+		SizeBytes:        1000,
+		IsDeleted:        false,
+	}
+	repo.artifacts[run1.ID] = []*domain.BackupArtifact{art1}
+	repo.successfulRuns[planID] = []*domain.BackupRun{run0, run1}
+
+	t.Run("nil storage provider fails closed without tombstoning or auditing", func(t *testing.T) {
+		audit := &mockAuditRecorder{}
+		proc := NewProcessor(repo, nil, audit, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		proc.SetNowFunc(func() time.Time { return now })
+
+		summary, err := proc.ApplyAfterSuccessfulRun(context.Background(), orgID, &planID, run0.ID)
+		if err == nil {
+			t.Fatalf("expected error when storageProvider is nil, got nil")
+		}
+
+		if repo.tombstoned[art1.ID] {
+			t.Errorf("artifact must NOT be tombstoned when storageProvider is nil")
+		}
+		if len(audit.logs) != 0 {
+			t.Errorf("audit log must NOT be created when storageProvider is nil")
+		}
+		if summary.ArtifactsDeleted != 0 {
+			t.Errorf("expected 0 deleted artifacts, got %d", summary.ArtifactsDeleted)
+		}
+	})
+
+	t.Run("nil audit recorder fails closed without physical deletion or tombstone", func(t *testing.T) {
+		store := newMockStorage()
+		proc := NewProcessor(repo, store, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		proc.SetNowFunc(func() time.Time { return now })
+
+		summary, err := proc.ApplyAfterSuccessfulRun(context.Background(), orgID, &planID, run0.ID)
+		if err == nil {
+			t.Fatalf("expected error when auditRecorder is nil, got nil")
+		}
+
+		if len(store.deleted) != 0 {
+			t.Errorf("physical delete must NOT be executed when auditRecorder is nil")
+		}
+		if repo.tombstoned[art1.ID] {
+			t.Errorf("artifact must NOT be tombstoned when auditRecorder is nil")
+		}
+		if summary.ArtifactsDeleted != 0 {
+			t.Errorf("expected 0 deleted artifacts, got %d", summary.ArtifactsDeleted)
+		}
+	})
+}
+
+func TestRetentionProcessor_NilEndedAtNeverExpires(t *testing.T) {
+	orgID := uuid.New()
+	planID := uuid.New()
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+
+	t.Run("days-only policy with nil ended_at never expires", func(t *testing.T) {
+		repo := newMockRepo()
+		repo.plans[planID] = &domain.BackupPlan{
+			ID:             planID,
+			OrganizationID: orgID,
+			RetentionCount: nil,
+			RetentionDays:  intPtr(7),
+		}
+
+		r0Ended := now.Add(-1 * time.Hour)
+		run0 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &r0Ended}
+		runMalformed := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: nil}
+
+		artMalformed := &domain.BackupArtifact{
+			ID:               uuid.New(),
+			OrganizationID:   orgID,
+			RunID:            runMalformed.ID,
+			StorageReference: "local://malformed",
+			SizeBytes:        1000,
+			IsDeleted:        false,
+		}
+		repo.artifacts[runMalformed.ID] = []*domain.BackupArtifact{artMalformed}
+		repo.successfulRuns[planID] = []*domain.BackupRun{run0, runMalformed}
+
+		store := newMockStorage()
+		audit := &mockAuditRecorder{}
+		proc := NewProcessor(repo, store, audit, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		proc.SetNowFunc(func() time.Time { return now })
+
+		summary, err := proc.ApplyAfterSuccessfulRun(context.Background(), orgID, &planID, run0.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if summary.ArtifactsDeleted != 0 || repo.tombstoned[artMalformed.ID] {
+			t.Errorf("run with nil EndedAt must NEVER be deleted under days-only policy")
+		}
+	})
+
+	t.Run("count and days policy with nil ended_at never expires", func(t *testing.T) {
+		repo := newMockRepo()
+		repo.plans[planID] = &domain.BackupPlan{
+			ID:             planID,
+			OrganizationID: orgID,
+			RetentionCount: intPtr(1),
+			RetentionDays:  intPtr(7),
+		}
+
+		r0Ended := now.Add(-1 * time.Hour)
+		run0 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &r0Ended}
+		runMalformed := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: nil}
+
+		artMalformed := &domain.BackupArtifact{
+			ID:               uuid.New(),
+			OrganizationID:   orgID,
+			RunID:            runMalformed.ID,
+			StorageReference: "local://malformed2",
+			SizeBytes:        1000,
+			IsDeleted:        false,
+		}
+		repo.artifacts[runMalformed.ID] = []*domain.BackupArtifact{artMalformed}
+		repo.successfulRuns[planID] = []*domain.BackupRun{run0, runMalformed}
+
+		store := newMockStorage()
+		audit := &mockAuditRecorder{}
+		proc := NewProcessor(repo, store, audit, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		proc.SetNowFunc(func() time.Time { return now })
+
+		summary, err := proc.ApplyAfterSuccessfulRun(context.Background(), orgID, &planID, run0.ID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if summary.ArtifactsDeleted != 0 || repo.tombstoned[artMalformed.ID] {
+			t.Errorf("run with nil EndedAt must NEVER be deleted under count+days policy")
+		}
+	})
+}
+
+func TestRetentionProcessor_AuditWriteFailure_PreservesCleanupAndContinues(t *testing.T) {
+	orgID := uuid.New()
+	planID := uuid.New()
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+
+	repo := newMockRepo()
+	repo.plans[planID] = &domain.BackupPlan{
+		ID:             planID,
+		OrganizationID: orgID,
+		RetentionCount: intPtr(1), // keep 1
+	}
+
+	r0Ended := now.Add(-1 * time.Hour)
+	r1Ended := now.Add(-2 * time.Hour)
+	r2Ended := now.Add(-3 * time.Hour)
+
+	run0 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &r0Ended}
+	run1 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &r1Ended}
+	run2 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &r2Ended}
+
+	art1 := &domain.BackupArtifact{
+		ID:               uuid.New(),
+		OrganizationID:   orgID,
+		RunID:            run1.ID,
+		StorageReference: "local://art1",
+		SizeBytes:        1000,
+		IsDeleted:        false,
+	}
+	art2 := &domain.BackupArtifact{
+		ID:               uuid.New(),
+		OrganizationID:   orgID,
+		RunID:            run2.ID,
+		StorageReference: "local://art2",
+		SizeBytes:        2000,
+		IsDeleted:        false,
+	}
+
+	repo.artifacts[run1.ID] = []*domain.BackupArtifact{art1}
+	repo.artifacts[run2.ID] = []*domain.BackupArtifact{art2}
+	repo.successfulRuns[planID] = []*domain.BackupRun{run0, run1, run2}
+
+	store := newMockStorage()
+	audit := &mockAuditRecorder{recordErr: errors.New("audit db table locked")}
+	proc := NewProcessor(repo, store, audit, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	proc.SetNowFunc(func() time.Time { return now })
+
+	summary, err := proc.ApplyAfterSuccessfulRun(context.Background(), orgID, &planID, run0.ID)
+	if err != nil {
+		t.Fatalf("unexpected error returned (audit failures must be handled gracefully): %v", err)
+	}
+
+	// 1. Both artifacts physically deleted
+	if len(store.deleted) != 2 {
+		t.Fatalf("expected 2 physical deletions, got %d", len(store.deleted))
+	}
+	// 2. Both artifacts tombstoned in DB
+	if !repo.tombstoned[art1.ID] || !repo.tombstoned[art2.ID] {
+		t.Errorf("both artifacts must be tombstoned despite audit write failure")
+	}
+	// 3. Deletions counted in summary
+	if summary.ArtifactsDeleted != 2 {
+		t.Errorf("expected 2 deleted artifacts in summary, got %d", summary.ArtifactsDeleted)
+	}
+}
+
+func TestRetentionProcessor_SameOrganizationPlanIsolation(t *testing.T) {
+	orgID := uuid.New()
+	planA := uuid.New()
+	planB := uuid.New()
+	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+
+	repo := newMockRepo()
+	repo.plans[planA] = &domain.BackupPlan{
+		ID:             planA,
+		OrganizationID: orgID,
+		RetentionCount: intPtr(1),
+	}
+	repo.plans[planB] = &domain.BackupPlan{
+		ID:             planB,
+		OrganizationID: orgID,
+		RetentionCount: intPtr(1),
+	}
+
+	rA0Ended := now.Add(-1 * time.Hour)
+	rA1Ended := now.Add(-2 * time.Hour)
+	runA0 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &rA0Ended}
+	runA1 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &rA1Ended}
+
+	rB0Ended := now.Add(-1 * time.Hour)
+	rB1Ended := now.Add(-2 * time.Hour)
+	runB0 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &rB0Ended}
+	runB1 := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, Status: domain.RunStatusSuccess, EndedAt: &rB1Ended}
+
+	artA1 := &domain.BackupArtifact{ID: uuid.New(), OrganizationID: orgID, RunID: runA1.ID, StorageReference: "local://artA1"}
+	artB1 := &domain.BackupArtifact{ID: uuid.New(), OrganizationID: orgID, RunID: runB1.ID, StorageReference: "local://artB1"}
+
+	repo.artifacts[runA1.ID] = []*domain.BackupArtifact{artA1}
+	repo.artifacts[runB1.ID] = []*domain.BackupArtifact{artB1}
+
+	repo.successfulRuns[planA] = []*domain.BackupRun{runA0, runA1}
+	repo.successfulRuns[planB] = []*domain.BackupRun{runB0, runB1}
+
+	store := newMockStorage()
+	audit := &mockAuditRecorder{}
+	proc := NewProcessor(repo, store, audit, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	proc.SetNowFunc(func() time.Time { return now })
+
+	// Execute retention for Plan A only
+	summaryA, err := proc.ApplyAfterSuccessfulRun(context.Background(), orgID, &planA, runA0.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if summaryA.ArtifactsDeleted != 1 {
+		t.Errorf("expected 1 deleted artifact for plan A, got %d", summaryA.ArtifactsDeleted)
+	}
+	if !repo.tombstoned[artA1.ID] {
+		t.Errorf("artA1 belonging to Plan A should be tombstoned")
+	}
+
+	// Plan B artifacts within the SAME organization must NOT be touched
+	if repo.tombstoned[artB1.ID] {
+		t.Errorf("artB1 belonging to Plan B must NOT be tombstoned when running retention for Plan A")
+	}
+	for _, ref := range store.deleted {
+		if ref == "local://artB1" {
+			t.Errorf("artB1 belonging to Plan B must NOT be physically deleted")
+		}
+	}
+	for _, l := range audit.logs {
+		if l.EntityID != nil && *l.EntityID == artB1.ID {
+			t.Errorf("artB1 belonging to Plan B must NOT be audited in Plan A retention")
+		}
+	}
+}

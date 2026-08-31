@@ -2641,4 +2641,55 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 			t.Errorf("expected retention NOT to be called on failed backup pipeline, got %d calls", retManager.calls)
 		}
 	})
+
+	t.Run("finalize failure never calls retention and invokes worker cleanup", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		job := &domain.BackupJob{
+			ID:             uuid.New(),
+			OrganizationID: orgID,
+			ResourceID:     resID,
+			BackupPlanID:   &planID,
+			TriggerType:    domain.TriggerTypeScheduled,
+			BackupType:     domain.BackupTypeMySQLDatabase,
+			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:         domain.JobStatusPending,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		repo.jobs[job.ID] = job
+		repo.finalizeErr = errors.New("db connection lost during finalize")
+
+		capReg := connector.NewBackupCapabilityRegistry()
+		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{sqlDump: "-- MySQL dump\nCREATE DATABASE testdb;\n"})
+
+		retManager := &fakeRetentionManager{}
+		workerPool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			capReg,
+			nil,
+			engine.NewDirectStreamBackupEngine(),
+			storageProvider,
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			slog.Default(),
+		)
+		workerPool.SetRetentionManager(retManager)
+
+		workerPool.processNextAvailableJob(context.Background(), 1)
+
+		if retManager.calls != 0 {
+			t.Errorf("expected retention NOT to be called when FinalizeRunAndJob fails, got %d calls", retManager.calls)
+		}
+
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		for _, art := range repo.artifacts {
+			if !art.IsDeleted {
+				t.Errorf("artifact should be cleaned up by worker failure cleanup when finalize fails")
+			}
+		}
+	})
 }

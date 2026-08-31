@@ -137,6 +137,11 @@ func (p *Processor) ApplyAfterSuccessfulRun(
 			continue
 		}
 
+		// Defensive: Successful runs without an ended_at timestamp must never expire
+		if run.EndedAt == nil {
+			continue
+		}
+
 		keepByCount := false
 		if plan.RetentionCount != nil && idx < *plan.RetentionCount {
 			keepByCount = true
@@ -172,6 +177,23 @@ func (p *Processor) ApplyAfterSuccessfulRun(
 		return summary, nil
 	}
 
+	// Fail closed: Mandatory operational dependencies must be present before executing cleanup
+	if p.storageProvider == nil {
+		p.logger.Error("storage provider dependency is missing; aborting retention cleanup",
+			slog.String("org_id", orgID.String()),
+			slog.String("plan_id", planID.String()),
+		)
+		return summary, errors.New("retention cleanup aborted: missing storage provider")
+	}
+
+	if p.auditRecorder == nil {
+		p.logger.Error("audit recorder dependency is missing; aborting retention cleanup",
+			slog.String("org_id", orgID.String()),
+			slog.String("plan_id", planID.String()),
+		)
+		return summary, errors.New("retention cleanup aborted: missing audit recorder")
+	}
+
 	for _, run := range candidateRuns {
 		artifacts, err := p.repo.GetRunArtifacts(ctx, orgID, run.ID)
 		if err != nil {
@@ -190,16 +212,14 @@ func (p *Processor) ApplyAfterSuccessfulRun(
 			summary.ArtifactsAttempted++
 
 			// 1. Physical file deletion first
-			if p.storageProvider != nil {
-				delErr := p.storageProvider.DeleteArtifact(ctx, art.StorageReference)
-				if delErr != nil && !errors.Is(delErr, storage.ErrArtifactNotFound) {
-					p.logger.Warn("failed to delete artifact physical file during retention",
-						slog.String("org_id", orgID.String()),
-						slog.String("artifact_id", art.ID.String()),
-					)
-					// DO NOT tombstone in database or emit audit on physical deletion failure
-					continue
-				}
+			delErr := p.storageProvider.DeleteArtifact(ctx, art.StorageReference)
+			if delErr != nil && !errors.Is(delErr, storage.ErrArtifactNotFound) {
+				p.logger.Warn("failed to delete artifact physical file during retention",
+					slog.String("org_id", orgID.String()),
+					slog.String("artifact_id", art.ID.String()),
+				)
+				// DO NOT tombstone in database or emit audit on physical deletion failure
+				continue
 			}
 
 			// 2. Database tombstone: is_deleted = true, deleted_at = NOW()
@@ -215,41 +235,39 @@ func (p *Processor) ApplyAfterSuccessfulRun(
 
 			summary.ArtifactsDeleted++
 
-			// 3. Record retention audit event
-			if p.auditRecorder != nil {
-				metaObj := map[string]any{
-					"artifact_id":    art.ID.String(),
-					"backup_plan_id": plan.ID.String(),
-					"run_id":         run.ID.String(),
-					"size_bytes":     art.SizeBytes,
-				}
-				if plan.RetentionCount != nil {
-					metaObj["retention_count"] = *plan.RetentionCount
-				}
-				if plan.RetentionDays != nil {
-					metaObj["retention_days"] = *plan.RetentionDays
-				}
-				metaBytes, _ := json.Marshal(metaObj)
+			// 3. Record retention audit event (best-effort preservation on audit recording failure)
+			metaObj := map[string]any{
+				"artifact_id":    art.ID.String(),
+				"backup_plan_id": plan.ID.String(),
+				"run_id":         run.ID.String(),
+				"size_bytes":     art.SizeBytes,
+			}
+			if plan.RetentionCount != nil {
+				metaObj["retention_count"] = *plan.RetentionCount
+			}
+			if plan.RetentionDays != nil {
+				metaObj["retention_days"] = *plan.RetentionDays
+			}
+			metaBytes, _ := json.Marshal(metaObj)
 
-				auditLog := &auditDomain.AuditLog{
-					ID:             uuid.New(),
-					OrganizationID: &orgID,
-					UserID:         nil, // system-generated
-					Action:         auditDomain.ActionRetentionCleanup,
-					EntityType:     auditDomain.EntityTypeBackupArtifact,
-					EntityID:       &art.ID,
-					IPAddress:      nil,
-					UserAgent:      nil,
-					Metadata:       metaBytes,
-					CreatedAt:      p.nowFunc(),
-				}
+			auditLog := &auditDomain.AuditLog{
+				ID:             uuid.New(),
+				OrganizationID: &orgID,
+				UserID:         nil, // system-generated
+				Action:         auditDomain.ActionRetentionCleanup,
+				EntityType:     auditDomain.EntityTypeBackupArtifact,
+				EntityID:       &art.ID,
+				IPAddress:      nil,
+				UserAgent:      nil,
+				Metadata:       metaBytes,
+				CreatedAt:      p.nowFunc(),
+			}
 
-				if auditErr := p.auditRecorder.Record(ctx, auditLog); auditErr != nil {
-					p.logger.Warn("failed recording audit log for retention cleanup",
-						slog.String("org_id", orgID.String()),
-						slog.String("artifact_id", art.ID.String()),
-					)
-				}
+			if auditErr := p.auditRecorder.Record(ctx, auditLog); auditErr != nil {
+				p.logger.Warn("failed recording audit log for retention cleanup",
+					slog.String("org_id", orgID.String()),
+					slog.String("artifact_id", art.ID.String()),
+				)
 			}
 		}
 	}

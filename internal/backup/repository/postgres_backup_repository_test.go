@@ -938,7 +938,8 @@ func TestPostgresBackupRepository_ArtifactRepositoryRegression(t *testing.T) {
 
 		if !strings.Contains(capturedSQL, "WHERE r.organization_id = $1") ||
 			!strings.Contains(capturedSQL, "AND j.backup_plan_id = $2") ||
-			!strings.Contains(capturedSQL, "AND r.status = 'success'") {
+			!strings.Contains(capturedSQL, "AND r.status = 'success'") ||
+			!strings.Contains(capturedSQL, "AND r.ended_at IS NOT NULL") {
 			t.Errorf("ListSuccessfulRunsForPlan WHERE clause mismatch, got SQL: %s", capturedSQL)
 		}
 

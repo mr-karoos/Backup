@@ -1029,6 +1029,7 @@ func (r *PostgresBackupRepository) ListSuccessfulRunsForPlan(ctx context.Context
 		WHERE r.organization_id = $1
 		  AND j.backup_plan_id = $2
 		  AND r.status = 'success'
+		  AND r.ended_at IS NOT NULL
 		ORDER BY r.ended_at DESC, r.id DESC;
 	`
 	rows, err := q.Query(ctx, query, orgID, planID)
