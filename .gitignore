@@ -1,0 +1,123 @@
+# ==============================================================================
+# Binaries, Build & Package Artifacts
+# ==============================================================================
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/server
+/cmd/server/server
+*.bin
+*.out
+*.test
+*.prof
+
+# ==============================================================================
+# Environment, Credentials & Secret Files
+# ==============================================================================
+.env
+.env.*
+*.env
+!.env.example
+*.credentials
+credentials.json
+credentials.yaml
+credentials.yml
+secrets.json
+secrets.yaml
+secrets.yml
+*.secret.yaml
+*.secret.yml
+*.secrets.yaml
+*.secrets.yml
+*.credential.yaml
+*.credential.yml
+*.credentials.yaml
+*.credentials.yml
+*.local.yaml
+*.local.yml
+
+# Cryptographic Keys and Certificates
+*.pem
+*.key
+*.pfx
+*.p12
+*.pkcs12
+*.crt
+*.cer
+*.der
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+id_ecdsa
+id_ecdsa.pub
+id_dsa
+id_dsa.pub
+
+# ==============================================================================
+# Test, Coverage & Benchmark Artifacts
+# ==============================================================================
+coverage.txt
+coverage.out
+profile.out
+
+# ==============================================================================
+# Database Dumps & Backup Artifacts
+# (Preserves SQL migration files in internal/platform/migrations/sql/)
+# ==============================================================================
+*.dump
+*.bak
+*.backup
+*.db
+*.sqlite
+*.sqlite3
+*.sql.gz
+*.sql.tar
+*.sql.bak
+*.sql.zip
+*.tar.gz
+*.tgz
+
+# ==============================================================================
+# Local Runtime Storage, Backups & Temp Directories
+# ==============================================================================
+/srv/
+/storage/
+/backups/
+/tmp/
+/.temp/
+/temp/
+*.tmp
+*.temp
+
+# ==============================================================================
+# Application Logs
+# ==============================================================================
+*.log
+/logs/
+*.log.*
+
+# ==============================================================================
+# IDE & Editor Specific Files
+# ==============================================================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ==============================================================================
+# OS Generated Files
+# ==============================================================================
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
+

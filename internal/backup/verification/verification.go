@@ -1,0 +1,339 @@
+package verification
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+
+	"backup-platform/internal/storage"
+)
+
+const (
+	maxSanityHeaderBytes      = 64 * 1024 // 64 KiB
+	canonicalVerifiedMsg      = "checksum and gzip structural integrity verified"
+	canonicalFilesVerifiedMsg = "checksum and tar archive structural integrity verified"
+)
+
+// Verifier defines the interface for verifying backup artifact physical and structural integrity.
+type Verifier interface {
+	VerifyDatabaseArtifact(
+		ctx context.Context,
+		storageProvider storage.StorageProvider,
+		storageReference string,
+		expectedSizeBytes int64,
+		expectedChecksumSHA256 string,
+	) (string, error)
+
+	VerifyFilesArtifact(
+		ctx context.Context,
+		storageProvider storage.StorageProvider,
+		storageReference string,
+		expectedSizeBytes int64,
+		expectedChecksumSHA256 string,
+	) (string, error)
+}
+
+// VerificationEngine performs multi-point integrity checks on database and file backup artifacts.
+type VerificationEngine struct{}
+
+// NewVerificationEngine constructs a new VerificationEngine.
+func NewVerificationEngine() *VerificationEngine {
+	return &VerificationEngine{}
+}
+
+type countingReader struct {
+	r          io.Reader
+	totalBytes int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.r.Read(p)
+	cr.totalBytes += int64(n)
+	return n, err
+}
+
+// VerifyDatabaseArtifact performs:
+// 1. File existence and non-zero size verification.
+// 2. Recomputed SHA-256 match against expected checksum.
+// 3. Size match against recorded metadata.
+// 4. End-to-end gzip decompression without structural errors.
+// 5. Non-empty decompressed content.
+// 6. Basic MySQL/MariaDB dump header sanity check.
+func (v *VerificationEngine) VerifyDatabaseArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedSizeBytes int64,
+	expectedChecksumSHA256 string,
+) (string, error) {
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if storageProvider == nil {
+		return "", errors.New("storage provider cannot be nil")
+	}
+	if expectedSizeBytes <= 0 {
+		return "", errors.New("expected artifact size must be greater than zero")
+	}
+	if strings.TrimSpace(expectedChecksumSHA256) == "" {
+		return "", errors.New("expected checksum cannot be empty")
+	}
+
+	rc, err := storageProvider.OpenArtifact(ctx, storageReference)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed opening artifact for verification: %w", err)
+	}
+	defer rc.Close()
+
+	// Interrupt blocked reads immediately if context is cancelled mid-stream
+	stopWait := context.AfterFunc(ctx, func() {
+		_ = rc.Close()
+	})
+	defer stopWait()
+
+	hasher := sha256.New()
+	cr := &countingReader{r: io.TeeReader(rc, hasher)}
+
+	gzReader, err := gzip.NewReader(cr)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("artifact is not a valid gzip stream: %w", err)
+	}
+	defer gzReader.Close()
+
+	// Read initial sanity chunk
+	sanityBuf := make([]byte, maxSanityHeaderBytes)
+	n, readErr := io.ReadFull(gzReader, sanityBuf)
+	if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed reading decompressed stream: %w", readErr)
+	}
+
+	decompressedPrefix := sanityBuf[:n]
+	var totalDecompressedBytes int64 = int64(n)
+
+	// Drain remaining decompressed stream to io.Discard to verify complete archive integrity to EOF
+	remainderBytes, drainErr := io.Copy(io.Discard, gzReader)
+	if drainErr != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("gzip stream integrity check failed: %w", drainErr)
+	}
+	totalDecompressedBytes += remainderBytes
+
+	if err := gzReader.Close(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("gzip stream closure error: %w", err)
+	}
+
+	// Drain any remaining bytes from count reader to complete SHA-256 computation
+	if _, err := io.Copy(io.Discard, cr); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed reading compressed stream: %w", err)
+	}
+
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+
+	// 1. Verify physical size
+	if cr.totalBytes <= 0 {
+		return "", errors.New("verified artifact size is zero")
+	}
+	if cr.totalBytes != expectedSizeBytes {
+		return "", fmt.Errorf("artifact size mismatch: expected %d bytes, got %d bytes", expectedSizeBytes, cr.totalBytes)
+	}
+
+	// 2. Verify SHA-256 checksum
+	calculatedSHA256 := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(calculatedSHA256, expectedChecksumSHA256) {
+		return "", fmt.Errorf("checksum mismatch: expected %s, got %s", expectedChecksumSHA256, calculatedSHA256)
+	}
+
+	// 3. Verify non-empty decompressed content
+	if totalDecompressedBytes <= 0 {
+		return "", errors.New("decompressed database dump is empty")
+	}
+
+	// 4. Basic MySQL/MariaDB dump header sanity check
+	if !hasValidMySQLDumpMarker(decompressedPrefix) {
+		return "", errors.New("decompressed stream failed basic SQL dump format sanity check")
+	}
+
+	return canonicalVerifiedMsg, nil
+}
+
+// VerifyFilesArtifact performs:
+// 1. File existence and non-zero size verification.
+// 2. Recomputed SHA-256 match against expected checksum.
+// 3. Size match against recorded metadata.
+// 4. End-to-end gzip decompression without structural errors.
+// 5. Full tar archive validation with at least 1 valid member.
+// 6. Member path safety (rejection of absolute paths and parent traversal segments).
+// 7. Full gzip footer/CRC validation.
+func (v *VerificationEngine) VerifyFilesArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedSizeBytes int64,
+	expectedChecksumSHA256 string,
+) (string, error) {
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if storageProvider == nil {
+		return "", errors.New("storage provider cannot be nil")
+	}
+	if expectedSizeBytes <= 0 {
+		return "", errors.New("expected artifact size must be greater than zero")
+	}
+	if strings.TrimSpace(expectedChecksumSHA256) == "" {
+		return "", errors.New("expected checksum cannot be empty")
+	}
+
+	rc, err := storageProvider.OpenArtifact(ctx, storageReference)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed opening artifact for verification: %w", err)
+	}
+	defer rc.Close()
+
+	// Interrupt blocked reads immediately if context is cancelled mid-stream
+	stopWait := context.AfterFunc(ctx, func() {
+		_ = rc.Close()
+	})
+	defer stopWait()
+
+	hasher := sha256.New()
+	cr := &countingReader{r: io.TeeReader(rc, hasher)}
+
+	gzReader, err := gzip.NewReader(cr)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("artifact is not a valid gzip stream: %w", err)
+	}
+	defer gzReader.Close()
+
+	tarReader := tar.NewReader(gzReader)
+	var entriesCount int
+
+	for {
+		header, err := tarReader.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", fmt.Errorf("tar structural integrity check failed: %w", err)
+		}
+
+		entriesCount++
+
+		name := header.Name
+		if strings.HasPrefix(name, "/") {
+			return "", errors.New("tar archive contains an unsafe absolute member path")
+		}
+
+		segments := strings.Split(name, "/")
+		for _, seg := range segments {
+			if seg == ".." {
+				return "", errors.New("tar archive contains an unsafe parent traversal member path")
+			}
+		}
+	}
+
+	if entriesCount == 0 {
+		return "", errors.New("tar archive is empty (zero entries)")
+	}
+
+	// Drain remaining bytes in gzip stream to io.Discard to ensure gzip footer/CRC is verified
+	if _, err := io.Copy(io.Discard, gzReader); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("gzip stream integrity check failed: %w", err)
+	}
+
+	if err := gzReader.Close(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("gzip stream closure error: %w", err)
+	}
+
+	// Drain any remaining bytes from count reader to complete SHA-256 computation
+	if _, err := io.Copy(io.Discard, cr); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed reading compressed stream: %w", err)
+	}
+
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+
+	// 1. Verify physical size
+	if cr.totalBytes <= 0 {
+		return "", errors.New("verified artifact size is zero")
+	}
+	if cr.totalBytes != expectedSizeBytes {
+		return "", fmt.Errorf("artifact size mismatch: expected %d bytes, got %d bytes", expectedSizeBytes, cr.totalBytes)
+	}
+
+	// 2. Verify SHA-256 checksum
+	calculatedSHA256 := hex.EncodeToString(hasher.Sum(nil))
+	if !strings.EqualFold(calculatedSHA256, expectedChecksumSHA256) {
+		return "", fmt.Errorf("checksum mismatch: expected %s, got %s", expectedChecksumSHA256, calculatedSHA256)
+	}
+
+	return canonicalFilesVerifiedMsg, nil
+}
+
+func hasValidMySQLDumpMarker(prefix []byte) bool {
+	markers := []string{
+		"-- MySQL dump",
+		"-- MariaDB dump",
+		"/*!40",
+		"CREATE DATABASE",
+		"USE ",
+		"DROP TABLE",
+		"CREATE TABLE",
+		"SET ",
+		"LOCK TABLES",
+		"INSERT INTO",
+	}
+
+	prefixStr := string(bytes.ToUpper(prefix))
+	for _, marker := range markers {
+		if strings.Contains(prefixStr, strings.ToUpper(marker)) {
+			return true
+		}
+	}
+	return false
+}
