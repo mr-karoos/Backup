@@ -1408,7 +1408,7 @@ func TestHandler_VerifyBackupRun(t *testing.T) {
 	runID := uuid.New()
 	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
-	t.Run("POST /api/v1/backup-runs/{id}/verify returns 200 OK for admin", func(t *testing.T) {
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 200 OK for admin with verified message and exact 4 details keys", func(t *testing.T) {
 		mockVer := &mockVerifier{
 			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
 				if role != orgDomain.RoleAdmin || oID != orgID || rID != runID {
@@ -1418,11 +1418,11 @@ func TestHandler_VerifyBackupRun(t *testing.T) {
 					RunID:              runID,
 					VerificationStatus: domain.VerificationStatusVerified,
 					VerifiedAt:         now,
-					Details: map[string]any{
-						"checksum_matched":       true,
-						"archive_integrity":      "passed",
-						"compression_valid":      true,
-						"extracted_sample_check": "valid_sql_dump",
+					Details: service.VerificationDetails{
+						ChecksumMatched:      true,
+						ArchiveIntegrity:     "passed",
+						CompressionValid:     true,
+						ExtractedSampleCheck: "valid_sql_dump",
 					},
 				}, nil
 			},
@@ -1451,7 +1451,8 @@ func TestHandler_VerifyBackupRun(t *testing.T) {
 		}
 
 		var resp struct {
-			Data VerifyBackupRunResponse `json:"data"`
+			Data    VerifyBackupRunResponse `json:"data"`
+			Message string                  `json:"message"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("failed decoding response: %v", err)
@@ -1462,29 +1463,44 @@ func TestHandler_VerifyBackupRun(t *testing.T) {
 		if resp.Data.VerificationStatus != domain.VerificationStatusVerified {
 			t.Errorf("expected status verified, got: %s", resp.Data.VerificationStatus)
 		}
-		if resp.Data.Details["checksum_matched"] != true || resp.Data.Details["extracted_sample_check"] != "valid_sql_dump" {
+		if !resp.Data.Details.ChecksumMatched || resp.Data.Details.ArchiveIntegrity != "passed" || !resp.Data.Details.CompressionValid || resp.Data.Details.ExtractedSampleCheck != "valid_sql_dump" {
 			t.Errorf("unexpected details: %+v", resp.Data.Details)
 		}
+		if resp.Message != "صحت و یکپارچگی ساختاری فایل پشتیبان تأیید گردید." {
+			t.Errorf("expected verified success message, got: %s", resp.Message)
+		}
 
-		// Ensure no storage reference or file paths in JSON body
+		// Ensure exact 4 fields in details JSON and no leaked paths
+		var rawMap map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &rawMap); err != nil {
+			t.Fatalf("failed unmarshaling raw response: %v", err)
+		}
+		detailsMap, ok := rawMap["data"].(map[string]any)["details"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected details object in data")
+		}
+		if len(detailsMap) != 4 {
+			t.Errorf("expected exactly 4 keys in details, got %d: %+v", len(detailsMap), detailsMap)
+		}
+
 		bodyStr := rec.Body.String()
 		if strings.Contains(bodyStr, "storage_reference") || strings.Contains(bodyStr, "physical_path") {
 			t.Errorf("SECURITY FLAW: leaked internal path or storage reference in response body: %s", bodyStr)
 		}
 	})
 
-	t.Run("POST /api/v1/backup-runs/{id}/verify returns 200 OK for member", func(t *testing.T) {
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 200 OK for member with website backup", func(t *testing.T) {
 		mockVer := &mockVerifier{
 			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
 				return &service.RunVerificationResult{
 					RunID:              runID,
 					VerificationStatus: domain.VerificationStatusVerified,
 					VerifiedAt:         now,
-					Details: map[string]any{
-						"checksum_matched":  true,
-						"archive_integrity": "passed",
-						"compression_valid": true,
-						"tar_archive_valid": true,
+					Details: service.VerificationDetails{
+						ChecksumMatched:      true,
+						ArchiveIntegrity:     "passed",
+						CompressionValid:     true,
+						ExtractedSampleCheck: "not_applicable",
 					},
 				}, nil
 			},
@@ -1507,6 +1523,17 @@ func TestHandler_VerifyBackupRun(t *testing.T) {
 
 		if rec.Code != http.StatusOK {
 			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var resp struct {
+			Data    VerifyBackupRunResponse `json:"data"`
+			Message string                  `json:"message"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed decoding response: %v", err)
+		}
+		if resp.Data.Details.ExtractedSampleCheck != "not_applicable" {
+			t.Errorf("expected not_applicable, got %s", resp.Data.Details.ExtractedSampleCheck)
 		}
 	})
 
@@ -1639,18 +1666,18 @@ func TestHandler_VerifyBackupRun(t *testing.T) {
 		}
 	})
 
-	t.Run("POST /api/v1/backup-runs/{id}/verify returns 200 OK with failed status on integrity corruption", func(t *testing.T) {
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 200 OK with failed message and conservative details on corruption", func(t *testing.T) {
 		mockVer := &mockVerifier{
 			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
 				return &service.RunVerificationResult{
 					RunID:              runID,
 					VerificationStatus: domain.VerificationStatusFailed,
 					VerifiedAt:         now,
-					Details: map[string]any{
-						"checksum_matched":  false,
-						"archive_integrity": "failed",
-						"compression_valid": true,
-						"error":             "checksum mismatch: hash does not match recorded checksum",
+					Details: service.VerificationDetails{
+						ChecksumMatched:      false,
+						ArchiveIntegrity:     "failed",
+						CompressionValid:     false,
+						ExtractedSampleCheck: "failed",
 					},
 				}, nil
 			},
@@ -1676,13 +1703,23 @@ func TestHandler_VerifyBackupRun(t *testing.T) {
 		}
 
 		var resp struct {
-			Data VerifyBackupRunResponse `json:"data"`
+			Data    VerifyBackupRunResponse `json:"data"`
+			Message string                  `json:"message"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("failed decoding response: %v", err)
 		}
 		if resp.Data.VerificationStatus != domain.VerificationStatusFailed {
 			t.Errorf("expected status failed, got: %s", resp.Data.VerificationStatus)
+		}
+		if resp.Message != "اعتبارسنجی انجام شد اما یکپارچگی یک یا چند آرتیفکت تأیید نشد." {
+			t.Errorf("expected safe failed message, got: %s", resp.Message)
+		}
+		if strings.Contains(resp.Message, "تأیید گردید") {
+			t.Errorf("failed response message must NOT claim verification succeeded: %s", resp.Message)
+		}
+		if resp.Data.Details.ChecksumMatched != false || resp.Data.Details.ArchiveIntegrity != "failed" || resp.Data.Details.CompressionValid != false || resp.Data.Details.ExtractedSampleCheck != "failed" {
+			t.Errorf("unexpected details on failure: %+v", resp.Data.Details)
 		}
 	})
 }

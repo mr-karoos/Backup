@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -385,7 +386,7 @@ func TestVerificationService_IntegrityChecks(t *testing.T) {
 	orgID := uuid.New()
 	runID := uuid.New()
 
-	t.Run("valid database dump verified successfully", func(t *testing.T) {
+	t.Run("valid database dump verified with exact 4 frozen fields", func(t *testing.T) {
 		repo := newMockVerificationRepo()
 		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
 		artID := uuid.New()
@@ -414,15 +415,28 @@ func TestVerificationService_IntegrityChecks(t *testing.T) {
 		if res.VerificationStatus != domain.VerificationStatusVerified {
 			t.Errorf("expected verified, got %s", res.VerificationStatus)
 		}
-		if res.Details["checksum_matched"] != true || res.Details["archive_integrity"] != "passed" || res.Details["extracted_sample_check"] != "valid_sql_dump" {
+		if !res.Details.ChecksumMatched || res.Details.ArchiveIntegrity != "passed" || !res.Details.CompressionValid || res.Details.ExtractedSampleCheck != "valid_sql_dump" {
 			t.Errorf("unexpected details: %+v", res.Details)
 		}
 		if repo.updatedArts[artID] != domain.VerificationStatusVerified {
 			t.Errorf("expected artifact to be updated to verified in repo")
 		}
+
+		// Verify serialized JSON contains exact 4 keys
+		bytes, err := json.Marshal(res.Details)
+		if err != nil {
+			t.Fatalf("failed marshaling details: %v", err)
+		}
+		var rawMap map[string]any
+		if err := json.Unmarshal(bytes, &rawMap); err != nil {
+			t.Fatalf("failed unmarshaling details: %v", err)
+		}
+		if len(rawMap) != 4 {
+			t.Errorf("expected exactly 4 keys in details, got %d: %+v", len(rawMap), rawMap)
+		}
 	})
 
-	t.Run("checksum mismatch marks artifact failed without leaking paths", func(t *testing.T) {
+	t.Run("checksum mismatch marks failed and reports false for unproven checks", func(t *testing.T) {
 		repo := newMockVerificationRepo()
 		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
 		artID := uuid.New()
@@ -451,18 +465,31 @@ func TestVerificationService_IntegrityChecks(t *testing.T) {
 		if res.VerificationStatus != domain.VerificationStatusFailed {
 			t.Errorf("expected status failed, got: %s", res.VerificationStatus)
 		}
+		if res.Details.ChecksumMatched != false || res.Details.ArchiveIntegrity != "failed" || res.Details.CompressionValid != false || res.Details.ExtractedSampleCheck != "failed" {
+			t.Errorf("expected conservative failure details, got: %+v", res.Details)
+		}
 		if repo.updatedArts[artID] != domain.VerificationStatusFailed {
 			t.Errorf("expected artifact to be updated to failed in repo")
 		}
 
-		// Ensure no sensitive paths are exposed
-		detailsErr, _ := res.Details["error"].(string)
-		if strings.Contains(detailsErr, "/var/backups") || strings.Contains(detailsErr, "secret") {
-			t.Errorf("SECURITY FLAW: leaked path in details error: %s", detailsErr)
+		// Verify serialized JSON contains exact 4 keys with NO extra error field
+		bytes, err := json.Marshal(res.Details)
+		if err != nil {
+			t.Fatalf("failed marshaling details: %v", err)
+		}
+		var rawMap map[string]any
+		if err := json.Unmarshal(bytes, &rawMap); err != nil {
+			t.Fatalf("failed unmarshaling details: %v", err)
+		}
+		if len(rawMap) != 4 {
+			t.Errorf("expected exactly 4 keys in details, got %d: %+v", len(rawMap), rawMap)
+		}
+		if _, exists := rawMap["error"]; exists {
+			t.Errorf("error key must NOT exist in public details")
 		}
 	})
 
-	t.Run("corrupt gzip database dump marks failed", func(t *testing.T) {
+	t.Run("corrupt gzip database dump reports conservative failure details", func(t *testing.T) {
 		repo := newMockVerificationRepo()
 		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
 		artID := uuid.New()
@@ -491,9 +518,12 @@ func TestVerificationService_IntegrityChecks(t *testing.T) {
 		if res.VerificationStatus != domain.VerificationStatusFailed {
 			t.Errorf("expected failed, got: %s", res.VerificationStatus)
 		}
+		if res.Details.ChecksumMatched != false {
+			t.Errorf("unproven checksum check must not be reported as true on early gzip failure")
+		}
 	})
 
-	t.Run("valid website tar.gz verified successfully", func(t *testing.T) {
+	t.Run("valid website tar.gz verified successfully with not_applicable sample check", func(t *testing.T) {
 		repo := newMockVerificationRepo()
 		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
 		artID := uuid.New()
@@ -522,12 +552,27 @@ func TestVerificationService_IntegrityChecks(t *testing.T) {
 		if res.VerificationStatus != domain.VerificationStatusVerified {
 			t.Errorf("expected verified, got %s", res.VerificationStatus)
 		}
-		if res.Details["tar_archive_valid"] != true {
-			t.Errorf("expected tar_archive_valid true, got %+v", res.Details)
+		if res.Details.ExtractedSampleCheck != "not_applicable" {
+			t.Errorf("expected not_applicable for website files, got %s", res.Details.ExtractedSampleCheck)
+		}
+
+		bytes, err := json.Marshal(res.Details)
+		if err != nil {
+			t.Fatalf("failed marshaling details: %v", err)
+		}
+		var rawMap map[string]any
+		if err := json.Unmarshal(bytes, &rawMap); err != nil {
+			t.Fatalf("failed unmarshaling details: %v", err)
+		}
+		if _, exists := rawMap["tar_archive_valid"]; exists {
+			t.Errorf("tar_archive_valid must NOT exist in public details")
+		}
+		if len(rawMap) != 4 {
+			t.Errorf("expected exactly 4 keys in details, got %d", len(rawMap))
 		}
 	})
 
-	t.Run("corrupt tar archive marks failed", func(t *testing.T) {
+	t.Run("corrupt tar archive marks failed without false positive checksum", func(t *testing.T) {
 		repo := newMockVerificationRepo()
 		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
 		artID := uuid.New()
@@ -556,6 +601,9 @@ func TestVerificationService_IntegrityChecks(t *testing.T) {
 		if res.VerificationStatus != domain.VerificationStatusFailed {
 			t.Errorf("expected failed, got: %s", res.VerificationStatus)
 		}
+		if res.Details.ChecksumMatched != false {
+			t.Errorf("checksum_matched must be false on failed tar verification")
+		}
 	})
 }
 
@@ -563,7 +611,7 @@ func TestVerificationService_MultiArtifact(t *testing.T) {
 	orgID := uuid.New()
 	runID := uuid.New()
 
-	t.Run("all artifacts pass produces overall verified status", func(t *testing.T) {
+	t.Run("all artifacts pass produces overall verified status and aggregate 4-field details", func(t *testing.T) {
 		repo := newMockVerificationRepo()
 		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
 		art1 := &domain.BackupArtifact{
@@ -600,8 +648,22 @@ func TestVerificationService_MultiArtifact(t *testing.T) {
 		if res.VerificationStatus != domain.VerificationStatusVerified {
 			t.Errorf("expected overall verified, got %s", res.VerificationStatus)
 		}
-		if res.Details["artifacts_verified"] != 2 || res.Details["artifacts_total"] != 2 {
+		if !res.Details.ChecksumMatched || res.Details.ArchiveIntegrity != "passed" || !res.Details.CompressionValid || res.Details.ExtractedSampleCheck != "valid_sql_dump" {
 			t.Errorf("unexpected multi-artifact details: %+v", res.Details)
+		}
+
+		bytes, err := json.Marshal(res.Details)
+		if err != nil {
+			t.Fatalf("failed marshaling: %v", err)
+		}
+		var rawMap map[string]any
+		if err := json.Unmarshal(bytes, &rawMap); err != nil {
+			t.Fatalf("failed unmarshaling: %v", err)
+		}
+		for _, forbiddenKey := range []string{"artifacts", "artifacts_total", "artifacts_verified", "artifact_id"} {
+			if _, exists := rawMap[forbiddenKey]; exists {
+				t.Errorf("forbidden key %q found in multi-artifact details", forbiddenKey)
+			}
 		}
 	})
 
@@ -653,6 +715,9 @@ func TestVerificationService_MultiArtifact(t *testing.T) {
 		}
 		if repo.updatedArts[art2.ID] != domain.VerificationStatusVerified {
 			t.Errorf("art2 must be marked verified in DB")
+		}
+		if res.Details.ChecksumMatched != false || res.Details.ArchiveIntegrity != "failed" || res.Details.CompressionValid != false || res.Details.ExtractedSampleCheck != "failed" {
+			t.Errorf("expected conservative failure details on multi-artifact corruption: %+v", res.Details)
 		}
 	})
 }
@@ -745,6 +810,35 @@ func TestVerificationService_InfrastructureErrors(t *testing.T) {
 		_, err := svc.VerifyRun(ctx, orgDomain.RoleAdmin, orgID, runID)
 		if !errors.Is(err, context.Canceled) {
 			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+	})
+
+	t.Run("verifier returns DeadlineExceeded with active context is returned deterministically", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               uuid.New(),
+				OrganizationID:   orgID,
+				RunID:            runID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "local://test.sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "abc",
+			},
+		}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyErr: context.DeadlineExceeded}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if res != nil {
+			t.Errorf("expected result to be nil on context error, got: %+v", res)
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected DeadlineExceeded error, got: %v", err)
 		}
 	})
 

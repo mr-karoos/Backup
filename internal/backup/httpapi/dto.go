@@ -330,12 +330,20 @@ func SafeArtifactFilename(targetName string, format domain.ArtifactFormat, artif
 	return fmt.Sprintf("%s%s", clean, ext)
 }
 
+// VerificationDetails defines the strict 4-field public details structure matching Section 14.5 of docs/API_DESIGN.md.
+type VerificationDetails struct {
+	ChecksumMatched      bool   `json:"checksum_matched"`
+	ArchiveIntegrity     string `json:"archive_integrity"`
+	CompressionValid     bool   `json:"compression_valid"`
+	ExtractedSampleCheck string `json:"extracted_sample_check"`
+}
+
 // VerifyBackupRunResponse defines the JSON response returned for on-demand backup run verification.
 type VerifyBackupRunResponse struct {
 	RunID              uuid.UUID                 `json:"run_id"`
 	VerificationStatus domain.VerificationStatus `json:"verification_status"`
 	VerifiedAt         time.Time                 `json:"verified_at"`
-	Details            map[string]any            `json:"details"`
+	Details            VerificationDetails       `json:"details"`
 }
 
 func toVerifyBackupRunResponse(res *service.RunVerificationResult) *VerifyBackupRunResponse {
@@ -346,6 +354,11 @@ func toVerifyBackupRunResponse(res *service.RunVerificationResult) *VerifyBackup
 		RunID:              res.RunID,
 		VerificationStatus: res.VerificationStatus,
 		VerifiedAt:         res.VerifiedAt,
-		Details:            res.Details,
+		Details: VerificationDetails{
+			ChecksumMatched:      res.Details.ChecksumMatched,
+			ArchiveIntegrity:     res.Details.ArchiveIntegrity,
+			CompressionValid:     res.Details.CompressionValid,
+			ExtractedSampleCheck: res.Details.ExtractedSampleCheck,
+		},
 	}
 }

@@ -15,12 +15,20 @@ import (
 	"backup-platform/pkg/uuid"
 )
 
+// VerificationDetails defines the strict 4-field public details structure matching Frozen docs/API_DESIGN.md.
+type VerificationDetails struct {
+	ChecksumMatched      bool   `json:"checksum_matched"`
+	ArchiveIntegrity     string `json:"archive_integrity"`
+	CompressionValid     bool   `json:"compression_valid"`
+	ExtractedSampleCheck string `json:"extracted_sample_check"`
+}
+
 // RunVerificationResult contains the consolidated result of verifying all artifacts of a backup run.
 type RunVerificationResult struct {
 	RunID              uuid.UUID                 `json:"run_id"`
 	VerificationStatus domain.VerificationStatus `json:"verification_status"`
 	VerifiedAt         time.Time                 `json:"verified_at"`
-	Details            map[string]any            `json:"details"`
+	Details            VerificationDetails       `json:"details"`
 }
 
 // VerificationService coordinates on-demand verification of backup runs and their artifacts.
@@ -54,15 +62,6 @@ func NewVerificationService(
 // SetNowFunc overrides the clock for deterministic testing.
 func (s *VerificationService) SetNowFunc(f func() time.Time) {
 	s.nowFunc = f
-}
-
-type artifactVerificationOutcome struct {
-	artifactID   uuid.UUID
-	artifactName string
-	status       domain.VerificationStatus
-	details      string
-	isChecksumOK bool
-	isGzipOK     bool
 }
 
 // VerifyRun executes on-demand physical and structural integrity verification on all active artifacts of a backup run.
@@ -114,9 +113,13 @@ func (s *VerificationService) VerifyRun(
 
 	// 5. Filter active, non-deleted artifacts
 	var activeArtifacts []*domain.BackupArtifact
+	var hasDBArtifacts bool
 	for _, art := range artifacts {
 		if art != nil && !art.IsDeleted {
 			activeArtifacts = append(activeArtifacts, art)
+			if art.ArtifactType == domain.ArtifactTypeDatabaseDump || art.Format == domain.ArtifactFormatSQLGzip {
+				hasDBArtifacts = true
+			}
 		}
 	}
 
@@ -125,10 +128,7 @@ func (s *VerificationService) VerifyRun(
 	}
 
 	// 6. Verify each active artifact independently
-	var outcomes []artifactVerificationOutcome
-	var verifiedCount, failedCount int
-	var allChecksumsMatched = true
-	var allCompressionValid = true
+	var failedCount int
 
 	for _, art := range activeArtifacts {
 		if ctx.Err() != nil {
@@ -177,12 +177,15 @@ func (s *VerificationService) VerifyRun(
 			}
 		}
 
-		// Handle context cancellation immediately
-		if errors.Is(verErr, context.Canceled) || errors.Is(verErr, context.DeadlineExceeded) || ctx.Err() != nil {
+		// Handle context cancellation / deadline expiration deterministically
+		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if errors.Is(verErr, context.Canceled) || errors.Is(verErr, context.DeadlineExceeded) {
+			return nil, verErr
+		}
 
-		// Handle storage infrastructure failure
+		// Handle storage infrastructure failure (not an integrity failure)
 		if verErr != nil && strings.HasPrefix(verErr.Error(), "failed opening artifact for verification") {
 			s.logger.Error("storage infrastructure error opening artifact for verification",
 				slog.String("org_id", orgID.String()),
@@ -191,29 +194,11 @@ func (s *VerificationService) VerifyRun(
 			return nil, domain.ErrBackupServiceUnavailable
 		}
 
-		outcome := artifactVerificationOutcome{
-			artifactID:   art.ID,
-			artifactName: art.TargetName,
-			isChecksumOK: true,
-			isGzipOK:     true,
-		}
-
 		if verErr != nil {
 			failedCount++
 			safeDetails := sanitizeVerificationError(verErr)
-			outcome.status = domain.VerificationStatusFailed
-			outcome.details = safeDetails
 
-			if strings.Contains(safeDetails, "checksum mismatch") {
-				outcome.isChecksumOK = false
-				allChecksumsMatched = false
-			}
-			if strings.Contains(safeDetails, "gzip") {
-				outcome.isGzipOK = false
-				allCompressionValid = false
-			}
-
-			// Persist failed status in database
+			// Persist failed status in database per artifact
 			if updateErr := s.repo.UpdateArtifactVerification(ctx, orgID, art.ID, domain.VerificationStatusFailed, &safeDetails); updateErr != nil {
 				s.logger.Error("failed updating artifact verification status in repository",
 					slog.String("org_id", orgID.String()),
@@ -222,11 +207,7 @@ func (s *VerificationService) VerifyRun(
 				return nil, domain.ErrBackupServiceUnavailable
 			}
 		} else {
-			verifiedCount++
-			outcome.status = domain.VerificationStatusVerified
-			outcome.details = verMsg
-
-			// Persist verified status in database
+			// Persist verified status in database per artifact
 			if updateErr := s.repo.UpdateArtifactVerification(ctx, orgID, art.ID, domain.VerificationStatusVerified, &verMsg); updateErr != nil {
 				s.logger.Error("failed updating artifact verification status in repository",
 					slog.String("org_id", orgID.String()),
@@ -235,73 +216,36 @@ func (s *VerificationService) VerifyRun(
 				return nil, domain.ErrBackupServiceUnavailable
 			}
 		}
-
-		outcomes = append(outcomes, outcome)
 	}
 
-	// 7. Determine overall verification status and build canonical details response
+	// 7. Aggregate overall verification result and details (Frozen 4-field contract)
 	verifiedAt := s.nowFunc()
-	overallStatus := domain.VerificationStatusVerified
-	if failedCount > 0 {
-		overallStatus = domain.VerificationStatusFailed
-	}
+	var overallStatus domain.VerificationStatus
+	var details VerificationDetails
 
-	var details map[string]any
-
-	if len(activeArtifacts) == 1 {
-		single := outcomes[0]
-		firstArt := activeArtifacts[0]
-
-		archiveStatus := "passed"
-		if single.status == domain.VerificationStatusFailed {
-			archiveStatus = "failed"
+	if failedCount == 0 {
+		overallStatus = domain.VerificationStatusVerified
+		sampleCheck := "not_applicable"
+		if hasDBArtifacts {
+			sampleCheck = "valid_sql_dump"
 		}
-
-		if firstArt.Format == domain.ArtifactFormatTarGzip || firstArt.ArtifactType == domain.ArtifactTypeFilesArchive {
-			details = map[string]any{
-				"checksum_matched":  single.isChecksumOK,
-				"archive_integrity": archiveStatus,
-				"compression_valid": single.isGzipOK,
-				"tar_archive_valid": single.status == domain.VerificationStatusVerified,
-			}
-		} else {
-			sampleCheck := "valid_sql_dump"
-			if single.status == domain.VerificationStatusFailed {
-				sampleCheck = "failed"
-			}
-			details = map[string]any{
-				"checksum_matched":       single.isChecksumOK,
-				"archive_integrity":      archiveStatus,
-				"compression_valid":      single.isGzipOK,
-				"extracted_sample_check": sampleCheck,
-			}
-		}
-
-		if single.status == domain.VerificationStatusFailed {
-			details["error"] = single.details
+		details = VerificationDetails{
+			ChecksumMatched:      true,
+			ArchiveIntegrity:     "passed",
+			CompressionValid:     true,
+			ExtractedSampleCheck: sampleCheck,
 		}
 	} else {
-		archiveStatus := "passed"
-		if failedCount > 0 {
-			archiveStatus = "failed"
+		overallStatus = domain.VerificationStatusFailed
+		sampleCheck := "not_applicable"
+		if hasDBArtifacts {
+			sampleCheck = "failed"
 		}
-
-		var artList []map[string]any
-		for _, o := range outcomes {
-			artList = append(artList, map[string]any{
-				"artifact_id":         o.artifactID,
-				"verification_status": o.status,
-				"details":             o.details,
-			})
-		}
-
-		details = map[string]any{
-			"checksum_matched":   allChecksumsMatched,
-			"archive_integrity":  archiveStatus,
-			"compression_valid":  allCompressionValid,
-			"artifacts_verified": verifiedCount,
-			"artifacts_total":    len(activeArtifacts),
-			"artifacts":          artList,
+		details = VerificationDetails{
+			ChecksumMatched:      false,
+			ArchiveIntegrity:     "failed",
+			CompressionValid:     false,
+			ExtractedSampleCheck: sampleCheck,
 		}
 	}
 

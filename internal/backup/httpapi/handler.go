@@ -849,7 +849,11 @@ func (h *Handler) VerifyBackupRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 5. Build DTO and write 200 OK response
+	// 5. Build DTO and write 200 OK response with status-dependent message
 	resp := toVerifyBackupRunResponse(result)
-	httpapi.WriteJSON(w, r, http.StatusOK, resp, "صحت و یکپارچگی ساختاری فایل پشتیبان تأیید گردید.")
+	msg := "صحت و یکپارچگی ساختاری فایل پشتیبان تأیید گردید."
+	if result.VerificationStatus == domain.VerificationStatusFailed {
+		msg = "اعتبارسنجی انجام شد اما یکپارچگی یک یا چند آرتیفکت تأیید نشد."
+	}
+	httpapi.WriteJSON(w, r, http.StatusOK, resp, msg)
 }
