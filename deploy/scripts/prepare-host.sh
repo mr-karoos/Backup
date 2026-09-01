@@ -2,12 +2,12 @@
 # ==============================================================================
 # Host Storage Preparation Script for Backup Platform (Internal V1)
 # ==============================================================================
-# Prepares canonical host directory structures, ownership, and strict POSIX
-# permissions for the non-root application container (UID:GID 10001:10001) and
-# root-owned metadata backups.
+# Prepares the frozen canonical host storage directory (/srv/backup-platform),
+# ownership, and strict POSIX permissions for the non-root application
+# container (UID:GID 10001:10001) and root-owned metadata backups.
 #
 # Target OS: Ubuntu 22.04 LTS / Debian 12 / Compatible Linux
-# Execution: sudo ./prepare-host.sh [OPTIONAL_STORAGE_ROOT]
+# Execution: sudo ./prepare-host.sh
 # ==============================================================================
 
 set -euo pipefail
@@ -18,46 +18,23 @@ if [[ "${EUID}" -ne 0 ]]; then
     exit 1
 fi
 
+# 2. Enforce zero arguments (Internal V1 uses frozen canonical path only)
+if [[ $# -gt 0 ]]; then
+    echo "ERROR: prepare-host.sh takes no arguments in canonical deployment." >&2
+    exit 1
+fi
+
 APP_UID=10001
 APP_GID=10001
-DEFAULT_STORAGE_ROOT="/srv/backup-platform"
-STORAGE_ROOT="${1:-${DEFAULT_STORAGE_ROOT}}"
-
-# 2. Strict Path Validation (Defend against dangerous system directories)
-if [[ "${STORAGE_ROOT}" != /* ]]; then
-    echo "ERROR: STORAGE_ROOT must be an absolute path starting with '/': '${STORAGE_ROOT}'" >&2
-    exit 1
-fi
-
-# Clean trailing slashes except for root
-STORAGE_ROOT="${STORAGE_ROOT%/}"
-if [[ -z "${STORAGE_ROOT}" ]]; then
-    STORAGE_ROOT="/"
-fi
-
-# Blacklist root and dangerous top-level operating system paths
-case "${STORAGE_ROOT}" in
-    "/" | "/etc" | "/etc/"* | "/usr" | "/usr/"* | "/var" | "/var/"* | \
-    "/home" | "/home/"* | "/root" | "/root/"* | "/opt" | "/tmp" | "/tmp/"* | \
-    "/run" | "/run/"* | "/srv" | "/bin" | "/sbin" | "/lib" | "/lib64" | \
-    "/boot" | "/dev" | "/proc" | "/sys")
-        echo "ERROR: Target path '${STORAGE_ROOT}' is a reserved system directory. Aborting." >&2
-        exit 1
-        ;;
-esac
-
-if [[ "${STORAGE_ROOT}" =~ \.\. ]]; then
-    echo "ERROR: Target path '${STORAGE_ROOT}' cannot contain '..' relative elements." >&2
-    exit 1
-fi
+STORAGE_ROOT="/srv/backup-platform"
 
 # 3. Prevent Symlink Hijacking on Target Root
 if [[ -L "${STORAGE_ROOT}" ]]; then
-    echo "ERROR: Target path '${STORAGE_ROOT}' is a symbolic link. Symlinks are not permitted." >&2
+    echo "ERROR: Target path '${STORAGE_ROOT}' is a symbolic link. Symlinks are forbidden." >&2
     exit 1
 fi
 
-echo "==> Preparing Backup Platform host storage directory: ${STORAGE_ROOT}"
+echo "==> Preparing canonical Backup Platform host storage directory: ${STORAGE_ROOT}"
 
 # 4. Create canonical directory structure idempotently
 mkdir -p "${STORAGE_ROOT}"
@@ -85,13 +62,13 @@ chmod 0700 "${STORAGE_ROOT}/tmp"
 chown "${APP_UID}:${APP_GID}" "${STORAGE_ROOT}/organizations"
 chmod 0700 "${STORAGE_ROOT}/organizations"
 
-# 7. Configure platform metadata backup directory (0700, owned by root:root)
+# 7. Configure platform metadata backup directory (0700, non-recursive, owned by root:root)
 # Owned by root:root so application container cannot overwrite or delete database dumps
 echo "==> Setting root:root ownership and 0700 permissions for metadata backups"
 chown root:root "${STORAGE_ROOT}/metadata-backups"
 chmod 0700 "${STORAGE_ROOT}/metadata-backups"
 
-# 8. Verification of created storage paths
+# 8. Verification of storage paths
 echo "==> Verification of storage paths:"
 ls -ld "${STORAGE_ROOT}" \
       "${STORAGE_ROOT}/tmp" \

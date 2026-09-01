@@ -10,7 +10,7 @@
 
 ### ۱.۱. مدل استقرار (Deployment Model)
 - پلتفرم به صورت یک **Modular Monolith** تک‌پروسس (شامل سرور HTTP API، استخر کارگرهای پس‌زمینه Worker Pool، زمان‌بند Scheduler، و پاک‌سازی‌کننده Stale Run Reaper) درون یک کانتینر Go اجرا می‌شود.
-- پایگاه داده **PostgreSQL 15+** در کانتینر مجزا در شبکه ایزوله داخلی داکر اجرا می‌شود.
+- پایگاه داده **PostgreSQL 15+** در کانتینر مجزا با نام ثابت `backup-platform-postgres` در شبکه ایزوله داخلی داکر اجرا می‌شود.
 - پورت دیتابیس (`5432`) به هیچ وجه روی هاست پابلیش نمی‌شود.
 - پورت وب پلتفرم (`8080`) به صورت پیش‌فرض فقط روی لوکال‌هاست سرور (`127.0.0.1`) بایند می‌شود.
 
@@ -65,11 +65,9 @@ BACKUP_PLATFORM_BIND_IP=10.8.0.1
 
 ## ۴. مراحل گام‌به‌گام استقرار (Step-by-Step Deployment Procedure)
 
-### مرحله ۱: کلون یا دریافت کد پروژه
-کد پروژه را در دایرکتوری استاندارد استقرار (مثلاً `/opt/backup-platform`) قرار دهید:
+### مرحله ۱: دریافت کد پروژه در مسیر استقرار
+کد پروژه را در دایرکتوری استقرار (مثلاً `/opt/backup-platform`) کلون یا کپی کنید:
 ```bash
-sudo mkdir -p /opt/backup-platform
-sudo chown -R $USER:$USER /opt/backup-platform
 git clone https://github.com/mr-karoos/Backup.git /opt/backup-platform
 cd /opt/backup-platform
 ```
@@ -132,9 +130,9 @@ BOOTSTRAP_ADMIN_PASSWORD=generated_admin_bootstrap_password
 ```
 
 ### مرحله ۴: آماده‌سازی دایرکتوری‌های ذخیره‌سازی هاست
-اسکریپت آماده‌سازی دایرکتوری‌ها را با دسترسی root اجرا کنید تا مالکیت کاربری غیرروت کانتینر (`10001:10001`) و مجوزهای اکید `0700` تنظیم شوند:
+اسکریپت آماده‌سازی دایرکتوری‌ها را با دسترسی root اجرا کنید تا مسیر کانونی `/srv/backup-platform`، مالکیت کاربری غیرروت کانتینر (`10001:10001`) و مجوزهای اکید `0700` تنظیم شوند:
 ```bash
-sudo ./deploy/scripts/prepare-host.sh /srv/backup-platform
+sudo ./deploy/scripts/prepare-host.sh
 ```
 
 ### مرحله ۵: اعتبارسنجی کانفیگ و ساخت ایمیج داکر
@@ -178,11 +176,20 @@ Content-Type: application/json; charset=utf-8
 
 ## ۵. زمان‌بندی پشتیبان‌گیری دوره‌ای از متادیتای PostgreSQL (Metadata Backups)
 
-برای حفاظت از پایگاه داده متادیتا (اطلاعات کاربران، منابع، کردانشال‌های رمزشده، تاریخچه و پلن‌ها):
-
-### ۵.۱. تست اجرای دستی اسکریپت بکاپ
+### ۵.۱. مرز اعتماد و نصب ایمن اسکریپت روت (Trust Boundary)
+> [!IMPORTANT]
+> **جداسازی اسکریپت روت زمان‌بندی‌شده از مخزن Git**
+> جاب‌های زمان‌بندی‌شده Systemd تحت کاربر `root` اجرا می‌شوند. برای جلوگیری از اجرای کدهای تغییرپذیر درون مخزن Git توسط روت، اسکریپت بکاپ متادیتا باید به صورت صریح با مالکیت `root:root` و دسترسی `0755` در مسیر سیستمی `/usr/local/sbin/backup-platform-metadata-backup` نصب شود:
 ```bash
-sudo /opt/backup-platform/deploy/scripts/backup-metadata.sh /opt/backup-platform
+sudo install -o root -g root -m 0755 \
+  deploy/scripts/backup-metadata.sh \
+  /usr/local/sbin/backup-platform-metadata-backup
+```
+در صورت دریافت به‌روزرسانی‌های جدید کد، مدیر سیستم باید تغییرات را بررسی کرده و اسکریپت را مجدداً به صورت صریح در `/usr/local/sbin/` نصب نماید.
+
+### ۵.۲. تست اجرای دستی اسکریپت نصب‌شده
+```bash
+sudo /usr/local/sbin/backup-platform-metadata-backup
 ```
 خروجی موفقیت‌آمیز باید فایلی با ساختار زیر در `/srv/backup-platform/metadata-backups/` ایجاد کند:
 ```bash
@@ -190,7 +197,7 @@ ls -la /srv/backup-platform/metadata-backups/
 # -rw------- 1 root root backup-platform-metadata-YYYYMMDD-HHMMSS.dump
 ```
 
-### ۵.۲. فعال‌سازی سرویس و تایمر Systemd
+### ۵.۳. فعال‌سازی سرویس و تایمر Systemd
 ```bash
 # کپی فایل‌های سرویس و تایمر به مسیر سیستم‌دی
 sudo cp deploy/systemd/backup-platform-metadata-backup.service /etc/systemd/system/
@@ -230,15 +237,14 @@ sudo systemctl list-timers --all | grep backup-platform
 
 3. **ایجاد یک نسخه بکاپ اضطراری از وضعیت فعلی پیش از Restore:**
    ```bash
-   sudo ./deploy/scripts/backup-metadata.sh /opt/backup-platform
+   sudo /usr/local/sbin/backup-platform-metadata-backup
    ```
 
-4. **اجرای دستور بازیابی `pg_restore` داخل کانتینر PostgreSQL:**
+4. **اجرای دستور بازیابی `pg_restore` مستقیماً روی کانتینر PostgreSQL:**
    ```bash
-   # پاک‌سازی آبجکت‌ها و بازنشانی دیتابیس با pg_restore با استفاده از متغیرهای درون کانتینر
    cat /srv/backup-platform/metadata-backups/backup-platform-metadata-YYYYMMDD-HHMMSS.dump | \
-   docker compose --env-file deploy/.env exec -T postgres \
-   sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists'
+   sudo docker exec -i backup-platform-postgres \
+     sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --exit-on-error'
    ```
 
 5. **راه‌اندازی مجدد کانتینر اپلیکیشن:**
@@ -281,7 +287,8 @@ docker compose --env-file deploy/.env down
 
 - [ ] فایل `deploy/.env` توسط Git ردیابی نمی‌شود (`.gitignore`).
 - [ ] دسترسی فایل `deploy/.env` روی مد `0600` قرار دارد.
-- [ ] اسکریپت‌های استقرار دارای پرمیشن اجرایی `100755` هستند (`deploy/scripts/*.sh`).
+- [ ] اسکریپت‌های موجود در مخزن دارای پرمیشن اجرایی `100755` هستند (`deploy/scripts/*.sh`).
+- [ ] اسکریپت بکاپ متادیتا در `/usr/local/sbin/backup-platform-metadata-backup` با مالکیت `root:root` و مد `0755` نصب شده است.
 - [ ] کلید `JWT_SIGNING_KEY` یکتا و با آنتروپی بالا (حداقل ۳۲ کاراکتر) تنظیم شده است.
 - [ ] کلید `ENCRYPTION_MASTER_KEY` یکتا و دقیقاً ۳۲ بایت (AES-256) تولید شده است.
 - [ ] کلمه عبور `POSTGRES_PASSWORD` پیچیده و تصادفی است.
@@ -294,7 +301,7 @@ docker compose --env-file deploy/.env down
 - [ ] خروجی اعتبارسنجی `docker compose config --quiet` بدون افشای مقادیر `deploy/.env` اجرا می‌شود.
 - [ ] روتاسیون لاگ‌های داکر در `compose.yaml` فعال است.
 - [ ] پایگاه داده PostgreSQL از ولوم ماندگار (`postgres_data`) استفاده می‌کند.
-- [ ] اجرای دستی اسکریپت `backup-metadata.sh` با موفقیت تست شده است.
+- [ ] اجرای دستی اسکریپت `/usr/local/sbin/backup-platform-metadata-backup` با موفقیت تست شده است.
 - [ ] سرویس سیستم‌دی پشتیبان‌گیری متادیتا به صورت دستی با موفقیت اجرا می‌شود.
 - [ ] تایمر سیستم‌دی `backup-platform-metadata-backup.timer` فعال و زمان‌بندی شده است.
 - [ ] دستورالعمل بازیابی متادیتا به طور کامل مرور و اعتبارسنجی شده است.
