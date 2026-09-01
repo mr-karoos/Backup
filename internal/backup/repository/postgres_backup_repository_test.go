@@ -188,6 +188,186 @@ func TestPostgresBackupRepository_RecoveryAndReaper_ErrorPropagation(t *testing.
 			t.Fatalf("expected error from ReapStaleRuns, got nil")
 		}
 	})
+
+	t.Run("Heartbeat-wins race: candidate A won by heartbeat, candidate B still stale and transitions", func(t *testing.T) {
+		runA := uuid.New()
+		orgA := uuid.New()
+		jobA := uuid.New()
+
+		runB := uuid.New()
+		orgB := uuid.New()
+		jobB := uuid.New()
+
+		jobAUpdated := false
+		jobBUpdated := false
+
+		q := &mockQuerier{
+			queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockRunsRows{
+					runs: []struct {
+						id      uuid.UUID
+						orgID   uuid.UUID
+						jobID   uuid.UUID
+						attempt int
+					}{
+						{id: runA, orgID: orgA, jobID: jobA, attempt: 1},
+						{id: runB, orgID: orgB, jobID: jobB, attempt: 2},
+					},
+				}, nil
+			},
+			execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				if strings.Contains(sql, "UPDATE backup_runs") {
+					// Check which run is being updated
+					for _, arg := range args {
+						if id, ok := arg.(uuid.UUID); ok {
+							if id == runA {
+								// Heartbeat renewed lease -> 0 rows affected
+								return pgconn.NewCommandTag("UPDATE 0"), nil
+							}
+							if id == runB {
+								// Still stale -> 1 row affected
+								return pgconn.NewCommandTag("UPDATE 1"), nil
+							}
+						}
+					}
+				}
+				if strings.Contains(sql, "UPDATE backup_jobs") {
+					for _, arg := range args {
+						if id, ok := arg.(uuid.UUID); ok {
+							if id == jobA {
+								jobAUpdated = true
+							}
+							if id == jobB {
+								jobBUpdated = true
+								return pgconn.NewCommandTag("UPDATE 1"), nil
+							}
+						}
+					}
+				}
+				return pgconn.NewCommandTag("UPDATE 0"), nil
+			},
+		}
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+
+		reaped, err := repo.ReapStaleRuns(context.Background())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(reaped) != 1 {
+			t.Fatalf("expected exactly 1 reaped run, got %d", len(reaped))
+		}
+		if reaped[0].ID != runB {
+			t.Errorf("expected candidate B to be reaped, got: %s", reaped[0].ID)
+		}
+		if jobAUpdated {
+			t.Errorf("job A must NOT be updated when heartbeat won race on run A")
+		}
+		if !jobBUpdated {
+			t.Errorf("job B must be updated when run B was reaped")
+		}
+	})
+
+	t.Run("ReapStaleRuns preserves successfully transitioned runs when subsequent candidate fails", func(t *testing.T) {
+		runA := uuid.New()
+		orgA := uuid.New()
+		jobA := uuid.New()
+
+		runB := uuid.New()
+		orgB := uuid.New()
+		jobB := uuid.New()
+
+		q := &mockQuerier{
+			queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockRunsRows{
+					runs: []struct {
+						id      uuid.UUID
+						orgID   uuid.UUID
+						jobID   uuid.UUID
+						attempt int
+					}{
+						{id: runA, orgID: orgA, jobID: jobA, attempt: 1},
+						{id: runB, orgID: orgB, jobID: jobB, attempt: 1},
+					},
+				}, nil
+			},
+			execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				for _, arg := range args {
+					if id, ok := arg.(uuid.UUID); ok {
+						if id == runA || id == jobA {
+							return pgconn.NewCommandTag("UPDATE 1"), nil
+						}
+						if id == runB {
+							return pgconn.NewCommandTag(""), errors.New("database connection reset")
+						}
+					}
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			},
+		}
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+
+		reaped, err := repo.ReapStaleRuns(context.Background())
+		if err == nil {
+			t.Fatalf("expected non-nil error from ReapStaleRuns on candidate B failure")
+		}
+		if len(reaped) != 1 {
+			t.Fatalf("expected candidate A to be preserved in returned reaped slice, got %d", len(reaped))
+		}
+		if reaped[0].ID != runA {
+			t.Errorf("expected candidate A in reaped slice, got: %s", reaped[0].ID)
+		}
+	})
+
+	t.Run("RecoverInterruptedRuns preserves successfully transitioned runs when subsequent candidate fails", func(t *testing.T) {
+		runA := uuid.New()
+		orgA := uuid.New()
+		jobA := uuid.New()
+
+		runB := uuid.New()
+		orgB := uuid.New()
+		jobB := uuid.New()
+
+		q := &mockQuerier{
+			queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return &mockRunsRows{
+					runs: []struct {
+						id      uuid.UUID
+						orgID   uuid.UUID
+						jobID   uuid.UUID
+						attempt int
+					}{
+						{id: runA, orgID: orgA, jobID: jobA, attempt: 1},
+						{id: runB, orgID: orgB, jobID: jobB, attempt: 1},
+					},
+				}, nil
+			},
+			execFunc: func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+				for _, arg := range args {
+					if id, ok := arg.(uuid.UUID); ok {
+						if id == runA || id == jobA {
+							return pgconn.NewCommandTag("UPDATE 1"), nil
+						}
+						if id == runB {
+							return pgconn.NewCommandTag(""), errors.New("database deadlock")
+						}
+					}
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			},
+		}
+		repo := NewPostgresBackupRepository(&mockTxManager{querier: q})
+
+		recovered, err := repo.RecoverInterruptedRuns(context.Background())
+		if err == nil {
+			t.Fatalf("expected non-nil error from RecoverInterruptedRuns on candidate B failure")
+		}
+		if len(recovered) != 1 {
+			t.Fatalf("expected candidate A to be preserved in returned recovered slice, got %d", len(recovered))
+		}
+		if recovered[0].ID != runA {
+			t.Errorf("expected candidate A in recovered slice, got: %s", recovered[0].ID)
+		}
+	})
 }
 
 func TestPostgresBackupRepository_GetLatestRunForJob_Sentinel(t *testing.T) {

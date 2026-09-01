@@ -428,6 +428,7 @@ func (p *LocalStorageProvider) CleanOrphanTemporaryArtifacts(ctx context.Context
 	}
 
 	cleanedCount := 0
+	var cleanErrors []error
 
 	for _, entry := range entries {
 		if ctx.Err() != nil {
@@ -452,6 +453,7 @@ func (p *LocalStorageProvider) CleanOrphanTemporaryArtifacts(ctx context.Context
 		runDirPath := filepath.Join(tmpDir, entry.Name())
 		fileEntries, err := os.ReadDir(runDirPath)
 		if err != nil {
+			cleanErrors = append(cleanErrors, errors.New("failed reading temporary run directory"))
 			continue
 		}
 
@@ -476,13 +478,19 @@ func (p *LocalStorageProvider) CleanOrphanTemporaryArtifacts(ctx context.Context
 			}
 
 			filePath := filepath.Join(runDirPath, fileEntry.Name())
-			if remErr := os.Remove(filePath); remErr == nil {
+			if remErr := os.Remove(filePath); remErr != nil {
+				cleanErrors = append(cleanErrors, errors.New("failed removing temporary artifact file"))
+			} else {
 				cleanedCount++
 			}
 		}
 
 		// Only removes directory if it is now completely empty
 		_ = os.Remove(runDirPath)
+	}
+
+	if len(cleanErrors) > 0 {
+		return cleanedCount, errors.New("failed removing one or more temporary artifact files")
 	}
 
 	return cleanedCount, nil

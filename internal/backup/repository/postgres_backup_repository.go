@@ -1417,7 +1417,7 @@ func (r *PostgresBackupRepository) RecoverInterruptedRuns(ctx context.Context) (
 		})
 
 		if err != nil {
-			return nil, fmt.Errorf("failed recovering interrupted run %s: %w", ir.id, err)
+			return recoveredRuns, fmt.Errorf("failed recovering interrupted run %s: %w", ir.id, err)
 		}
 		if didTransition {
 			recoveredRuns = append(recoveredRuns, domain.RecoveredRunInfo{
@@ -1511,7 +1511,7 @@ func (r *PostgresBackupRepository) ReapStaleRuns(ctx context.Context) ([]domain.
 		})
 
 		if err != nil {
-			return nil, fmt.Errorf("failed reaping stale run %s: %w", sr.id, err)
+			return reapedRuns, fmt.Errorf("failed reaping stale run %s: %w", sr.id, err)
 		}
 		if didTransition {
 			reapedRuns = append(reapedRuns, domain.RecoveredRunInfo{

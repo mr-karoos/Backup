@@ -39,19 +39,21 @@ func RunStartupRecovery(
 	}
 
 	// 2. Recover interrupted runs in database (fail-fast on startup)
-	recoveredRuns, err := repo.RecoverInterruptedRuns(ctx)
-	if err != nil {
-		log.Error("backup startup recovery failed")
-		return err
-	}
-
+	recoveredRuns, recErr := repo.RecoverInterruptedRuns(ctx)
 	if len(recoveredRuns) > 0 {
 		log.Info("startup recovery completed", slog.Int("recovered_interrupted_runs", len(recoveredRuns)))
 
-		// 3. Clean active artifacts for each recovered run
+		// 3. Clean active artifacts for each successfully recovered run using a bounded independent context
 		for _, run := range recoveredRuns {
-			cleanupCrashArtifacts(ctx, repo, storageProvider, run.OrganizationID, run.ID, log)
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			cleanupCrashArtifacts(cleanupCtx, repo, storageProvider, run.OrganizationID, run.ID, log)
+			cleanupCancel()
 		}
+	}
+
+	if recErr != nil {
+		log.Error("backup startup recovery failed")
+		return recErr
 	}
 
 	return nil
@@ -105,14 +107,17 @@ func (r *StaleRunReaper) Start(ctx context.Context) {
 			case <-reaperCtx.Done():
 				return
 			case <-ticker.C:
-				reapedRuns, err := r.repo.ReapStaleRuns(reaperCtx)
-				if err != nil {
-					r.logger.Warn("stale run reaper encountered error")
-				} else if len(reapedRuns) > 0 {
+				reapedRuns, reapErr := r.repo.ReapStaleRuns(reaperCtx)
+				if len(reapedRuns) > 0 {
 					r.logger.Info("reaped expired backup runs", slog.Int("reaped_runs", len(reapedRuns)))
 					for _, run := range reapedRuns {
-						cleanupCrashArtifacts(reaperCtx, r.repo, r.storageProvider, run.OrganizationID, run.ID, r.logger)
+						cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
+						cleanupCrashArtifacts(cleanupCtx, r.repo, r.storageProvider, run.OrganizationID, run.ID, r.logger)
+						cleanupCancel()
 					}
+				}
+				if reapErr != nil {
+					r.logger.Warn("stale run reaper encountered error")
 				}
 			}
 		}

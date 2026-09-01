@@ -21,22 +21,24 @@ import (
 )
 
 type mockRecoveryRepo struct {
-	mu           sync.Mutex
-	runs         map[uuid.UUID]*domain.BackupRun
-	jobs         map[uuid.UUID]*domain.BackupJob
-	artifacts    map[uuid.UUID][]*domain.BackupArtifact
-	tombstoned   map[uuid.UUID]bool
-	tombstoneErr error
-	recoverErr   error
-	reapErr      error
+	mu                  sync.Mutex
+	runs                map[uuid.UUID]*domain.BackupRun
+	jobs                map[uuid.UUID]*domain.BackupJob
+	artifacts           map[uuid.UUID][]*domain.BackupArtifact
+	tombstoned          map[uuid.UUID]bool
+	tombstoneErr        error
+	tombstoneErrByArtID map[uuid.UUID]error
+	recoverErr          error
+	reapErr             error
 }
 
 func newMockRecoveryRepo() *mockRecoveryRepo {
 	return &mockRecoveryRepo{
-		runs:       make(map[uuid.UUID]*domain.BackupRun),
-		jobs:       make(map[uuid.UUID]*domain.BackupJob),
-		artifacts:  make(map[uuid.UUID][]*domain.BackupArtifact),
-		tombstoned: make(map[uuid.UUID]bool),
+		runs:                make(map[uuid.UUID]*domain.BackupRun),
+		jobs:                make(map[uuid.UUID]*domain.BackupJob),
+		artifacts:           make(map[uuid.UUID][]*domain.BackupArtifact),
+		tombstoned:          make(map[uuid.UUID]bool),
+		tombstoneErrByArtID: make(map[uuid.UUID]error),
 	}
 }
 
@@ -74,7 +76,41 @@ func (m *mockRecoveryRepo) FindPendingJobs(ctx context.Context, limit int, after
 	return nil, nil
 }
 func (m *mockRecoveryRepo) TransactionalClaimJob(ctx context.Context, orgID, jobID uuid.UUID) (*domain.BackupRun, *domain.BackupJob, error) {
-	return nil, nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[jobID]
+	if !ok || j.OrganizationID != orgID {
+		return nil, nil, domain.ErrJobNotFound
+	}
+	if j.Status != domain.JobStatusPending {
+		return nil, nil, errors.New("cannot claim job: not in pending state")
+	}
+
+	maxAttempt := 0
+	for _, r := range m.runs {
+		if r.JobID == jobID && r.AttemptNumber > maxAttempt {
+			maxAttempt = r.AttemptNumber
+		}
+	}
+
+	nextAttempt := maxAttempt + 1
+	if nextAttempt > 3 {
+		return nil, nil, errors.New("cannot claim job: max attempts exceeded")
+	}
+
+	newRun := &domain.BackupRun{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		JobID:          jobID,
+		AttemptNumber:  nextAttempt,
+		Status:         domain.RunStatusRunning,
+		StartedAt:      time.Now().UTC(),
+		HeartbeatAt:    time.Now().UTC(),
+		LeaseUntil:     time.Now().UTC().Add(2 * time.Minute),
+	}
+	m.runs[newRun.ID] = newRun
+	j.Status = domain.JobStatusRunning
+	return newRun, j, nil
 }
 func (m *mockRecoveryRepo) GetRunByID(ctx context.Context, orgID, runID uuid.UUID) (*domain.BackupRun, error) {
 	m.mu.Lock()
@@ -144,6 +180,9 @@ func (m *mockRecoveryRepo) UpdateArtifactVerification(ctx context.Context, orgID
 func (m *mockRecoveryRepo) TombstoneArtifact(ctx context.Context, orgID, artifactID uuid.UUID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err, ok := m.tombstoneErrByArtID[artifactID]; ok {
+		return err
+	}
 	if m.tombstoneErr != nil {
 		return m.tombstoneErr
 	}
@@ -173,9 +212,6 @@ func (m *mockRecoveryRepo) GetRunArtifacts(ctx context.Context, orgID, runID uui
 func (m *mockRecoveryRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.recoverErr != nil {
-		return nil, m.recoverErr
-	}
 	var recovered []domain.RecoveredRunInfo
 	for _, r := range m.runs {
 		if r.Status == domain.RunStatusRunning {
@@ -199,16 +235,19 @@ func (m *mockRecoveryRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain
 				JobID:          r.JobID,
 				AttemptNumber:  r.AttemptNumber,
 			})
+			if m.recoverErr != nil {
+				break
+			}
 		}
+	}
+	if m.recoverErr != nil {
+		return recovered, m.recoverErr
 	}
 	return recovered, nil
 }
 func (m *mockRecoveryRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.reapErr != nil {
-		return nil, m.reapErr
-	}
 	now := time.Now().UTC()
 	var reaped []domain.RecoveredRunInfo
 	for _, r := range m.runs {
@@ -232,7 +271,13 @@ func (m *mockRecoveryRepo) ReapStaleRuns(ctx context.Context) ([]domain.Recovere
 				JobID:          r.JobID,
 				AttemptNumber:  r.AttemptNumber,
 			})
+			if m.reapErr != nil {
+				break
+			}
 		}
+	}
+	if m.reapErr != nil {
+		return reaped, m.reapErr
 	}
 	return reaped, nil
 }
@@ -241,14 +286,20 @@ var _ repository.BackupRepository = (*mockRecoveryRepo)(nil)
 
 type mockStorageWithControl struct {
 	storage.StorageProvider
-	deletedRefs []string
-	deleteErr   error
+	deletedRefs      []string
+	deleteErrByRef   map[string]error
+	defaultDeleteErr error
 }
 
 func (m *mockStorageWithControl) DeleteArtifact(ctx context.Context, storageRef string) error {
 	m.deletedRefs = append(m.deletedRefs, storageRef)
-	if m.deleteErr != nil {
-		return m.deleteErr
+	if m.deleteErrByRef != nil {
+		if err, ok := m.deleteErrByRef[storageRef]; ok {
+			return err
+		}
+	}
+	if m.defaultDeleteErr != nil {
+		return m.defaultDeleteErr
 	}
 	if m.StorageProvider != nil {
 		return m.StorageProvider.DeleteArtifact(ctx, storageRef)
@@ -509,7 +560,7 @@ func TestRecoveryAndReaper_Comprehensive(t *testing.T) {
 			},
 		}
 
-		mockStore := &mockStorageWithControl{deleteErr: storage.ErrStorageIO}
+		mockStore := &mockStorageWithControl{defaultDeleteErr: storage.ErrStorageIO}
 		err := RunStartupRecovery(context.Background(), repo, mockStore, nullLogger)
 		if err != nil {
 			t.Fatalf("run recovery itself must not fail: %v", err)
@@ -696,6 +747,180 @@ func TestRecoveryAndReaper_Comprehensive(t *testing.T) {
 		_ = RunStartupRecovery(context.Background(), repo, mockStore, nullLogger)
 		if repo.jobs[jobID].Status != domain.JobStatusPending {
 			t.Errorf("job must remain pending without corruption")
+		}
+	})
+
+	t.Run("Partial success in Startup Recovery: cleans transitioned runs and returns fail-fast error", func(t *testing.T) {
+		repo := newMockRecoveryRepo()
+		orgID := uuid.New()
+		jobA := uuid.New()
+		runA := uuid.New()
+		artA := uuid.New()
+
+		repo.jobs[jobA] = &domain.BackupJob{ID: jobA, OrganizationID: orgID, Status: domain.JobStatusRunning}
+		repo.runs[runA] = &domain.BackupRun{ID: runA, OrganizationID: orgID, JobID: jobA, AttemptNumber: 1, Status: domain.RunStatusRunning}
+		repo.artifacts[runA] = []*domain.BackupArtifact{
+			{ID: artA, OrganizationID: orgID, RunID: runA, StorageReference: "local://artA.sql.gz", IsDeleted: false},
+		}
+
+		// Simulate DB error during recovery
+		repo.recoverErr = errors.New("database connection reset on candidate B")
+
+		mockStore := &mockStorageWithControl{}
+		err := RunStartupRecovery(context.Background(), repo, mockStore, nullLogger)
+		if err == nil {
+			t.Fatalf("startup recovery must fail-fast with error when DB recovery has error")
+		}
+
+		// Candidate A was transitioned before error -> must be cleaned up
+		if !repo.tombstoned[artA] {
+			t.Errorf("candidate A artifact must be tombstoned even though recovery returned error")
+		}
+		if repo.runs[runA].Status != domain.RunStatusFailed {
+			t.Errorf("candidate A run must remain failed")
+		}
+		if repo.jobs[jobA].Status != domain.JobStatusPending {
+			t.Errorf("candidate A job must remain pending")
+		}
+	})
+
+	t.Run("Multi-artifact cleanup continues across independent failures", func(t *testing.T) {
+		// Case A: Artifact 1 physical delete fails, Artifact 2 physical delete succeeds
+		repoA := newMockRecoveryRepo()
+		orgID := uuid.New()
+		jobID := uuid.New()
+		runID := uuid.New()
+		art1 := uuid.New()
+		art2 := uuid.New()
+
+		repoA.jobs[jobID] = &domain.BackupJob{ID: jobID, OrganizationID: orgID, Status: domain.JobStatusRunning}
+		repoA.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, JobID: jobID, AttemptNumber: 1, Status: domain.RunStatusRunning}
+		repoA.artifacts[runID] = []*domain.BackupArtifact{
+			{ID: art1, OrganizationID: orgID, RunID: runID, StorageReference: "local://art1.sql.gz", IsDeleted: false},
+			{ID: art2, OrganizationID: orgID, RunID: runID, StorageReference: "local://art2.sql.gz", IsDeleted: false},
+		}
+
+		mockStoreA := &mockStorageWithControl{
+			deleteErrByRef: map[string]error{
+				"local://art1.sql.gz": errors.New("permission denied on art1"),
+			},
+		}
+
+		_ = RunStartupRecovery(context.Background(), repoA, mockStoreA, nullLogger)
+
+		if repoA.tombstoned[art1] {
+			t.Errorf("art1 must NOT be tombstoned because physical delete failed")
+		}
+		if !repoA.tombstoned[art2] {
+			t.Errorf("art2 MUST be tombstoned because physical delete succeeded")
+		}
+
+		// Case B: Artifact 1 physical delete succeeds but tombstone fails; Artifact 2 succeeds both
+		repoB := newMockRecoveryRepo()
+		repoB.jobs[jobID] = &domain.BackupJob{ID: jobID, OrganizationID: orgID, Status: domain.JobStatusRunning}
+		repoB.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, JobID: jobID, AttemptNumber: 1, Status: domain.RunStatusRunning}
+		repoB.artifacts[runID] = []*domain.BackupArtifact{
+			{ID: art1, OrganizationID: orgID, RunID: runID, StorageReference: "local://art1.sql.gz", IsDeleted: false},
+			{ID: art2, OrganizationID: orgID, RunID: runID, StorageReference: "local://art2.sql.gz", IsDeleted: false},
+		}
+		repoB.tombstoneErrByArtID[art1] = errors.New("db error on art1 tombstone")
+
+		mockStoreB := &mockStorageWithControl{}
+		_ = RunStartupRecovery(context.Background(), repoB, mockStoreB, nullLogger)
+
+		if !repoB.tombstoned[art2] {
+			t.Errorf("art2 must be tombstoned even though art1 tombstone failed")
+		}
+	})
+
+	t.Run("Startup retry creates a new run with incremented attempt number", func(t *testing.T) {
+		repo := newMockRecoveryRepo()
+		orgID := uuid.New()
+		jobID := uuid.New()
+		run1ID := uuid.New()
+
+		// Attempt 1 in running state
+		repo.jobs[jobID] = &domain.BackupJob{ID: jobID, OrganizationID: orgID, Status: domain.JobStatusRunning}
+		repo.runs[run1ID] = &domain.BackupRun{
+			ID:             run1ID,
+			OrganizationID: orgID,
+			JobID:          jobID,
+			AttemptNumber:  1,
+			Status:         domain.RunStatusRunning,
+		}
+
+		store, _ := local.NewLocalStorageProvider(t.TempDir())
+
+		// 1. Crash recovery resets old run to failed, job to pending
+		err := RunStartupRecovery(context.Background(), repo, store, nullLogger)
+		if err != nil {
+			t.Fatalf("recovery error: %v", err)
+		}
+
+		if repo.runs[run1ID].Status != domain.RunStatusFailed {
+			t.Fatalf("run1 must be failed")
+		}
+		if repo.jobs[jobID].Status != domain.JobStatusPending {
+			t.Fatalf("job must be pending")
+		}
+
+		// 2. Next worker claim creates a NEW run
+		newRun, updatedJob, claimErr := repo.TransactionalClaimJob(context.Background(), orgID, jobID)
+		if claimErr != nil {
+			t.Fatalf("claim failed: %v", claimErr)
+		}
+
+		if newRun.ID == run1ID {
+			t.Errorf("new run must have a distinct UUID from previous crashed run")
+		}
+		if newRun.AttemptNumber != 2 {
+			t.Errorf("expected attempt number 2, got %d", newRun.AttemptNumber)
+		}
+		if newRun.Status != domain.RunStatusRunning {
+			t.Errorf("expected new run running, got %s", newRun.Status)
+		}
+		if updatedJob.Status != domain.JobStatusRunning {
+			t.Errorf("expected job running, got %s", updatedJob.Status)
+		}
+
+		// Ensure old run is preserved in history
+		oldRun, _ := repo.GetRunByID(context.Background(), orgID, run1ID)
+		if oldRun == nil || oldRun.Status != domain.RunStatusFailed {
+			t.Errorf("old run must remain in history as failed")
+		}
+	})
+
+	t.Run("Temp cleanup preserves symlinks and does not follow them", func(t *testing.T) {
+		tempDir := t.TempDir()
+		store, err := local.NewLocalStorageProvider(tempDir)
+		if err != nil {
+			t.Fatalf("failed creating store: %v", err)
+		}
+		_ = store.EnsureStorageRoot(context.Background())
+
+		// Create an outside sensitive directory
+		outsideDir := t.TempDir()
+		sensitiveFile := filepath.Join(outsideDir, "sensitive.txt")
+		_ = os.WriteFile(sensitiveFile, []byte("sensitive"), 0600)
+
+		// Create a symlink in tmp pointing to outsideDir
+		symlinkPath := filepath.Join(tempDir, "tmp", fmt.Sprintf("run-%s", uuid.New().String()))
+		symlinkErr := os.Symlink(outsideDir, symlinkPath)
+		if symlinkErr != nil {
+			t.Skipf("skipping symlink test on platform without symlink support: %v", symlinkErr)
+		}
+
+		cleaned, err := store.CleanOrphanTemporaryArtifacts(context.Background())
+		if err != nil {
+			t.Fatalf("cleanup failed: %v", err)
+		}
+		if cleaned != 0 {
+			t.Errorf("expected 0 cleaned for symlink dir, got %d", cleaned)
+		}
+
+		// Sensitive file must NOT be deleted
+		if _, err := os.Stat(sensitiveFile); err != nil {
+			t.Errorf("outside sensitive file was deleted or affected by symlink traversal!")
 		}
 	})
 }

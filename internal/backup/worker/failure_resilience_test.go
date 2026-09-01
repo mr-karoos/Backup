@@ -2,8 +2,13 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,6 +22,34 @@ import (
 	"backup-platform/internal/storage/local"
 	"backup-platform/pkg/uuid"
 )
+
+type midStreamNetworkFailingCapability struct {
+	bytesWritten int
+}
+
+func (m *midStreamNetworkFailingCapability) BackupDatabase(ctx context.Context, target connector.Target, credPayload *payload.PayloadV1, databaseName string, dest io.Writer) error {
+	chunk := []byte("-- MySQL dump 10.13\nCREATE DATABASE `ecommerce_prod`;\nINSERT INTO products VALUES (1, 'item1');\n")
+	n, _ := dest.Write(chunk)
+	m.bytesWritten = n
+	return connector.ErrSSHNetwork
+}
+
+func (m *midStreamNetworkFailingCapability) DiscoverDatabases(ctx context.Context, target connector.Target, credPayload *payload.PayloadV1) ([]string, error) {
+	return []string{"ecommerce_prod"}, nil
+}
+
+type partialThenENOSPCReader struct {
+	written int
+}
+
+func (r *partialThenENOSPCReader) Read(p []byte) (int, error) {
+	if r.written == 0 {
+		n := copy(p, []byte("some initial database dump content before disk fills up"))
+		r.written = n
+		return n, nil
+	}
+	return 0, syscall.ENOSPC
+}
 
 type failingSaveStorageProvider struct {
 	storage.StorageProvider
@@ -102,12 +135,13 @@ func setupTestWorker(t *testing.T, cap connector.DatabaseBackupCapability, store
 }
 
 func TestFailureResilience_Scenarios(t *testing.T) {
-	t.Run("Scenario 1: Network interruption mid-stream sets run failed and retries job", func(t *testing.T) {
+	t.Run("Scenario 1: Real mid-stream network interruption cleans partial artifact, sets run failed and retries job", func(t *testing.T) {
 		tempDir := t.TempDir()
 		store, _ := local.NewLocalStorageProvider(tempDir)
 		_ = store.EnsureStorageRoot(context.Background())
 
-		workerPool, repo, _, jobID := setupTestWorker(t, &fakeCapability{errToReturn: connector.ErrSSHNetwork}, store)
+		cap := &midStreamNetworkFailingCapability{}
+		workerPool, repo, _, jobID := setupTestWorker(t, cap, store)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		workerPool.Start(ctx)
@@ -117,6 +151,10 @@ func TestFailureResilience_Scenarios(t *testing.T) {
 
 		repo.mu.Lock()
 		defer repo.mu.Unlock()
+
+		if cap.bytesWritten <= 0 {
+			t.Fatalf("expected bytes to have been written mid-stream before error, got %d", cap.bytesWritten)
+		}
 
 		if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusFailed {
 			t.Fatalf("expected run failed on network error, got: %+v", repo.finalizedRun)
@@ -132,6 +170,16 @@ func TestFailureResilience_Scenarios(t *testing.T) {
 		// No secret leaked
 		if strings.Contains(*repo.finalizedRun.ErrorMessage, "secret-pass") {
 			t.Errorf("SECURITY FLAW: credential leaked in error message: %s", *repo.finalizedRun.ErrorMessage)
+		}
+		// No artifact in DB
+		if len(repo.artifacts) != 0 {
+			t.Errorf("expected 0 artifacts persisted on failure, got %d", len(repo.artifacts))
+		}
+
+		// Verify that no incomplete .partial file remains on disk
+		runTmpDir := filepath.Join(tempDir, "tmp", fmt.Sprintf("run-%s", repo.finalizedRun.ID.String()))
+		if entries, err := os.ReadDir(runTmpDir); err == nil && len(entries) > 0 {
+			t.Errorf("expected temp run dir to be empty or removed, but found %d files: %+v", len(entries), entries)
 		}
 	})
 
@@ -254,6 +302,41 @@ func TestFailureResilience_Scenarios(t *testing.T) {
 		}
 		if strings.Contains(*repo.finalizedRun.ErrorMessage, tempDir) || strings.Contains(*repo.finalizedRun.ErrorMessage, "tmp") {
 			t.Errorf("SECURITY FLAW: storage path leaked in error message")
+		}
+	})
+
+	t.Run("Scenario 6: Real partial-write ENOSPC in LocalStorageProvider cleans partial file cleanly", func(t *testing.T) {
+		tempDir := t.TempDir()
+		store, err := local.NewLocalStorageProvider(tempDir)
+		if err != nil {
+			t.Fatalf("failed creating local storage: %v", err)
+		}
+		_ = store.EnsureStorageRoot(context.Background())
+
+		orgID := uuid.New()
+		resID := uuid.New()
+		runID := uuid.New()
+		artID := uuid.New()
+
+		reader := &partialThenENOSPCReader{}
+		_, saveErr := store.SaveArtifact(context.Background(), orgID, resID, runID, artID, ".sql.gz", reader)
+		if saveErr == nil {
+			t.Fatalf("expected error from ENOSPC, got nil")
+		}
+
+		if !errors.Is(saveErr, storage.ErrStorageFull) {
+			t.Errorf("expected error compatible with storage.ErrStorageFull, got: %v", saveErr)
+		}
+
+		// Ensure no path leaked in error message
+		if strings.Contains(saveErr.Error(), tempDir) {
+			t.Errorf("path leaked in error message: %s", saveErr.Error())
+		}
+
+		// Ensure no partial file remains
+		partialFile := filepath.Join(tempDir, "tmp", fmt.Sprintf("run-%s", runID.String()), fmt.Sprintf("artifact-%s.sql.gz.partial", artID.String()))
+		if _, statErr := os.Stat(partialFile); !os.IsNotExist(statErr) {
+			t.Errorf("partial file was not cleaned up on ENOSPC: %s", partialFile)
 		}
 	})
 }
