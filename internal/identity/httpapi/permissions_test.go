@@ -17,6 +17,7 @@ func TestPermissionsForRole(t *testing.T) {
 			"backup_plan:read",
 			"backup_plan:write",
 			"backup_job:execute",
+			"backup_run:verify",
 			"backup_artifact:download",
 			"backup_artifact:delete",
 			"audit_log:read",
@@ -37,6 +38,7 @@ func TestPermissionsForRole(t *testing.T) {
 			"resource:read",
 			"backup_plan:read",
 			"backup_job:execute",
+			"backup_run:verify",
 			"backup_artifact:download",
 		}
 		if len(perms) != len(expected) {

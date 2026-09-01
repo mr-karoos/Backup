@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"backup-platform/internal/backup/domain"
+	"backup-platform/internal/backup/service"
 	"backup-platform/pkg/uuid"
 )
 
@@ -327,4 +328,24 @@ func SafeArtifactFilename(targetName string, format domain.ArtifactFormat, artif
 		return clean
 	}
 	return fmt.Sprintf("%s%s", clean, ext)
+}
+
+// VerifyBackupRunResponse defines the JSON response returned for on-demand backup run verification.
+type VerifyBackupRunResponse struct {
+	RunID              uuid.UUID                 `json:"run_id"`
+	VerificationStatus domain.VerificationStatus `json:"verification_status"`
+	VerifiedAt         time.Time                 `json:"verified_at"`
+	Details            map[string]any            `json:"details"`
+}
+
+func toVerifyBackupRunResponse(res *service.RunVerificationResult) *VerifyBackupRunResponse {
+	if res == nil {
+		return nil
+	}
+	return &VerifyBackupRunResponse{
+		RunID:              res.RunID,
+		VerificationStatus: res.VerificationStatus,
+		VerifiedAt:         res.VerifiedAt,
+		Details:            res.Details,
+	}
 }

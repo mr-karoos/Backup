@@ -14,6 +14,7 @@ const (
 	PermissionBackupPlanRead         Permission = "backup_plan:read"
 	PermissionBackupPlanWrite        Permission = "backup_plan:write"
 	PermissionBackupJobExecute       Permission = "backup_job:execute"
+	PermissionBackupRunVerify        Permission = "backup_run:verify"
 	PermissionBackupArtifactDownload Permission = "backup_artifact:download"
 	PermissionBackupArtifactDelete   Permission = "backup_artifact:delete"
 	PermissionAuditLogRead           Permission = "audit_log:read"
@@ -26,6 +27,7 @@ var adminPermissions = []Permission{
 	PermissionBackupPlanRead,
 	PermissionBackupPlanWrite,
 	PermissionBackupJobExecute,
+	PermissionBackupRunVerify,
 	PermissionBackupArtifactDownload,
 	PermissionBackupArtifactDelete,
 	PermissionAuditLogRead,
@@ -35,6 +37,7 @@ var memberPermissions = []Permission{
 	PermissionResourceRead,
 	PermissionBackupPlanRead,
 	PermissionBackupJobExecute,
+	PermissionBackupRunVerify,
 	PermissionBackupArtifactDownload,
 }
 

@@ -135,6 +135,17 @@ func (m *mockArtifactManager) DeleteArtifact(ctx context.Context, role orgDomain
 	return errors.New("not implemented")
 }
 
+type mockVerifier struct {
+	verifyRunFunc func(ctx context.Context, role orgDomain.Role, orgID, runID uuid.UUID) (*service.RunVerificationResult, error)
+}
+
+func (m *mockVerifier) VerifyRun(ctx context.Context, role orgDomain.Role, orgID, runID uuid.UUID) (*service.RunVerificationResult, error) {
+	if m.verifyRunFunc != nil {
+		return m.verifyRunFunc(ctx, role, orgID, runID)
+	}
+	return nil, errors.New("not implemented")
+}
+
 func TestHandler_CreateBackupJob(t *testing.T) {
 	orgID := uuid.New()
 	userID := uuid.New()
@@ -157,7 +168,7 @@ func TestHandler_CreateBackupJob(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(mockCreator, nil, nil, nil, nil)
+		handler := NewHandler(mockCreator, nil, nil, nil, nil, nil)
 
 		reqBody := `{"resource_id":"` + resID.String() + `","backup_type":"mysql_database","target_spec":{"databases":["prod_db"]}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-jobs", bytes.NewBufferString(reqBody))
@@ -204,7 +215,7 @@ func TestHandler_CreateBackupJob(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(mockCreator, nil, nil, nil, nil)
+		handler := NewHandler(mockCreator, nil, nil, nil, nil, nil)
 
 		reqBody := `{"resource_id":"` + resID.String() + `","backup_type":"mysql_database","target_spec":{"databases":["prod_db"]}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-jobs", bytes.NewBufferString(reqBody))
@@ -233,7 +244,7 @@ func TestHandler_CreateBackupJob(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(mockCreator, nil, nil, nil, nil)
+		handler := NewHandler(mockCreator, nil, nil, nil, nil, nil)
 
 		reqBody := `{"resource_id":"` + resID.String() + `","backup_type":"mysql_database","target_spec":{"databases":[]}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-jobs", bytes.NewBufferString(reqBody))
@@ -262,7 +273,7 @@ func TestHandler_CreateBackupJob(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(mockCreator, nil, nil, nil, nil)
+		handler := NewHandler(mockCreator, nil, nil, nil, nil, nil)
 
 		reqBody := `{"resource_id":"` + resID.String() + `","backup_type":"mysql_database","target_spec":{}}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-jobs", bytes.NewBufferString(reqBody))
@@ -301,7 +312,7 @@ func TestHandler_CreateBackupJob(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(mockCreator, nil, nil, nil, nil)
+		handler := NewHandler(mockCreator, nil, nil, nil, nil, nil)
 
 		reqBody := `{"backup_plan_id":"` + planUUID.String() + `"}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-jobs", bytes.NewBufferString(reqBody))
@@ -345,7 +356,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, mockPlan, nil, nil, nil)
+		handler := NewHandler(nil, mockPlan, nil, nil, nil, nil)
 
 		reqBody := `{
 			"name": "Daily MySQL Backup",
@@ -397,7 +408,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, mockPlan, nil, nil, nil)
+		handler := NewHandler(nil, mockPlan, nil, nil, nil, nil)
 
 		reqBody := `{
 			"name": "Daily MySQL Backup",
@@ -439,7 +450,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, mockPlan, nil, nil, nil)
+		handler := NewHandler(nil, mockPlan, nil, nil, nil, nil)
 
 		reqBody := `{
 			"name": "Daily MySQL Backup",
@@ -481,7 +492,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, mockPlan, nil, nil, nil)
+		handler := NewHandler(nil, mockPlan, nil, nil, nil, nil)
 
 		reqBody := `{
 			"name": "Conflicting MySQL Backup",
@@ -543,7 +554,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, mockPlan, nil, nil, nil)
+		handler := NewHandler(nil, mockPlan, nil, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-plans", nil)
 		tenantCtx := &orgHttpapi.TenantContext{
@@ -567,7 +578,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 	})
 
 	t.Run("GET /api/v1/backup-plans returns 400 on unknown query parameter", func(t *testing.T) {
-		handler := NewHandler(nil, &mockPlanManager{}, nil, nil, nil)
+		handler := NewHandler(nil, &mockPlanManager{}, nil, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-plans?unknown=param", nil)
 		tenantCtx := &orgHttpapi.TenantContext{
@@ -612,7 +623,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, mockPlan, nil, nil, nil)
+		handler := NewHandler(nil, mockPlan, nil, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-plans", nil)
 		tenantCtx := &orgHttpapi.TenantContext{
@@ -674,7 +685,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, mockPlan, nil, nil, nil)
+		handler := NewHandler(nil, mockPlan, nil, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-plans/"+planID.String(), nil)
 		req.SetPathValue("id", planID.String())
@@ -730,7 +741,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, mockPlan, nil, nil, nil)
+		handler := NewHandler(nil, mockPlan, nil, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-plans/"+planID.String(), nil)
 		req.SetPathValue("id", planID.String())
@@ -771,7 +782,7 @@ func TestHandler_BackupPlans(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, mockPlan, nil, nil, nil)
+		handler := NewHandler(nil, mockPlan, nil, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/backup-plans/"+planID.String(), nil)
 		req.SetPathValue("id", planID.String())
@@ -824,7 +835,7 @@ func TestHandler_BackupRuns(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, mockHist, nil, nil)
+		handler := NewHandler(nil, nil, mockHist, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-runs?resource_id="+resID.String()+"&status=success", nil)
 		tenantCtx := &orgHttpapi.TenantContext{
@@ -863,7 +874,7 @@ func TestHandler_BackupRuns(t *testing.T) {
 	})
 
 	t.Run("GET /api/v1/backup-runs returns 400 on unknown query parameter", func(t *testing.T) {
-		handler := NewHandler(nil, nil, &mockHistoryManager{}, nil, nil)
+		handler := NewHandler(nil, nil, &mockHistoryManager{}, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-runs?foo=bar", nil)
 		tenantCtx := &orgHttpapi.TenantContext{
@@ -903,7 +914,7 @@ func TestHandler_BackupRuns(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, mockHist, nil, nil)
+		handler := NewHandler(nil, nil, mockHist, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-runs/"+runID.String(), nil)
 		req.SetPathValue("id", runID.String())
@@ -930,7 +941,7 @@ func TestHandler_BackupRuns(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, mockHist, nil, nil)
+		handler := NewHandler(nil, nil, mockHist, nil, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-runs/"+runID.String(), nil)
 		req.SetPathValue("id", runID.String())
@@ -982,7 +993,7 @@ func TestHandler_BackupArtifacts(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts", nil)
 		tenantCtx := &orgHttpapi.TenantContext{
@@ -1037,7 +1048,7 @@ func TestHandler_BackupArtifacts(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String(), nil)
 		req.SetPathValue("id", artID.String())
@@ -1090,7 +1101,7 @@ func TestHandler_BackupArtifacts(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts", nil)
 		tenantCtx := &orgHttpapi.TenantContext{
@@ -1145,7 +1156,7 @@ func TestHandler_DownloadBackupArtifact(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
 		req.SetPathValue("id", artID.String())
@@ -1198,7 +1209,7 @@ func TestHandler_DownloadBackupArtifact(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
 		req.SetPathValue("id", artID.String())
@@ -1242,7 +1253,7 @@ func TestHandler_DownloadBackupArtifact(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
 		req.SetPathValue("id", artID.String())
@@ -1278,7 +1289,7 @@ func TestHandler_DownloadBackupArtifact(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
 		req.SetPathValue("id", artID.String())
@@ -1305,7 +1316,7 @@ func TestHandler_DownloadBackupArtifact(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
 		req.SetPathValue("id", artID.String())
@@ -1340,7 +1351,7 @@ func TestHandler_DeleteBackupArtifact(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/backup-artifacts/"+artID.String(), nil)
 		req.SetPathValue("id", artID.String())
@@ -1370,7 +1381,7 @@ func TestHandler_DeleteBackupArtifact(t *testing.T) {
 			},
 		}
 
-		handler := NewHandler(nil, nil, nil, mockArt, nil)
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
 
 		req := httptest.NewRequest(http.MethodDelete, "/api/v1/backup-artifacts/"+artID.String(), nil)
 		req.SetPathValue("id", artID.String())
@@ -1387,6 +1398,291 @@ func TestHandler_DeleteBackupArtifact(t *testing.T) {
 
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("expected 403 Forbidden, got %d", rec.Code)
+		}
+	})
+}
+
+func TestHandler_VerifyBackupRun(t *testing.T) {
+	orgID := uuid.New()
+	userID := uuid.New()
+	runID := uuid.New()
+	now := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 200 OK for admin", func(t *testing.T) {
+		mockVer := &mockVerifier{
+			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
+				if role != orgDomain.RoleAdmin || oID != orgID || rID != runID {
+					return nil, errors.New("mismatch")
+				}
+				return &service.RunVerificationResult{
+					RunID:              runID,
+					VerificationStatus: domain.VerificationStatusVerified,
+					VerifiedAt:         now,
+					Details: map[string]any{
+						"checksum_matched":       true,
+						"archive_integrity":      "passed",
+						"compression_valid":      true,
+						"extracted_sample_check": "valid_sql_dump",
+					},
+				}, nil
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, nil, mockVer, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-runs/"+runID.String()+"/verify", nil)
+		req.SetPathValue("id", runID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleAdmin,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.VerifyBackupRun(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("expected Cache-Control: no-store, got: %s", cc)
+		}
+
+		var resp struct {
+			Data VerifyBackupRunResponse `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed decoding response: %v", err)
+		}
+		if resp.Data.RunID != runID {
+			t.Errorf("expected run_id %s, got: %s", runID, resp.Data.RunID)
+		}
+		if resp.Data.VerificationStatus != domain.VerificationStatusVerified {
+			t.Errorf("expected status verified, got: %s", resp.Data.VerificationStatus)
+		}
+		if resp.Data.Details["checksum_matched"] != true || resp.Data.Details["extracted_sample_check"] != "valid_sql_dump" {
+			t.Errorf("unexpected details: %+v", resp.Data.Details)
+		}
+
+		// Ensure no storage reference or file paths in JSON body
+		bodyStr := rec.Body.String()
+		if strings.Contains(bodyStr, "storage_reference") || strings.Contains(bodyStr, "physical_path") {
+			t.Errorf("SECURITY FLAW: leaked internal path or storage reference in response body: %s", bodyStr)
+		}
+	})
+
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 200 OK for member", func(t *testing.T) {
+		mockVer := &mockVerifier{
+			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
+				return &service.RunVerificationResult{
+					RunID:              runID,
+					VerificationStatus: domain.VerificationStatusVerified,
+					VerifiedAt:         now,
+					Details: map[string]any{
+						"checksum_matched":  true,
+						"archive_integrity": "passed",
+						"compression_valid": true,
+						"tar_archive_valid": true,
+					},
+				}, nil
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, nil, mockVer, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-runs/"+runID.String()+"/verify", nil)
+		req.SetPathValue("id", runID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleMember,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.VerifyBackupRun(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 403 Forbidden for viewer", func(t *testing.T) {
+		mockVer := &mockVerifier{
+			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
+				return nil, domain.ErrUnauthorizedRole
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, nil, mockVer, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-runs/"+runID.String()+"/verify", nil)
+		req.SetPathValue("id", runID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleViewer,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.VerifyBackupRun(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 Forbidden, got %d", rec.Code)
+		}
+	})
+
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 400 Bad Request on invalid UUID", func(t *testing.T) {
+		handler := NewHandler(nil, nil, nil, nil, nil, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-runs/invalid-uuid/verify", nil)
+		req.SetPathValue("id", "invalid-uuid")
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleAdmin,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.VerifyBackupRun(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", rec.Code)
+		}
+	})
+
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 404 Not Found on missing run", func(t *testing.T) {
+		mockVer := &mockVerifier{
+			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
+				return nil, domain.ErrRunNotFound
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, nil, mockVer, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-runs/"+runID.String()+"/verify", nil)
+		req.SetPathValue("id", runID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleAdmin,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.VerifyBackupRun(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 Not Found, got %d", rec.Code)
+		}
+	})
+
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 422 Unprocessable Entity when no verifiable artifacts remain", func(t *testing.T) {
+		mockVer := &mockVerifier{
+			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
+				return nil, domain.ErrNoVerifiableArtifacts
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, nil, mockVer, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-runs/"+runID.String()+"/verify", nil)
+		req.SetPathValue("id", runID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleAdmin,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.VerifyBackupRun(rec, req)
+
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("expected 422 Unprocessable Entity, got %d", rec.Code)
+		}
+	})
+
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 503 Service Unavailable on infrastructure error", func(t *testing.T) {
+		mockVer := &mockVerifier{
+			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
+				return nil, domain.ErrBackupServiceUnavailable
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, nil, mockVer, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-runs/"+runID.String()+"/verify", nil)
+		req.SetPathValue("id", runID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleAdmin,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.VerifyBackupRun(rec, req)
+
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503 Service Unavailable, got %d", rec.Code)
+		}
+	})
+
+	t.Run("POST /api/v1/backup-runs/{id}/verify returns 200 OK with failed status on integrity corruption", func(t *testing.T) {
+		mockVer := &mockVerifier{
+			verifyRunFunc: func(ctx context.Context, role orgDomain.Role, oID, rID uuid.UUID) (*service.RunVerificationResult, error) {
+				return &service.RunVerificationResult{
+					RunID:              runID,
+					VerificationStatus: domain.VerificationStatusFailed,
+					VerifiedAt:         now,
+					Details: map[string]any{
+						"checksum_matched":  false,
+						"archive_integrity": "failed",
+						"compression_valid": true,
+						"error":             "checksum mismatch: hash does not match recorded checksum",
+					},
+				}, nil
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, nil, mockVer, nil)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/backup-runs/"+runID.String()+"/verify", nil)
+		req.SetPathValue("id", runID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleAdmin,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.VerifyBackupRun(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		var resp struct {
+			Data VerifyBackupRunResponse `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed decoding response: %v", err)
+		}
+		if resp.Data.VerificationStatus != domain.VerificationStatusFailed {
+			t.Errorf("expected status failed, got: %s", resp.Data.VerificationStatus)
 		}
 	})
 }

@@ -98,4 +98,7 @@ var (
 
 	// ErrUnauthorizedRole indicates that the user role is not permitted for the requested backup operation.
 	ErrUnauthorizedRole = errors.New("unauthorized role for backup operation")
+
+	// ErrNoVerifiableArtifacts indicates that no active, non-deleted artifacts exist for the requested backup run.
+	ErrNoVerifiableArtifacts = errors.New("no verifiable backup artifacts found for run")
 )

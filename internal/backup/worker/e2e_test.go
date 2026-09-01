@@ -401,7 +401,7 @@ func TestPhase5_CompleteVerticalSlice_EndToEnd(t *testing.T) {
 
 	// 1. Initialize HTTP API & Service
 	jobService := backupService.NewBackupJobService(repo, rf)
-	httpHandler := backupHttpapi.NewHandler(jobService, nil, nil, nil, nil)
+	httpHandler := backupHttpapi.NewHandler(jobService, nil, nil, nil, nil, nil)
 
 	// 2. Perform HTTP Request: POST /api/v1/backup-jobs
 	requestPayload := `{"resource_id":"` + resID.String() + `","backup_type":"mysql_database","target_spec":{"databases":["ecommerce_prod"]}}`
@@ -596,7 +596,7 @@ func TestE2E_WebsiteFilesBackupWorkflow(t *testing.T) {
 
 	// 1. Initialize HTTP API & Service
 	jobService := backupService.NewBackupJobService(repo, rf)
-	httpHandler := backupHttpapi.NewHandler(jobService, nil, nil, nil, nil)
+	httpHandler := backupHttpapi.NewHandler(jobService, nil, nil, nil, nil, nil)
 
 	// 2. Perform HTTP Request: POST /api/v1/backup-jobs for website files
 	requestPayload := `{"resource_id":"` + resID.String() + `","backup_type":"website_files","target_spec":{"paths":["/var/www/mywebsite"],"exclude_patterns":["cache/*"]}}`

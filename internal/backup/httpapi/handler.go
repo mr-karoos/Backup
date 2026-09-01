@@ -57,12 +57,18 @@ type BackupArtifactManager interface {
 	DeleteArtifact(ctx context.Context, role orgDomain.Role, orgID, userID, artifactID uuid.UUID, clientIP, userAgent string) error
 }
 
-// Handler handles HTTP endpoints for backup operations, plans, history, and artifacts.
+// BackupVerifier specifies the backup run verification interface.
+type BackupVerifier interface {
+	VerifyRun(ctx context.Context, role orgDomain.Role, orgID, runID uuid.UUID) (*service.RunVerificationResult, error)
+}
+
+// Handler handles HTTP endpoints for backup operations, plans, history, artifacts, and verification.
 type Handler struct {
 	jobService      BackupJobCreator
 	planService     BackupPlanManager
 	historyService  BackupHistoryManager
 	artifactService BackupArtifactManager
+	verifyService   BackupVerifier
 	logger          *slog.Logger
 }
 
@@ -72,6 +78,7 @@ func NewHandler(
 	planService BackupPlanManager,
 	historyService BackupHistoryManager,
 	artifactService BackupArtifactManager,
+	verifyService BackupVerifier,
 	log *slog.Logger,
 ) *Handler {
 	if log == nil {
@@ -82,6 +89,7 @@ func NewHandler(
 		planService:     planService,
 		historyService:  historyService,
 		artifactService: artifactService,
+		verifyService:   verifyService,
 		logger:          log,
 	}
 }
@@ -790,4 +798,58 @@ func sanitizeUserAgent(ua string) string {
 		return string(runes[:255])
 	}
 	return ua
+}
+
+// VerifyBackupRun handles POST /api/v1/backup-runs/{id}/verify.
+func (h *Handler) VerifyBackupRun(w http.ResponseWriter, r *http.Request) {
+	reqLogger := logger.FromContext(r.Context(), h.logger)
+
+	// Set required anti-caching response headers
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+
+	// 1. Resolve Tenant Context
+	tenantCtx, ok := orgHttpapi.TenantContextFromRequest(r)
+	if !ok || tenantCtx == nil || tenantCtx.OrganizationID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "tenant context required", nil)
+		return
+	}
+
+	// 2. Validate run ID from URL path (UUID format)
+	idStr := r.PathValue("id")
+	runID, err := uuid.Parse(idStr)
+	if err != nil || runID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "invalid backup run ID format", nil)
+		return
+	}
+
+	// 3. Verify that Verification Service is initialized
+	if h.verifyService == nil {
+		reqLogger.Error("verification service is not initialized")
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "backup verification service is temporarily unavailable", nil)
+		return
+	}
+
+	// 4. Execute Verification in Service Layer
+	result, err := h.verifyService.VerifyRun(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, runID)
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrUnauthorizedRole):
+			httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "unauthorized role for backup verification", nil)
+		case errors.Is(err, domain.ErrRunNotFound):
+			httpapi.WriteError(w, r, http.StatusNotFound, "NOT_FOUND", "backup run not found", nil)
+		case errors.Is(err, domain.ErrNoVerifiableArtifacts):
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "NO_ARTIFACTS", "no verifiable backup artifacts found for run", nil)
+		case errors.Is(err, domain.ErrBackupServiceUnavailable):
+			httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "backup verification service is temporarily unavailable", nil)
+		default:
+			reqLogger.Error("failed verifying backup run", slog.String("run_id", runID.String()))
+			httpapi.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "internal server error", nil)
+		}
+		return
+	}
+
+	// 5. Build DTO and write 200 OK response
+	resp := toVerifyBackupRunResponse(result)
+	httpapi.WriteJSON(w, r, http.StatusOK, resp, "صحت و یکپارچگی ساختاری فایل پشتیبان تأیید گردید.")
 }

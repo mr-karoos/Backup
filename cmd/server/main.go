@@ -242,7 +242,8 @@ func run() error {
 	backupPlanService := backupService.NewBackupPlanService(backupRepository, resFinder)
 	historyService := backupService.NewHistoryService(backupRepository, log)
 	artifactService := backupService.NewArtifactService(backupRepository, localStorageProvider, auditRecorder, log)
-	backupHandler := backupHttpapi.NewHandler(backupJobService, backupPlanService, historyService, artifactService, log)
+	verificationService := backupService.NewVerificationService(backupRepository, localStorageProvider, verificationEngine, log)
+	backupHandler := backupHttpapi.NewHandler(backupJobService, backupPlanService, historyService, artifactService, verificationService, log)
 
 	// 15. Run Startup Recovery for Interrupted Backup Runs (Fail-fast)
 	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -346,9 +347,10 @@ func run() error {
 	// Tenant-scoped backup execution routes (Phase 5 & Phase 6A)
 	mux.Handle("POST /api/v1/backup-jobs", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionBackupJobExecute, log)(http.HandlerFunc(backupHandler.CreateBackupJob)))))
 
-	// Tenant-scoped backup runs and history routes (Phase 8 Step 1)
+	// Tenant-scoped backup runs and history routes (Phase 8 Step 1 & Phase 9 Step 1)
 	mux.Handle("GET /api/v1/backup-runs", authMiddleware(orgContextMiddleware(http.HandlerFunc(backupHandler.ListBackupRuns))))
 	mux.Handle("GET /api/v1/backup-runs/{id}", authMiddleware(orgContextMiddleware(http.HandlerFunc(backupHandler.GetBackupRun))))
+	mux.Handle("POST /api/v1/backup-runs/{id}/verify", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionBackupRunVerify, log)(http.HandlerFunc(backupHandler.VerifyBackupRun)))))
 
 	// Tenant-scoped backup artifacts, secure download and delete routes (Phase 8 Step 1)
 	mux.Handle("GET /api/v1/backup-artifacts", authMiddleware(orgContextMiddleware(http.HandlerFunc(backupHandler.ListBackupArtifacts))))

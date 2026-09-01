@@ -1,0 +1,758 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"backup-platform/internal/backup/domain"
+	"backup-platform/internal/backup/repository"
+	orgDomain "backup-platform/internal/organization/domain"
+	"backup-platform/internal/storage"
+	"backup-platform/pkg/uuid"
+)
+
+type mockVerificationRepo struct {
+	mu          sync.Mutex
+	runs        map[uuid.UUID]*domain.BackupRun
+	artifacts   map[uuid.UUID][]*domain.BackupArtifact
+	updatedArts map[uuid.UUID]domain.VerificationStatus
+	updateErr   error
+	getRunErr   error
+	getArtsErr  error
+}
+
+func newMockVerificationRepo() *mockVerificationRepo {
+	return &mockVerificationRepo{
+		runs:        make(map[uuid.UUID]*domain.BackupRun),
+		artifacts:   make(map[uuid.UUID][]*domain.BackupArtifact),
+		updatedArts: make(map[uuid.UUID]domain.VerificationStatus),
+	}
+}
+
+func (m *mockVerificationRepo) EnsureDefaultLocalStorageTarget(ctx context.Context, orgID uuid.UUID) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) GetStorageTargetByID(ctx context.Context, orgID, targetID uuid.UUID) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) GetPlanByID(ctx context.Context, orgID, planID uuid.UUID) (*domain.BackupPlan, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) CreateJob(ctx context.Context, job *domain.BackupJob) (*domain.BackupJob, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) GetJobByID(ctx context.Context, orgID, jobID uuid.UUID) (*domain.BackupJob, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) GetActiveManualJobForResource(ctx context.Context, orgID, resourceID uuid.UUID) (*domain.BackupJob, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) GetActiveJobConflictForResource(ctx context.Context, orgID, resourceID uuid.UUID) (*domain.BackupJob, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) FindPendingJobs(ctx context.Context, limit int, afterCreatedAt *time.Time, afterID *uuid.UUID) ([]*domain.BackupJob, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) TransactionalClaimJob(ctx context.Context, orgID, jobID uuid.UUID) (*domain.BackupRun, *domain.BackupJob, error) {
+	return nil, nil, nil
+}
+func (m *mockVerificationRepo) GetRunByID(ctx context.Context, orgID, runID uuid.UUID) (*domain.BackupRun, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getRunErr != nil {
+		return nil, m.getRunErr
+	}
+	r, exists := m.runs[runID]
+	if !exists || r.OrganizationID != orgID {
+		return nil, domain.ErrRunNotFound
+	}
+	return r, nil
+}
+func (m *mockVerificationRepo) GetRunDetail(ctx context.Context, orgID, runID uuid.UUID) (*domain.BackupRunWithStats, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) ListRuns(ctx context.Context, orgID uuid.UUID, filter domain.RunFilter) ([]*domain.BackupRunWithStats, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) ListSuccessfulRunsForPlan(ctx context.Context, orgID, planID uuid.UUID) ([]*domain.BackupRun, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) GetLatestRunForJob(ctx context.Context, orgID, jobID uuid.UUID) (*domain.BackupRun, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) UpdateHeartbeat(ctx context.Context, orgID, runID uuid.UUID) error {
+	return nil
+}
+func (m *mockVerificationRepo) FinalizeRunAndJob(ctx context.Context, orgID, runID, jobID uuid.UUID, runStatus domain.RunStatus, jobStatus domain.JobStatus, errMsg *string, logsSummary []byte) error {
+	return nil
+}
+func (m *mockVerificationRepo) CreateArtifact(ctx context.Context, artifact *domain.BackupArtifact) (*domain.BackupArtifact, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) GetArtifactByID(ctx context.Context, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) ListArtifacts(ctx context.Context, orgID uuid.UUID) ([]*domain.BackupArtifact, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) UpdateArtifactVerification(ctx context.Context, orgID, artifactID uuid.UUID, status domain.VerificationStatus, details *string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.updateErr != nil {
+		return m.updateErr
+	}
+	m.updatedArts[artifactID] = status
+	return nil
+}
+func (m *mockVerificationRepo) TombstoneArtifact(ctx context.Context, orgID, artifactID uuid.UUID) error {
+	return nil
+}
+func (m *mockVerificationRepo) GetRunArtifacts(ctx context.Context, orgID, runID uuid.UUID) ([]*domain.BackupArtifact, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getArtsErr != nil {
+		return nil, m.getArtsErr
+	}
+	arts, exists := m.artifacts[runID]
+	if !exists {
+		return []*domain.BackupArtifact{}, nil
+	}
+	var res []*domain.BackupArtifact
+	for _, a := range arts {
+		if a.OrganizationID == orgID {
+			res = append(res, a)
+		}
+	}
+	return res, nil
+}
+func (m *mockVerificationRepo) RecoverInterruptedRuns(ctx context.Context) (int, error) {
+	return 0, nil
+}
+func (m *mockVerificationRepo) ReapStaleRuns(ctx context.Context) (int, error) {
+	return 0, nil
+}
+
+var _ repository.BackupRepository = (*mockVerificationRepo)(nil)
+
+type mockVerifyStorageProvider struct {
+	openedRefs []string
+	openErr    error
+}
+
+func (m *mockVerifyStorageProvider) SaveArtifact(ctx context.Context, orgID, resID, runID, artifactID uuid.UUID, extension string, src io.Reader) (*storage.SaveResult, error) {
+	return nil, nil
+}
+func (m *mockVerifyStorageProvider) OpenArtifact(ctx context.Context, storageReference string) (io.ReadCloser, error) {
+	if m.openErr != nil {
+		return nil, m.openErr
+	}
+	m.openedRefs = append(m.openedRefs, storageReference)
+	return io.NopCloser(strings.NewReader("dummy-content")), nil
+}
+func (m *mockVerifyStorageProvider) DeleteArtifact(ctx context.Context, storageReference string) error {
+	return nil
+}
+func (m *mockVerifyStorageProvider) EnsureStorageRoot(ctx context.Context) error {
+	return nil
+}
+
+type mockVerifier struct {
+	dbVerifyMsg   string
+	dbVerifyErr   error
+	fileVerifyMsg string
+	fileVerifyErr error
+	callsCount    int
+}
+
+func (m *mockVerifier) VerifyDatabaseArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedSizeBytes int64,
+	expectedChecksumSHA256 string,
+) (string, error) {
+	m.callsCount++
+	if m.dbVerifyErr != nil {
+		return "", m.dbVerifyErr
+	}
+	return m.dbVerifyMsg, nil
+}
+
+func (m *mockVerifier) VerifyFilesArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedSizeBytes int64,
+	expectedChecksumSHA256 string,
+) (string, error) {
+	m.callsCount++
+	if m.fileVerifyErr != nil {
+		return "", m.fileVerifyErr
+	}
+	return m.fileVerifyMsg, nil
+}
+
+func TestVerificationService_RBAC(t *testing.T) {
+	orgID := uuid.New()
+	runID := uuid.New()
+
+	repo := newMockVerificationRepo()
+	repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+	artID := uuid.New()
+	repo.artifacts[runID] = []*domain.BackupArtifact{
+		{
+			ID:               artID,
+			OrganizationID:   orgID,
+			RunID:            runID,
+			ArtifactType:     domain.ArtifactTypeDatabaseDump,
+			Format:           domain.ArtifactFormatSQLGzip,
+			StorageReference: "local://test.sql.gz",
+			SizeBytes:        1024,
+			ChecksumHash:     "abc",
+			IsDeleted:        false,
+		},
+	}
+
+	store := &mockVerifyStorageProvider{}
+	verifier := &mockVerifier{dbVerifyMsg: "checksum and gzip structural integrity verified"}
+	svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	t.Run("admin role is permitted", func(t *testing.T) {
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("expected admin to succeed, got: %v", err)
+		}
+		if res.VerificationStatus != domain.VerificationStatusVerified {
+			t.Errorf("expected status verified, got: %s", res.VerificationStatus)
+		}
+	})
+
+	t.Run("member role is permitted", func(t *testing.T) {
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleMember, orgID, runID)
+		if err != nil {
+			t.Fatalf("expected member to succeed, got: %v", err)
+		}
+		if res.VerificationStatus != domain.VerificationStatusVerified {
+			t.Errorf("expected status verified, got: %s", res.VerificationStatus)
+		}
+	})
+
+	t.Run("viewer role is forbidden", func(t *testing.T) {
+		_, err := svc.VerifyRun(context.Background(), orgDomain.RoleViewer, orgID, runID)
+		if !errors.Is(err, domain.ErrUnauthorizedRole) {
+			t.Fatalf("expected ErrUnauthorizedRole for viewer, got: %v", err)
+		}
+	})
+
+	t.Run("invalid or unknown role is forbidden", func(t *testing.T) {
+		_, err := svc.VerifyRun(context.Background(), "guest", orgID, runID)
+		if !errors.Is(err, domain.ErrUnauthorizedRole) {
+			t.Fatalf("expected ErrUnauthorizedRole for guest, got: %v", err)
+		}
+	})
+}
+
+func TestVerificationService_TenantIsolation(t *testing.T) {
+	orgA := uuid.New()
+	orgB := uuid.New()
+	runID := uuid.New()
+
+	repo := newMockVerificationRepo()
+	repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgA, Status: domain.RunStatusSuccess}
+	artID := uuid.New()
+	repo.artifacts[runID] = []*domain.BackupArtifact{
+		{
+			ID:               artID,
+			OrganizationID:   orgA,
+			RunID:            runID,
+			ArtifactType:     domain.ArtifactTypeDatabaseDump,
+			Format:           domain.ArtifactFormatSQLGzip,
+			StorageReference: "local://art.sql.gz",
+			SizeBytes:        1024,
+			ChecksumHash:     "abc",
+			IsDeleted:        false,
+		},
+	}
+
+	store := &mockVerifyStorageProvider{}
+	verifier := &mockVerifier{dbVerifyMsg: "ok"}
+	svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	t.Run("cross-organization verification returns safe not-found", func(t *testing.T) {
+		_, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgB, runID)
+		if !errors.Is(err, domain.ErrRunNotFound) {
+			t.Fatalf("expected ErrRunNotFound for cross-org lookup, got: %v", err)
+		}
+	})
+}
+
+func TestVerificationService_ArtifactFiltering(t *testing.T) {
+	orgID := uuid.New()
+	runID := uuid.New()
+
+	t.Run("deleted artifacts are never opened or verified", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+
+		artActive := &domain.BackupArtifact{
+			ID:               uuid.New(),
+			OrganizationID:   orgID,
+			RunID:            runID,
+			ArtifactType:     domain.ArtifactTypeDatabaseDump,
+			Format:           domain.ArtifactFormatSQLGzip,
+			StorageReference: "local://active.sql.gz",
+			SizeBytes:        1024,
+			ChecksumHash:     "abc",
+			IsDeleted:        false,
+		}
+		artDeleted := &domain.BackupArtifact{
+			ID:               uuid.New(),
+			OrganizationID:   orgID,
+			RunID:            runID,
+			ArtifactType:     domain.ArtifactTypeDatabaseDump,
+			Format:           domain.ArtifactFormatSQLGzip,
+			StorageReference: "local://deleted.sql.gz",
+			SizeBytes:        1024,
+			ChecksumHash:     "def",
+			IsDeleted:        true,
+		}
+		repo.artifacts[runID] = []*domain.BackupArtifact{artActive, artDeleted}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyMsg: "verified"}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.VerificationStatus != domain.VerificationStatusVerified {
+			t.Errorf("expected verified, got: %s", res.VerificationStatus)
+		}
+		if verifier.callsCount != 1 {
+			t.Errorf("expected exactly 1 verification call, got: %d", verifier.callsCount)
+		}
+		if _, deletedUpdated := repo.updatedArts[artDeleted.ID]; deletedUpdated {
+			t.Errorf("deleted artifact must NOT be updated or verified")
+		}
+	})
+
+	t.Run("all artifacts deleted returns ErrNoVerifiableArtifacts", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artDeleted := &domain.BackupArtifact{
+			ID:             uuid.New(),
+			OrganizationID: orgID,
+			RunID:          runID,
+			IsDeleted:      true,
+		}
+		repo.artifacts[runID] = []*domain.BackupArtifact{artDeleted}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyMsg: "verified"}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		_, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if !errors.Is(err, domain.ErrNoVerifiableArtifacts) {
+			t.Fatalf("expected ErrNoVerifiableArtifacts, got: %v", err)
+		}
+	})
+
+	t.Run("zero artifacts returns ErrNoVerifiableArtifacts", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		repo.artifacts[runID] = []*domain.BackupArtifact{}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyMsg: "verified"}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		_, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if !errors.Is(err, domain.ErrNoVerifiableArtifacts) {
+			t.Fatalf("expected ErrNoVerifiableArtifacts, got: %v", err)
+		}
+	})
+}
+
+func TestVerificationService_IntegrityChecks(t *testing.T) {
+	orgID := uuid.New()
+	runID := uuid.New()
+
+	t.Run("valid database dump verified successfully", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "local://test.sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "abc",
+			},
+		}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyMsg: "checksum and gzip structural integrity verified"}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.VerificationStatus != domain.VerificationStatusVerified {
+			t.Errorf("expected verified, got %s", res.VerificationStatus)
+		}
+		if res.Details["checksum_matched"] != true || res.Details["archive_integrity"] != "passed" || res.Details["extracted_sample_check"] != "valid_sql_dump" {
+			t.Errorf("unexpected details: %+v", res.Details)
+		}
+		if repo.updatedArts[artID] != domain.VerificationStatusVerified {
+			t.Errorf("expected artifact to be updated to verified in repo")
+		}
+	})
+
+	t.Run("checksum mismatch marks artifact failed without leaking paths", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "/var/backups/internal/secret/path/test.sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "expected-sha",
+			},
+		}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyErr: errors.New("checksum mismatch: expected expected-sha, got actual-sha")}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("unexpected service error: %v", err)
+		}
+
+		if res.VerificationStatus != domain.VerificationStatusFailed {
+			t.Errorf("expected status failed, got: %s", res.VerificationStatus)
+		}
+		if repo.updatedArts[artID] != domain.VerificationStatusFailed {
+			t.Errorf("expected artifact to be updated to failed in repo")
+		}
+
+		// Ensure no sensitive paths are exposed
+		detailsErr, _ := res.Details["error"].(string)
+		if strings.Contains(detailsErr, "/var/backups") || strings.Contains(detailsErr, "secret") {
+			t.Errorf("SECURITY FLAW: leaked path in details error: %s", detailsErr)
+		}
+	})
+
+	t.Run("corrupt gzip database dump marks failed", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "local://corrupt.sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "abc",
+			},
+		}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyErr: errors.New("artifact is not a valid gzip stream: unexpected EOF")}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("unexpected service error: %v", err)
+		}
+
+		if res.VerificationStatus != domain.VerificationStatusFailed {
+			t.Errorf("expected failed, got: %s", res.VerificationStatus)
+		}
+	})
+
+	t.Run("valid website tar.gz verified successfully", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				ArtifactType:     domain.ArtifactTypeFilesArchive,
+				Format:           domain.ArtifactFormatTarGzip,
+				StorageReference: "local://site.tar.gz",
+				SizeBytes:        2048,
+				ChecksumHash:     "def",
+			},
+		}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{fileVerifyMsg: "checksum and tar archive structural integrity verified"}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.VerificationStatus != domain.VerificationStatusVerified {
+			t.Errorf("expected verified, got %s", res.VerificationStatus)
+		}
+		if res.Details["tar_archive_valid"] != true {
+			t.Errorf("expected tar_archive_valid true, got %+v", res.Details)
+		}
+	})
+
+	t.Run("corrupt tar archive marks failed", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				ArtifactType:     domain.ArtifactTypeFilesArchive,
+				Format:           domain.ArtifactFormatTarGzip,
+				StorageReference: "local://bad.tar.gz",
+				SizeBytes:        2048,
+				ChecksumHash:     "def",
+			},
+		}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{fileVerifyErr: errors.New("tar structural integrity check failed: unexpected EOF")}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("unexpected service error: %v", err)
+		}
+
+		if res.VerificationStatus != domain.VerificationStatusFailed {
+			t.Errorf("expected failed, got: %s", res.VerificationStatus)
+		}
+	})
+}
+
+func TestVerificationService_MultiArtifact(t *testing.T) {
+	orgID := uuid.New()
+	runID := uuid.New()
+
+	t.Run("all artifacts pass produces overall verified status", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		art1 := &domain.BackupArtifact{
+			ID:               uuid.New(),
+			OrganizationID:   orgID,
+			RunID:            runID,
+			ArtifactType:     domain.ArtifactTypeDatabaseDump,
+			Format:           domain.ArtifactFormatSQLGzip,
+			StorageReference: "local://db1.sql.gz",
+			SizeBytes:        1000,
+			ChecksumHash:     "hash1",
+		}
+		art2 := &domain.BackupArtifact{
+			ID:               uuid.New(),
+			OrganizationID:   orgID,
+			RunID:            runID,
+			ArtifactType:     domain.ArtifactTypeDatabaseDump,
+			Format:           domain.ArtifactFormatSQLGzip,
+			StorageReference: "local://db2.sql.gz",
+			SizeBytes:        2000,
+			ChecksumHash:     "hash2",
+		}
+		repo.artifacts[runID] = []*domain.BackupArtifact{art1, art2}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyMsg: "verified"}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.VerificationStatus != domain.VerificationStatusVerified {
+			t.Errorf("expected overall verified, got %s", res.VerificationStatus)
+		}
+		if res.Details["artifacts_verified"] != 2 || res.Details["artifacts_total"] != 2 {
+			t.Errorf("unexpected multi-artifact details: %+v", res.Details)
+		}
+	})
+
+	t.Run("one artifact fails marks overall failed and continues processing remaining artifacts", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		art1 := &domain.BackupArtifact{
+			ID:               uuid.New(),
+			OrganizationID:   orgID,
+			RunID:            runID,
+			ArtifactType:     domain.ArtifactTypeDatabaseDump,
+			Format:           domain.ArtifactFormatSQLGzip,
+			StorageReference: "local://db1.sql.gz",
+			SizeBytes:        1000,
+			ChecksumHash:     "hash1",
+		}
+		art2 := &domain.BackupArtifact{
+			ID:               uuid.New(),
+			OrganizationID:   orgID,
+			RunID:            runID,
+			ArtifactType:     domain.ArtifactTypeFilesArchive,
+			Format:           domain.ArtifactFormatTarGzip,
+			StorageReference: "local://files2.tar.gz",
+			SizeBytes:        2000,
+			ChecksumHash:     "hash2",
+		}
+		repo.artifacts[runID] = []*domain.BackupArtifact{art1, art2}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{
+			dbVerifyErr:   errors.New("checksum mismatch: expected hash1, got other"),
+			fileVerifyMsg: "tar archive verified",
+		}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if res.VerificationStatus != domain.VerificationStatusFailed {
+			t.Errorf("expected overall failed, got %s", res.VerificationStatus)
+		}
+		if verifier.callsCount != 2 {
+			t.Errorf("expected both artifacts to be verified, got %d calls", verifier.callsCount)
+		}
+		if repo.updatedArts[art1.ID] != domain.VerificationStatusFailed {
+			t.Errorf("art1 must be marked failed in DB")
+		}
+		if repo.updatedArts[art2.ID] != domain.VerificationStatusVerified {
+			t.Errorf("art2 must be marked verified in DB")
+		}
+	})
+}
+
+func TestVerificationService_InfrastructureErrors(t *testing.T) {
+	orgID := uuid.New()
+	runID := uuid.New()
+
+	t.Run("storage open error returns safe service error without corruption tombstone", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "local://test.sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "abc",
+			},
+		}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyErr: errors.New("failed opening artifact for verification: disk I/O failure")}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		_, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable on storage open failure, got: %v", err)
+		}
+		if _, updated := repo.updatedArts[artID]; updated {
+			t.Errorf("artifact must NOT be marked corrupt on storage infrastructure failure")
+		}
+	})
+
+	t.Run("repository update error returns safe service error", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "local://test.sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "abc",
+			},
+		}
+		repo.updateErr = errors.New("db connection lost")
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyMsg: "verified"}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		_, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable on DB update error, got: %v", err)
+		}
+	})
+
+	t.Run("context cancellation returns context error immediately", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               uuid.New(),
+				OrganizationID:   orgID,
+				RunID:            runID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "local://test.sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "abc",
+			},
+		}
+
+		store := &mockVerifyStorageProvider{}
+		verifier := &mockVerifier{dbVerifyErr: context.Canceled}
+		svc := NewVerificationService(repo, store, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_, err := svc.VerifyRun(ctx, orgDomain.RoleAdmin, orgID, runID)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+	})
+
+	t.Run("missing dependencies fail closed", func(t *testing.T) {
+		svc := NewVerificationService(nil, nil, nil, nil)
+		_, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable on missing dependencies, got: %v", err)
+		}
+	})
+}
