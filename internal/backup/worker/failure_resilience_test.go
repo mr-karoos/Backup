@@ -334,9 +334,21 @@ func TestFailureResilience_Scenarios(t *testing.T) {
 		}
 
 		// Ensure no partial file remains
-		partialFile := filepath.Join(tempDir, "tmp", fmt.Sprintf("run-%s", runID.String()), fmt.Sprintf("artifact-%s.sql.gz.partial", artID.String()))
+		runTempDir := filepath.Join(tempDir, "tmp", fmt.Sprintf("run-%s", runID.String()))
+		partialFile := filepath.Join(runTempDir, fmt.Sprintf("artifact-%s.sql.gz.partial", artID.String()))
 		if _, statErr := os.Stat(partialFile); !os.IsNotExist(statErr) {
 			t.Errorf("partial file was not cleaned up on ENOSPC: %s", partialFile)
+		}
+
+		// Ensure empty run temp directory was removed
+		if _, statErr := os.Stat(runTempDir); !os.IsNotExist(statErr) {
+			t.Errorf("empty run temp directory was not removed on ENOSPC: %s", runTempDir)
+		}
+
+		// Ensure no final artifact was created in storage artifacts directory
+		artifactsDir := filepath.Join(tempDir, "artifacts")
+		if entries, err := os.ReadDir(artifactsDir); err == nil && len(entries) > 0 {
+			t.Errorf("expected no final artifacts created, found %d entries", len(entries))
 		}
 	})
 }

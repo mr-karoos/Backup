@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -305,6 +306,39 @@ func (m *mockStorageWithControl) DeleteArtifact(ctx context.Context, storageRef 
 		return m.StorageProvider.DeleteArtifact(ctx, storageRef)
 	}
 	return nil
+}
+
+type contextCancellingRepo struct {
+	*mockRecoveryRepo
+	onRecover      func()
+	onGetArtifacts func(ctx context.Context)
+}
+
+func (c *contextCancellingRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	res, err := c.mockRecoveryRepo.RecoverInterruptedRuns(ctx)
+	if c.onRecover != nil {
+		c.onRecover()
+	}
+	return res, err
+}
+
+func (c *contextCancellingRepo) GetRunArtifacts(ctx context.Context, orgID, runID uuid.UUID) ([]*domain.BackupArtifact, error) {
+	if c.onGetArtifacts != nil {
+		c.onGetArtifacts(ctx)
+	}
+	return c.mockRecoveryRepo.GetRunArtifacts(ctx, orgID, runID)
+}
+
+type cycleTrackingRepo struct {
+	*mockRecoveryRepo
+	onReap func() ([]domain.RecoveredRunInfo, error)
+}
+
+func (c *cycleTrackingRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	if c.onReap != nil {
+		return c.onReap()
+	}
+	return c.mockRecoveryRepo.ReapStaleRuns(ctx)
 }
 
 func TestRecoveryAndReaper_Comprehensive(t *testing.T) {
@@ -921,6 +955,128 @@ func TestRecoveryAndReaper_Comprehensive(t *testing.T) {
 		// Sensitive file must NOT be deleted
 		if _, err := os.Stat(sensitiveFile); err != nil {
 			t.Errorf("outside sensitive file was deleted or affected by symlink traversal!")
+		}
+	})
+
+	t.Run("Startup recovery artifact cleanup uses bounded independent context even if caller context is cancelled", func(t *testing.T) {
+		repo := newMockRecoveryRepo()
+		orgID := uuid.New()
+		jobID := uuid.New()
+		runID := uuid.New()
+		artID := uuid.New()
+
+		repo.jobs[jobID] = &domain.BackupJob{ID: jobID, OrganizationID: orgID, Status: domain.JobStatusRunning}
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, JobID: jobID, AttemptNumber: 1, Status: domain.RunStatusRunning}
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{ID: artID, OrganizationID: orgID, RunID: runID, StorageReference: "local://art.sql.gz", IsDeleted: false},
+		}
+
+		callerCtx, cancelCaller := context.WithCancel(context.Background())
+
+		var cleanupCtxWasCancelled bool
+		var cleanupCtxRecorded bool
+		customRepo := &contextCancellingRepo{
+			mockRecoveryRepo: repo,
+			onRecover: func() {
+				// Cancel the caller's context immediately after DB transition
+				cancelCaller()
+			},
+			onGetArtifacts: func(ctx context.Context) {
+				cleanupCtxRecorded = true
+				if ctx.Err() != nil {
+					cleanupCtxWasCancelled = true
+				}
+			},
+		}
+
+		mockStore := &mockStorageWithControl{}
+		err := RunStartupRecovery(callerCtx, customRepo, mockStore, nullLogger)
+		if err != nil {
+			t.Fatalf("unexpected recovery error: %v", err)
+		}
+
+		// Verify caller context was indeed cancelled
+		if callerCtx.Err() == nil {
+			t.Fatalf("expected callerCtx to be cancelled")
+		}
+
+		// Verify cleanup context was recorded and was NOT cancelled during execution
+		if !cleanupCtxRecorded {
+			t.Fatalf("expected cleanup to be executed")
+		}
+		if cleanupCtxWasCancelled {
+			t.Errorf("expected cleanup context to remain active and uncancelled during artifact cleanup")
+		}
+
+		// Verify artifact was tombstoned
+		if !repo.tombstoned[artID] {
+			t.Errorf("artifact must be tombstoned even though callerCtx was cancelled")
+		}
+	})
+
+	t.Run("Reaper partial-success orchestration cleans reaped runs and continues subsequent cycles", func(t *testing.T) {
+		repo := newMockRecoveryRepo()
+		orgID := uuid.New()
+		jobID := uuid.New()
+		runA := uuid.New()
+		artA := uuid.New()
+
+		repo.jobs[jobID] = &domain.BackupJob{ID: jobID, OrganizationID: orgID, Status: domain.JobStatusRunning}
+		repo.runs[runA] = &domain.BackupRun{
+			ID:             runA,
+			OrganizationID: orgID,
+			JobID:          jobID,
+			AttemptNumber:  1,
+			Status:         domain.RunStatusRunning,
+			LeaseUntil:     time.Now().UTC().Add(-10 * time.Second), // expired
+		}
+		repo.artifacts[runA] = []*domain.BackupArtifact{
+			{ID: artA, OrganizationID: orgID, RunID: runA, StorageReference: "local://runA.sql.gz", IsDeleted: false},
+		}
+
+		var cycleCount int32
+		customRepo := &cycleTrackingRepo{
+			mockRecoveryRepo: repo,
+			onReap: func() ([]domain.RecoveredRunInfo, error) {
+				count := atomic.AddInt32(&cycleCount, 1)
+				if count == 1 {
+					// Simulate partial success in repo: run A reaped, then DB error
+					reaped, _ := repo.ReapStaleRuns(context.Background())
+					return reaped, errors.New("database connection reset on candidate B")
+				}
+				return nil, nil
+			},
+		}
+
+		mockStore := &mockStorageWithControl{}
+		reaper := NewStaleRunReaper(customRepo, mockStore, 5*time.Millisecond, nullLogger)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		reaper.Start(ctx)
+
+		// Wait until at least 2 cycles have executed
+		for i := 0; i < 50; i++ {
+			if atomic.LoadInt32(&cycleCount) >= 2 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+
+		_ = reaper.Stop(context.Background())
+		cancel()
+
+		if atomic.LoadInt32(&cycleCount) < 2 {
+			t.Fatalf("expected at least 2 reaper cycles to execute, got %d", cycleCount)
+		}
+
+		// Artifact for Run A must be tombstoned
+		if !repo.tombstoned[artA] {
+			t.Errorf("expected Run A artifact to be tombstoned despite partial DB error")
+		}
+
+		// Run A must be failed
+		if repo.runs[runA].Status != domain.RunStatusFailed {
+			t.Errorf("expected Run A status failed, got: %s", repo.runs[runA].Status)
 		}
 	})
 }

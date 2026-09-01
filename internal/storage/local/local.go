@@ -485,8 +485,16 @@ func (p *LocalStorageProvider) CleanOrphanTemporaryArtifacts(ctx context.Context
 			}
 		}
 
-		// Only removes directory if it is now completely empty
-		_ = os.Remove(runDirPath)
+		remainingEntries, err := os.ReadDir(runDirPath)
+		if err != nil {
+			cleanErrors = append(cleanErrors, errors.New("failed reading temporary run directory"))
+			continue
+		}
+		if len(remainingEntries) == 0 {
+			if remErr := os.Remove(runDirPath); remErr != nil && !errors.Is(remErr, os.ErrNotExist) {
+				cleanErrors = append(cleanErrors, errors.New("failed removing temporary run directory"))
+			}
+		}
 	}
 
 	if len(cleanErrors) > 0 {
