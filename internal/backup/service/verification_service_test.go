@@ -132,11 +132,11 @@ func (m *mockVerificationRepo) GetRunArtifacts(ctx context.Context, orgID, runID
 	}
 	return res, nil
 }
-func (m *mockVerificationRepo) RecoverInterruptedRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (m *mockVerificationRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
-func (m *mockVerificationRepo) ReapStaleRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (m *mockVerificationRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
 
 var _ repository.BackupRepository = (*mockVerificationRepo)(nil)

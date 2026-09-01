@@ -91,11 +91,11 @@ func (m *mockHistoryRepo) TombstoneArtifact(ctx context.Context, orgID, artifact
 func (m *mockHistoryRepo) GetRunArtifacts(ctx context.Context, orgID, runID uuid.UUID) ([]*domain.BackupArtifact, error) {
 	return nil, nil
 }
-func (m *mockHistoryRepo) RecoverInterruptedRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (m *mockHistoryRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
-func (m *mockHistoryRepo) ReapStaleRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (m *mockHistoryRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
 
 func TestHistoryService_ListRuns(t *testing.T) {

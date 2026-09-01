@@ -39,3 +39,9 @@ type StorageProvider interface {
 	DeleteArtifact(ctx context.Context, storageReference string) error
 	EnsureStorageRoot(ctx context.Context) error
 }
+
+// TemporaryArtifactCleaner is an optional interface implemented by storage providers
+// that support cleaning orphan platform-generated temporary files upon startup.
+type TemporaryArtifactCleaner interface {
+	CleanOrphanTemporaryArtifacts(ctx context.Context) (int, error)
+}

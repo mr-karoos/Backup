@@ -247,7 +247,7 @@ func run() error {
 
 	// 15. Run Startup Recovery for Interrupted Backup Runs (Fail-fast)
 	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := backupWorker.RunStartupRecovery(recoveryCtx, backupRepository, log); err != nil {
+	if err := backupWorker.RunStartupRecovery(recoveryCtx, backupRepository, localStorageProvider, log); err != nil {
 		recoveryCancel()
 		log.Error("startup backup recovery failed")
 		return fmt.Errorf("startup backup recovery failed")
@@ -282,7 +282,7 @@ func run() error {
 	workerPool.SetRetentionManager(retentionProcessor)
 	workerPool.Start(backgroundCtx)
 
-	staleReaper := backupWorker.NewStaleRunReaper(backupRepository, 30*time.Second, log)
+	staleReaper := backupWorker.NewStaleRunReaper(backupRepository, localStorageProvider, 30*time.Second, log)
 	staleReaper.Start(backgroundCtx)
 
 	backupSched := backupScheduler.NewScheduler(backupRepository, log, 10*time.Second)

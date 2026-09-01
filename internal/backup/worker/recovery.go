@@ -2,47 +2,79 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
 
 	"backup-platform/internal/backup/repository"
+	"backup-platform/internal/storage"
+	"backup-platform/pkg/uuid"
 )
 
 const (
 	defaultReaperInterval = 30 * time.Second
 )
 
-// RunStartupRecovery recovers any orphaned running runs from previous process crashes before worker pool startup.
-func RunStartupRecovery(ctx context.Context, repo repository.BackupRepository, log *slog.Logger) error {
+// RunStartupRecovery recovers any orphaned running runs from previous process crashes,
+// cleans orphan platform-generated temporary files, and removes active artifacts of recovered runs.
+func RunStartupRecovery(
+	ctx context.Context,
+	repo repository.BackupRepository,
+	storageProvider storage.StorageProvider,
+	log *slog.Logger,
+) error {
 	if log == nil {
 		log = slog.Default()
 	}
 
-	recovered, err := repo.RecoverInterruptedRuns(ctx)
+	// 1. Clean orphan platform-generated temporary partial files left from process crashes
+	if cleaner, ok := storageProvider.(storage.TemporaryArtifactCleaner); ok && cleaner != nil {
+		cleaned, err := cleaner.CleanOrphanTemporaryArtifacts(ctx)
+		if err != nil {
+			log.Warn("failed cleaning orphan temporary backup files")
+		} else if cleaned > 0 {
+			log.Info("cleaned orphan temporary backup files", slog.Int("cleaned_partials", cleaned))
+		}
+	}
+
+	// 2. Recover interrupted runs in database (fail-fast on startup)
+	recoveredRuns, err := repo.RecoverInterruptedRuns(ctx)
 	if err != nil {
 		log.Error("backup startup recovery failed")
 		return err
 	}
 
-	if recovered > 0 {
-		log.Info("startup recovery completed", slog.Int("recovered_interrupted_runs", recovered))
+	if len(recoveredRuns) > 0 {
+		log.Info("startup recovery completed", slog.Int("recovered_interrupted_runs", len(recoveredRuns)))
+
+		// 3. Clean active artifacts for each recovered run
+		for _, run := range recoveredRuns {
+			cleanupCrashArtifacts(ctx, repo, storageProvider, run.OrganizationID, run.ID, log)
+		}
 	}
 
 	return nil
 }
 
-// StaleRunReaper periodically queries the database for active runs whose lease has expired and marks them failed.
+// StaleRunReaper periodically queries the database for active runs whose lease has expired,
+// marks them failed, resets parent jobs, and cleans any active artifacts.
 type StaleRunReaper struct {
-	repo     repository.BackupRepository
-	interval time.Duration
-	logger   *slog.Logger
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
+	repo            repository.BackupRepository
+	storageProvider storage.StorageProvider
+	interval        time.Duration
+	logger          *slog.Logger
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 }
 
 // NewStaleRunReaper constructs a new StaleRunReaper.
-func NewStaleRunReaper(repo repository.BackupRepository, interval time.Duration, log *slog.Logger) *StaleRunReaper {
+func NewStaleRunReaper(
+	repo repository.BackupRepository,
+	storageProvider storage.StorageProvider,
+	interval time.Duration,
+	log *slog.Logger,
+) *StaleRunReaper {
 	if interval <= 0 {
 		interval = defaultReaperInterval
 	}
@@ -50,9 +82,10 @@ func NewStaleRunReaper(repo repository.BackupRepository, interval time.Duration,
 		log = slog.Default()
 	}
 	return &StaleRunReaper{
-		repo:     repo,
-		interval: interval,
-		logger:   log,
+		repo:            repo,
+		storageProvider: storageProvider,
+		interval:        interval,
+		logger:          log,
 	}
 }
 
@@ -72,11 +105,14 @@ func (r *StaleRunReaper) Start(ctx context.Context) {
 			case <-reaperCtx.Done():
 				return
 			case <-ticker.C:
-				reaped, err := r.repo.ReapStaleRuns(reaperCtx)
+				reapedRuns, err := r.repo.ReapStaleRuns(reaperCtx)
 				if err != nil {
 					r.logger.Warn("stale run reaper encountered error")
-				} else if reaped > 0 {
-					r.logger.Info("reaped expired backup runs", slog.Int("reaped_runs", reaped))
+				} else if len(reapedRuns) > 0 {
+					r.logger.Info("reaped expired backup runs", slog.Int("reaped_runs", len(reapedRuns)))
+					for _, run := range reapedRuns {
+						cleanupCrashArtifacts(reaperCtx, r.repo, r.storageProvider, run.OrganizationID, run.ID, r.logger)
+					}
 				}
 			}
 		}
@@ -101,5 +137,50 @@ func (r *StaleRunReaper) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		r.logger.Warn("stale run reaper shutdown timed out")
 		return ctx.Err()
+	}
+}
+
+// cleanupCrashArtifacts purges physical storage files and tombstones metadata for active artifacts of a failed run.
+func cleanupCrashArtifacts(
+	ctx context.Context,
+	repo repository.BackupRepository,
+	storageProvider storage.StorageProvider,
+	orgID, runID uuid.UUID,
+	log *slog.Logger,
+) {
+	if repo == nil || storageProvider == nil || orgID == uuid.Nil || runID == uuid.Nil {
+		return
+	}
+
+	artifacts, err := repo.GetRunArtifacts(ctx, orgID, runID)
+	if err != nil {
+		log.Warn("failed querying artifacts for crashed run cleanup",
+			slog.String("run_id", runID.String()),
+		)
+		return
+	}
+
+	for _, art := range artifacts {
+		if art == nil || art.IsDeleted {
+			continue // Already tombstoned: skip
+		}
+
+		// 1. Delete physical file from storage provider
+		delErr := storageProvider.DeleteArtifact(ctx, art.StorageReference)
+		if delErr != nil && !errors.Is(delErr, storage.ErrArtifactNotFound) {
+			log.Warn("failed deleting artifact physical file during crash recovery",
+				slog.String("artifact_id", art.ID.String()),
+			)
+			// If physical delete fails: do NOT tombstone, do NOT rollback run/job recovery, continue to next artifact
+			continue
+		}
+
+		// 2. Only after successful/idempotent physical deletion: TombstoneArtifact
+		if tbErr := repo.TombstoneArtifact(ctx, orgID, art.ID); tbErr != nil {
+			log.Warn("failed tombstoning artifact metadata after physical deletion",
+				slog.String("artifact_id", art.ID.String()),
+			)
+			// If tombstone fails: do NOT fake-restore physical file, run/job recovery remains valid, continue
+		}
 	}
 }

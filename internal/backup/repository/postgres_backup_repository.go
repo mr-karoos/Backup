@@ -1340,7 +1340,7 @@ func (r *PostgresBackupRepository) GetRunArtifacts(ctx context.Context, orgID, r
 
 // RecoverInterruptedRuns detects running runs upon system startup, transitions them to failed,
 // and resets their parent jobs to pending (if attempt < 3) or failed (if attempt >= 3).
-func (r *PostgresBackupRepository) RecoverInterruptedRuns(ctx context.Context) (int, error) {
+func (r *PostgresBackupRepository) RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
 	q := r.txManager.Querier()
 	query := `
 		SELECT id, organization_id, job_id, attempt_number
@@ -1349,7 +1349,7 @@ func (r *PostgresBackupRepository) RecoverInterruptedRuns(ctx context.Context) (
 	`
 	rows, err := q.Query(ctx, query)
 	if err != nil {
-		return 0, fmt.Errorf("failed querying interrupted runs: %w", err)
+		return nil, fmt.Errorf("failed querying interrupted runs: %w", err)
 	}
 	defer rows.Close()
 
@@ -1364,15 +1364,15 @@ func (r *PostgresBackupRepository) RecoverInterruptedRuns(ctx context.Context) (
 	for rows.Next() {
 		var ir interruptedRun
 		if err := rows.Scan(&ir.id, &ir.orgID, &ir.jobID, &ir.attemptNumber); err != nil {
-			return 0, fmt.Errorf("failed scanning interrupted run: %w", err)
+			return nil, fmt.Errorf("failed scanning interrupted run: %w", err)
 		}
 		toRecover = append(toRecover, ir)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("error during interrupted runs iteration: %w", err)
+		return nil, fmt.Errorf("error during interrupted runs iteration: %w", err)
 	}
 
-	recoveredCount := 0
+	var recoveredRuns []domain.RecoveredRunInfo
 	for _, ir := range toRecover {
 		var didTransition bool
 		err := r.txManager.WithinTx(ctx, func(tx database.Querier) error {
@@ -1417,19 +1417,24 @@ func (r *PostgresBackupRepository) RecoverInterruptedRuns(ctx context.Context) (
 		})
 
 		if err != nil {
-			return 0, fmt.Errorf("failed recovering interrupted run %s: %w", ir.id, err)
+			return nil, fmt.Errorf("failed recovering interrupted run %s: %w", ir.id, err)
 		}
 		if didTransition {
-			recoveredCount++
+			recoveredRuns = append(recoveredRuns, domain.RecoveredRunInfo{
+				ID:             ir.id,
+				OrganizationID: ir.orgID,
+				JobID:          ir.jobID,
+				AttemptNumber:  ir.attemptNumber,
+			})
 		}
 	}
 
-	return recoveredCount, nil
+	return recoveredRuns, nil
 }
 
 // ReapStaleRuns finds active runs whose lease_until timestamp has expired, marks them failed,
 // and resets their parent jobs to pending (if attempt < 3) or failed (if attempt >= 3).
-func (r *PostgresBackupRepository) ReapStaleRuns(ctx context.Context) (int, error) {
+func (r *PostgresBackupRepository) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
 	q := r.txManager.Querier()
 	query := `
 		SELECT id, organization_id, job_id, attempt_number
@@ -1438,7 +1443,7 @@ func (r *PostgresBackupRepository) ReapStaleRuns(ctx context.Context) (int, erro
 	`
 	rows, err := q.Query(ctx, query)
 	if err != nil {
-		return 0, fmt.Errorf("failed querying stale runs: %w", err)
+		return nil, fmt.Errorf("failed querying stale runs: %w", err)
 	}
 	defer rows.Close()
 
@@ -1453,15 +1458,15 @@ func (r *PostgresBackupRepository) ReapStaleRuns(ctx context.Context) (int, erro
 	for rows.Next() {
 		var sr staleRun
 		if err := rows.Scan(&sr.id, &sr.orgID, &sr.jobID, &sr.attemptNumber); err != nil {
-			return 0, fmt.Errorf("failed scanning stale run: %w", err)
+			return nil, fmt.Errorf("failed scanning stale run: %w", err)
 		}
 		toReap = append(toReap, sr)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("error during stale runs iteration: %w", err)
+		return nil, fmt.Errorf("error during stale runs iteration: %w", err)
 	}
 
-	reapedCount := 0
+	var reapedRuns []domain.RecoveredRunInfo
 	for _, sr := range toReap {
 		var didTransition bool
 		err := r.txManager.WithinTx(ctx, func(tx database.Querier) error {
@@ -1506,14 +1511,19 @@ func (r *PostgresBackupRepository) ReapStaleRuns(ctx context.Context) (int, erro
 		})
 
 		if err != nil {
-			return 0, fmt.Errorf("failed reaping stale run %s: %w", sr.id, err)
+			return nil, fmt.Errorf("failed reaping stale run %s: %w", sr.id, err)
 		}
 		if didTransition {
-			reapedCount++
+			reapedRuns = append(reapedRuns, domain.RecoveredRunInfo{
+				ID:             sr.id,
+				OrganizationID: sr.orgID,
+				JobID:          sr.jobID,
+				AttemptNumber:  sr.attemptNumber,
+			})
 		}
 	}
 
-	return reapedCount, nil
+	return reapedRuns, nil
 }
 
 // Helper Scanners

@@ -99,11 +99,11 @@ func (m *mockArtifactRepo) UpdateArtifactVerification(ctx context.Context, orgID
 func (m *mockArtifactRepo) GetRunArtifacts(ctx context.Context, orgID, runID uuid.UUID) ([]*domain.BackupArtifact, error) {
 	return nil, nil
 }
-func (m *mockArtifactRepo) RecoverInterruptedRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (m *mockArtifactRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
-func (m *mockArtifactRepo) ReapStaleRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (m *mockArtifactRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
 
 type mockStorageProvider struct {

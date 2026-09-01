@@ -103,11 +103,11 @@ func (m *mockBackupRepo) GetArtifactByID(ctx context.Context, orgID, artifactID 
 func (m *mockBackupRepo) ListArtifacts(ctx context.Context, orgID uuid.UUID) ([]*domain.BackupArtifact, error) {
 	return nil, nil
 }
-func (m *mockBackupRepo) RecoverInterruptedRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (m *mockBackupRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
-func (m *mockBackupRepo) ReapStaleRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (m *mockBackupRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
 
 type mockResourceFinder struct {

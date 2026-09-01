@@ -50,3 +50,11 @@ type BackupRunWithStats struct {
 	TotalArtifactSizeBytes int64
 	ArtifactsCount         int
 }
+
+// RecoveredRunInfo contains metadata for a backup run transitioned by recovery or reaper.
+type RecoveredRunInfo struct {
+	ID             uuid.UUID
+	OrganizationID uuid.UUID
+	JobID          uuid.UUID
+	AttemptNumber  int
+}

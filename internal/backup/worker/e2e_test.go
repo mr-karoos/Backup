@@ -303,11 +303,11 @@ func (r *memoryBackupRepo) ListArtifacts(ctx context.Context, orgID uuid.UUID) (
 	}
 	return arts, nil
 }
-func (r *memoryBackupRepo) RecoverInterruptedRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (r *memoryBackupRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
-func (r *memoryBackupRepo) ReapStaleRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (r *memoryBackupRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
 
 type memoryResourceFinder struct {

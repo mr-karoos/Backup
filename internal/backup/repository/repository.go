@@ -50,6 +50,6 @@ type BackupRepository interface {
 	GetRunArtifacts(ctx context.Context, orgID, runID uuid.UUID) ([]*domain.BackupArtifact, error)
 
 	// Lifecycle Recovery & Reaper
-	RecoverInterruptedRuns(ctx context.Context) (int, error)
-	ReapStaleRuns(ctx context.Context) (int, error)
+	RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error)
+	ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error)
 }

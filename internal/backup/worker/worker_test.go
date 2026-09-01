@@ -470,11 +470,11 @@ func (r *fakeWorkerRepo) ListArtifacts(ctx context.Context, orgID uuid.UUID) ([]
 	}
 	return arts, nil
 }
-func (r *fakeWorkerRepo) RecoverInterruptedRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (r *fakeWorkerRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
-func (r *fakeWorkerRepo) ReapStaleRuns(ctx context.Context) (int, error) {
-	return 0, nil
+func (r *fakeWorkerRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
+	return nil, nil
 }
 
 type fakeResourceFinder struct {
@@ -647,7 +647,8 @@ func TestWorkerPool_RecoveryAndReaper(t *testing.T) {
 			Status: domain.JobStatusRunning,
 		}
 
-		err := RunStartupRecovery(context.Background(), repo, nil)
+		store, _ := local.NewLocalStorageProvider(t.TempDir())
+		err := RunStartupRecovery(context.Background(), repo, store, nil)
 		if err != nil {
 			t.Fatalf("unexpected recovery error: %v", err)
 		}
@@ -655,7 +656,8 @@ func TestWorkerPool_RecoveryAndReaper(t *testing.T) {
 
 	t.Run("Stale reaper lifecycle", func(t *testing.T) {
 		repo := newFakeWorkerRepo(uuid.New())
-		reaper := NewStaleRunReaper(repo, 10*time.Millisecond, nil)
+		store, _ := local.NewLocalStorageProvider(t.TempDir())
+		reaper := NewStaleRunReaper(repo, store, 10*time.Millisecond, nil)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		reaper.Start(ctx)

@@ -406,3 +406,84 @@ func (p *LocalStorageProvider) resolveSecurePath(storageReference string) (strin
 
 	return resolvedPath, nil
 }
+
+var (
+	canonicalRunDirRegex  = regexp.MustCompile(`^run-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$`)
+	canonicalPartialRegex = regexp.MustCompile(`^artifact-([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.(sql|tar)\.gz\.partial$`)
+)
+
+// CleanOrphanTemporaryArtifacts scans <storageRoot>/tmp for canonical platform-generated
+// temporary run directories and .partial files left behind after ungraceful crashes, safely
+// removing recognized temporary files and deleting empty run directories.
+func (p *LocalStorageProvider) CleanOrphanTemporaryArtifacts(ctx context.Context) (int, error) {
+	tmpDir := filepath.Join(p.storageRoot, "tmp")
+
+	// If tmp directory does not exist, nothing to clean
+	entries, err := os.ReadDir(tmpDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, mapStorageError(err, "read_tmp_directory")
+	}
+
+	cleanedCount := 0
+
+	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return cleanedCount, ctx.Err()
+		}
+
+		// Reject symlinks and non-directories
+		if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+			continue
+		}
+
+		// Validate directory name matches canonical format run-<uuid>
+		matches := canonicalRunDirRegex.FindStringSubmatch(entry.Name())
+		if len(matches) < 2 {
+			continue
+		}
+		runUUID, err := uuid.Parse(matches[1])
+		if err != nil || runUUID == uuid.Nil {
+			continue
+		}
+
+		runDirPath := filepath.Join(tmpDir, entry.Name())
+		fileEntries, err := os.ReadDir(runDirPath)
+		if err != nil {
+			continue
+		}
+
+		for _, fileEntry := range fileEntries {
+			if ctx.Err() != nil {
+				return cleanedCount, ctx.Err()
+			}
+
+			// Reject symlinks and subdirectories
+			if fileEntry.Type()&os.ModeSymlink != 0 || fileEntry.IsDir() {
+				continue
+			}
+
+			// Validate file name matches canonical format artifact-<uuid>.(sql|tar).gz.partial
+			fileMatches := canonicalPartialRegex.FindStringSubmatch(fileEntry.Name())
+			if len(fileMatches) < 2 {
+				continue
+			}
+			artUUID, err := uuid.Parse(fileMatches[1])
+			if err != nil || artUUID == uuid.Nil {
+				continue
+			}
+
+			filePath := filepath.Join(runDirPath, fileEntry.Name())
+			if remErr := os.Remove(filePath); remErr == nil {
+				cleanedCount++
+			}
+		}
+
+		// Only removes directory if it is now completely empty
+		_ = os.Remove(runDirPath)
+	}
+
+	return cleanedCount, nil
+}
