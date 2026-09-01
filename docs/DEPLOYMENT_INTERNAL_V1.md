@@ -2,7 +2,7 @@
 
 این سند راهنمای جامع و مرجع عملیاتی استقرار پلتفرم مدیریت پشتیبان‌گیری (`Backup Platform`) بر روی سرور تک‌نودی اوبونتو با استفاده از Docker Compose برای نسخه **Internal V1** است.
 
-کلیه اصول ثبت‌شده در [docs/SPECIFICATION.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/SPECIFICATION.md)، [docs/ARCHITECTURE.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/ARCHITECTURE.md)، [docs/SECURITY.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/SECURITY.md) و [docs/DECISIONS.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/DECISIONS.md) (به‌ویژه ADR-001, ADR-002, ADR-003, ADR-008, ADR-019, ADR-024, ADR-025, ADR-029) در این استقرار رعایت شده‌اند.
+کلیه اصول ثبت‌شده در [SPECIFICATION.md](./SPECIFICATION.md)، [ARCHITECTURE.md](./ARCHITECTURE.md)، [SECURITY.md](./SECURITY.md) و [DECISIONS.md](./DECISIONS.md) (به‌ویژه ADR-001, ADR-002, ADR-003, ADR-008, ADR-019, ADR-024, ADR-025, ADR-029) در این استقرار رعایت شده‌اند.
 
 ---
 
@@ -23,7 +23,7 @@
 ### ۱.۳. نرم‌افزارهای الزامی روی هاست
 - `Docker Engine` نسخه 24.0 یا بالاتر
 - پلاگین `Docker Compose v2` (`docker compose`)
-- ابزارهای کمکی لینوکس: `bash`, `openssl`, `systemd`
+- ابزارهای کمکی لینوکس: `bash`, `openssl`, `systemd`, `util-linux` (`flock`)
 
 ---
 
@@ -138,9 +138,11 @@ sudo ./deploy/scripts/prepare-host.sh /srv/backup-platform
 ```
 
 ### مرحله ۵: اعتبارسنجی کانفیگ و ساخت ایمیج داکر
+> [!NOTE]
+> برای جلوگیری از چاپ سکرت‌های واقعی موجود در `deploy/.env` روی خروجی ترمینال، دستور اعتبارسنجی را با فلگ `--quiet` اجرا کنید:
 ```bash
-# بررسی سینتکس فایل compose.yaml
-docker compose --env-file deploy/.env config
+# بررسی سینتکس فایل compose.yaml بدون افشای سکرت‌ها
+docker compose --env-file deploy/.env config --quiet
 
 # ساخت کانتینر اپلیکیشن باینری Go
 docker compose --env-file deploy/.env build
@@ -233,10 +235,10 @@ sudo systemctl list-timers --all | grep backup-platform
 
 4. **اجرای دستور بازیابی `pg_restore` داخل کانتینر PostgreSQL:**
    ```bash
-   # پاک‌سازی آبجکت‌ها و بازنشانی دیتابیس با pg_restore
+   # پاک‌سازی آبجکت‌ها و بازنشانی دیتابیس با pg_restore با استفاده از متغیرهای درون کانتینر
    cat /srv/backup-platform/metadata-backups/backup-platform-metadata-YYYYMMDD-HHMMSS.dump | \
    docker compose --env-file deploy/.env exec -T postgres \
-   pg_restore -U backup_platform -d backup_platform --clean --if-exists
+   sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists'
    ```
 
 5. **راه‌اندازی مجدد کانتینر اپلیکیشن:**
@@ -279,6 +281,7 @@ docker compose --env-file deploy/.env down
 
 - [ ] فایل `deploy/.env` توسط Git ردیابی نمی‌شود (`.gitignore`).
 - [ ] دسترسی فایل `deploy/.env` روی مد `0600` قرار دارد.
+- [ ] اسکریپت‌های استقرار دارای پرمیشن اجرایی `100755` هستند (`deploy/scripts/*.sh`).
 - [ ] کلید `JWT_SIGNING_KEY` یکتا و با آنتروپی بالا (حداقل ۳۲ کاراکتر) تنظیم شده است.
 - [ ] کلید `ENCRYPTION_MASTER_KEY` یکتا و دقیقاً ۳۲ بایت (AES-256) تولید شده است.
 - [ ] کلمه عبور `POSTGRES_PASSWORD` پیچیده و تصادفی است.
@@ -288,10 +291,14 @@ docker compose --env-file deploy/.env down
 - [ ] دسترسی آرتیفکت‌های پشتیبان روی `0600` و پوشه‌ها `0700` است.
 - [ ] پورت ۸۰۸۰ هاست منحصراً به لوکال‌هاست (`127.0.0.1`) یا شبکه خصوصی بایند شده است.
 - [ ] هیچ لاگین خام HTTP روی اینترنت عمومی صورت نمی‌گیرد (دسترسی با SSH Tunnel/VPN).
+- [ ] خروجی اعتبارسنجی `docker compose config --quiet` بدون افشای مقادیر `deploy/.env` اجرا می‌شود.
 - [ ] روتاسیون لاگ‌های داکر در `compose.yaml` فعال است.
 - [ ] پایگاه داده PostgreSQL از ولوم ماندگار (`postgres_data`) استفاده می‌کند.
 - [ ] اجرای دستی اسکریپت `backup-metadata.sh` با موفقیت تست شده است.
-- [ ] تایمر سیستم‌دی `backup-platform-metadata-backup.timer` فعال و فعال‌سازی شده است.
+- [ ] سرویس سیستم‌دی پشتیبان‌گیری متادیتا به صورت دستی با موفقیت اجرا می‌شود.
+- [ ] تایمر سیستم‌دی `backup-platform-metadata-backup.timer` فعال و زمان‌بندی شده است.
+- [ ] دستورالعمل بازیابی متادیتا به طور کامل مرور و اعتبارسنجی شده است.
+- [ ] پایداری سرویس‌ها پس از ریبوت هاست مورد تایید قرار گرفته است.
 - [ ] آزمون Healthcheck خروجی `{"status":"ok"}` با کد وضعیت ۲۰۰ برمی‌گرداند.
 - [ ] تست ری‌استارت کانتینرها بدون مشکل انجام می‌شود.
 - [ ] هیچ سکرت یا رمزی در خروجی `git diff` و لاگ‌های داکر وجود ندارد.
