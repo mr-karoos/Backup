@@ -1,0 +1,69 @@
+# Git metadata
+.git
+.gitignore
+
+# Environment and secrets
+.env
+.env.*
+*.env
+deploy/.env
+deploy/.env.*
+!*.example
+!deploy/.env.example
+
+# Credentials, keys and certificates
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+*.cer
+*.credentials
+credentials.json
+secrets.json
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+
+# Build outputs and binaries
+bin/
+server
+cmd/server/server
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+*.out
+*.test
+*.prof
+
+# Test artifacts and coverage reports
+coverage.txt
+coverage.out
+profile.out
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Temporary, storage and backup files
+tmp/
+.temp/
+temp/
+*.tmp
+/srv/
+/storage/
+/backups/
+*.dump
+*.bak
+*.backup
+*.sql.gz
+*.tar.gz
+*.tgz
+*.partial

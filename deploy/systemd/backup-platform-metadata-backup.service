@@ -1,0 +1,16 @@
+[Unit]
+Description=Backup Platform PostgreSQL Metadata Backup
+Documentation=file:///opt/backup-platform/docs/DEPLOYMENT_INTERNAL_V1.md
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/backup-platform
+ExecStart=/opt/backup-platform/deploy/scripts/backup-metadata.sh /opt/backup-platform
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

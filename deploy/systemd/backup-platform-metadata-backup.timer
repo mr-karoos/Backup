@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Periodic Backup of Backup Platform PostgreSQL Metadata
+Documentation=file:///opt/backup-platform/docs/DEPLOYMENT_INTERNAL_V1.md
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

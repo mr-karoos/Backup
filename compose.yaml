@@ -1,0 +1,85 @@
+# ==============================================================================
+# Docker Compose Definition for Backup Platform (Internal V1)
+# ==============================================================================
+
+services:
+  # Metadata Database & Durable Task Queue
+  postgres:
+    image: postgres:15-alpine
+    container_name: backup-platform-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - platform_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Core Application (Modular Monolith: HTTP API + Worker Pool + Scheduler + Reaper)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backup-platform-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:?APP_ENV is required}
+      HTTP_ADDR: :8080
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      STORAGE_ROOT: /srv/backup-platform
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY:?JWT_SIGNING_KEY is required}
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY:?ENCRYPTION_MASTER_KEY is required}
+      ENCRYPTION_MASTER_KEY_VERSION: ${ENCRYPTION_MASTER_KEY_VERSION:-1}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
+    ports:
+      - "${BACKUP_PLATFORM_BIND_IP:-127.0.0.1}:${BACKUP_PLATFORM_PORT:-8080}:8080"
+    volumes:
+      - "${BACKUP_PLATFORM_STORAGE_PATH:-/srv/backup-platform}:/srv/backup-platform"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    networks:
+      - platform_net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/api/v1/health | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  postgres_data:
+    name: backup_platform_postgres_data
+
+networks:
+  platform_net:
+    name: backup_platform_network
+    driver: bridge
