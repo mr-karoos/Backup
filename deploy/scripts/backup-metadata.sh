@@ -3,7 +3,8 @@
 # PostgreSQL Metadata Backup Script for Backup Platform (Internal V1)
 # ==============================================================================
 # Creates an atomic, verified PostgreSQL metadata dump using pg_dump from the
-# running Docker PostgreSQL container (backup-platform-postgres).
+# running Docker PostgreSQL container (backup-platform-postgres) into the
+# isolated host backup directory (/var/backups/backup-platform).
 #
 # Production Installation: /usr/local/sbin/backup-platform-metadata-backup
 # Execution: sudo /usr/local/sbin/backup-platform-metadata-backup
@@ -56,9 +57,14 @@ if ! flock -n 200; then
     exit 1
 fi
 
-# 5. Canonical Directory & Target Validation
-BACKUP_DIR="/srv/backup-platform/metadata-backups"
+# 5. Canonical Directory & Target Validation (Isolated from App storage mount)
+BACKUP_DIR="/var/backups/backup-platform"
 POSTGRES_CONTAINER="backup-platform-postgres"
+
+if [[ -L "/var/backups" ]]; then
+    echo "ERROR: System directory '/var/backups' is a symbolic link. Aborting." >&2
+    exit 1
+fi
 
 if [[ -L "${BACKUP_DIR}" ]]; then
     echo "ERROR: Metadata backup directory '${BACKUP_DIR}' is a symbolic link. Aborting." >&2

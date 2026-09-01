@@ -1,6 +1,6 @@
 [Unit]
 Description=Backup Platform PostgreSQL Metadata Backup
-Documentation=file:///usr/local/share/doc/backup-platform/DEPLOYMENT_INTERNAL_V1.md
+Documentation=https://github.com/mr-karoos/Backup
 Requires=docker.service
 After=docker.service
 

@@ -13,6 +13,9 @@
 - پایگاه داده **PostgreSQL 15+** در کانتینر مجزا با نام ثابت `backup-platform-postgres` در شبکه ایزوله داخلی داکر اجرا می‌شود.
 - پورت دیتابیس (`5432`) به هیچ وجه روی هاست پابلیش نمی‌شود.
 - پورت وب پلتفرم (`8080`) به صورت پیش‌فرض فقط روی لوکال‌هاست سرور (`127.0.0.1`) بایند می‌شود.
+- تفکیک ایزوله فضاهای ذخیره‌سازی:
+  - **محل ذخیره آرتیفکت‌های برنامه:** دایرکتوری `/srv/backup-platform` (متعلق به کاربر غیرروت کانتینر `10001:10001` با مد `0700` و متصل به کانتینر اپلیکیشن).
+  - **محل ذخیره بکاپ‌های متادیتای پایگاه داده:** دایرکتوری `/var/backups/backup-platform` (منحصراً متعلق به کاربر `root:root` با مد `0700`، خارج از کانتینرها و غیرقابل دسترسی برای اپلیکیشن).
 
 ### ۱.۲. مشخصات پیشنهادی سخت‌افزار سرور
 - **سیستم‌عامل:** Ubuntu 22.04 LTS (یا Debian 12) x86_64
@@ -65,9 +68,10 @@ BACKUP_PLATFORM_BIND_IP=10.8.0.1
 
 ## ۴. مراحل گام‌به‌گام استقرار (Step-by-Step Deployment Procedure)
 
-### مرحله ۱: دریافت کد پروژه در مسیر استقرار
-کد پروژه را در دایرکتوری استقرار (مثلاً `/opt/backup-platform`) کلون یا کپی کنید:
+### مرحله ۱: ایجاد دایرکتوری و دریافت کد پروژه
+دایرکتوری استقرار را با دسترسی اپراتور ایجاد کرده و مخزن را کلون کنید:
 ```bash
+sudo install -d -o "$USER" -g "$(id -gn)" -m 0755 /opt/backup-platform
 git clone https://github.com/mr-karoos/Backup.git /opt/backup-platform
 cd /opt/backup-platform
 ```
@@ -130,7 +134,8 @@ BOOTSTRAP_ADMIN_PASSWORD=generated_admin_bootstrap_password
 ```
 
 ### مرحله ۴: آماده‌سازی دایرکتوری‌های ذخیره‌سازی هاست
-اسکریپت آماده‌سازی دایرکتوری‌ها را با دسترسی root اجرا کنید تا مسیر کانونی `/srv/backup-platform`، مالکیت کاربری غیرروت کانتینر (`10001:10001`) و مجوزهای اکید `0700` تنظیم شوند:
+> [!IMPORTANT]
+> اسکریپت `prepare-host.sh` باید فقط **قبل از اولین استارت‌آپ** یا در زمان **توقف کانتینر برنامه** اجرا شود:
 ```bash
 sudo ./deploy/scripts/prepare-host.sh
 ```
@@ -191,9 +196,9 @@ sudo install -o root -g root -m 0755 \
 ```bash
 sudo /usr/local/sbin/backup-platform-metadata-backup
 ```
-خروجی موفقیت‌آمیز باید فایلی با ساختار زیر در `/srv/backup-platform/metadata-backups/` ایجاد کند:
+خروجی موفقیت‌آمیز باید فایلی با ساختار زیر در دایرکتوری کاملاً ایزوله `/var/backups/backup-platform/` ایجاد کند:
 ```bash
-ls -la /srv/backup-platform/metadata-backups/
+sudo ls -la /var/backups/backup-platform/
 # -rw------- 1 root root backup-platform-metadata-YYYYMMDD-HHMMSS.dump
 ```
 
@@ -228,11 +233,12 @@ sudo systemctl list-timers --all | grep backup-platform
    docker compose --env-file deploy/.env stop app
    ```
 
-2. **انتخاب فایل بکاپ متادیتا:**
+2. **انتخاب فایل بکاپ متادیتا و بررسی دسترسی خواندن:**
    ```bash
-   ls -lat /srv/backup-platform/metadata-backups/
+   sudo ls -lat /var/backups/backup-platform/
    # فایل مورد نظر را انتخاب کنید، مثلا:
-   # /srv/backup-platform/metadata-backups/backup-platform-metadata-20260901-033000.dump
+   # /var/backups/backup-platform/backup-platform-metadata-20260901-033000.dump
+   sudo test -r /var/backups/backup-platform/backup-platform-metadata-20260901-033000.dump
    ```
 
 3. **ایجاد یک نسخه بکاپ اضطراری از وضعیت فعلی پیش از Restore:**
@@ -240,9 +246,9 @@ sudo systemctl list-timers --all | grep backup-platform
    sudo /usr/local/sbin/backup-platform-metadata-backup
    ```
 
-4. **اجرای دستور بازیابی `pg_restore` مستقیماً روی کانتینر PostgreSQL:**
+4. **اجرای دستور بازیابی `pg_restore` با دسترسی روت (Privileged Read):**
    ```bash
-   cat /srv/backup-platform/metadata-backups/backup-platform-metadata-YYYYMMDD-HHMMSS.dump | \
+   sudo cat /var/backups/backup-platform/backup-platform-metadata-YYYYMMDD-HHMMSS.dump | \
    sudo docker exec -i backup-platform-postgres \
      sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --exit-on-error'
    ```
@@ -277,7 +283,7 @@ docker compose --env-file deploy/.env down
 *(داده‌های دیتابیس در ولوم `backup_platform_postgres_data` و فایل‌های آرتیفکت در `/srv/backup-platform` به صورت کاملاً پایدار حفظ می‌شوند).*
 
 ### ۷.۴. بررسی پایداری پس از ریبوت سرور
-کانتینرها با سیاست `restart: unless-stopped` پیکربندی شده‌اند و با بالا آمدن مجدد سیستم‌عامل سرور، کانتینر دیتابیس و کانتینر اپلیکیشن به طور خودکار شروع به کار خواهند کرد.
+کانتینرها با سیاست `restart: unless-stopped` پیکربندی شده‌اند و با بالا آمدن مجدد سیستم‌عمل سرور، کانتینر دیتابیس و کانتینر اپلیکیشن به طور خودکار شروع به کار خواهند کرد.
 
 ---
 
@@ -288,13 +294,17 @@ docker compose --env-file deploy/.env down
 - [ ] فایل `deploy/.env` توسط Git ردیابی نمی‌شود (`.gitignore`).
 - [ ] دسترسی فایل `deploy/.env` روی مد `0600` قرار دارد.
 - [ ] اسکریپت‌های موجود در مخزن دارای پرمیشن اجرایی `100755` هستند (`deploy/scripts/*.sh`).
+- [ ] مسیر ذخیره‌سازی داده‌های اپلیکیشن `/srv/backup-platform` است (مالکیت `10001:10001` و دسترسی `0700`).
+- [ ] مسیر بکاپ‌های متادیتا `/var/backups/backup-platform` است (مالکیت `root:root` و دسترسی `0700`).
+- [ ] دایرکتوری بکاپ متادیتا به هیچ عنوان به کانتینر اپلیکیشن Mount نشده است.
+- [ ] فایل‌های دامپ متادیتا دارای مالکیت `root:root` و مد دسترسی `0600` هستند.
+- [ ] اسکریپت `prepare-host.sh` فقط در زمان متوقف بودن کانتینر اپلیکیشن اجرا می‌شود.
 - [ ] اسکریپت بکاپ متادیتا در `/usr/local/sbin/backup-platform-metadata-backup` با مالکیت `root:root` و مد `0755` نصب شده است.
 - [ ] کلید `JWT_SIGNING_KEY` یکتا و با آنتروپی بالا (حداقل ۳۲ کاراکتر) تنظیم شده است.
 - [ ] کلید `ENCRYPTION_MASTER_KEY` یکتا و دقیقاً ۳۲ بایت (AES-256) تولید شده است.
 - [ ] کلمه عبور `POSTGRES_PASSWORD` پیچیده و تصادفی است.
 - [ ] پورت دیتابیس `5432` روی هاست باز/پابلیش نشده است.
 - [ ] پروسس اپلیکیشن داخل کانتینر به صورت غیرروت (`UID 10001`) اجرا می‌شود.
-- [ ] دسترسی دایرکتوری‌های ذخیره‌سازی `/srv/backup-platform` روی `0700` و مالکیت `10001:10001` است.
 - [ ] دسترسی آرتیفکت‌های پشتیبان روی `0600` و پوشه‌ها `0700` است.
 - [ ] پورت ۸۰۸۰ هاست منحصراً به لوکال‌هاست (`127.0.0.1`) یا شبکه خصوصی بایند شده است.
 - [ ] هیچ لاگین خام HTTP روی اینترنت عمومی صورت نمی‌گیرد (دسترسی با SSH Tunnel/VPN).
@@ -304,7 +314,7 @@ docker compose --env-file deploy/.env down
 - [ ] اجرای دستی اسکریپت `/usr/local/sbin/backup-platform-metadata-backup` با موفقیت تست شده است.
 - [ ] سرویس سیستم‌دی پشتیبان‌گیری متادیتا به صورت دستی با موفقیت اجرا می‌شود.
 - [ ] تایمر سیستم‌دی `backup-platform-metadata-backup.timer` فعال و زمان‌بندی شده است.
-- [ ] دستورالعمل بازیابی متادیتا به طور کامل مرور و اعتبارسنجی شده است.
+- [ ] فرآیند بازیابی دستی متادیتا با خواندن دارای دسترسی روت (`sudo cat`) تست و مستند شده است.
 - [ ] پایداری سرویس‌ها پس از ریبوت هاست مورد تایید قرار گرفته است.
 - [ ] آزمون Healthcheck خروجی `{"status":"ok"}` با کد وضعیت ۲۰۰ برمی‌گرداند.
 - [ ] تست ری‌استارت کانتینرها بدون مشکل انجام می‌شود.
