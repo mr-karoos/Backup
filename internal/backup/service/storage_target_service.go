@@ -149,7 +149,7 @@ func (s *StorageTargetService) GetStorageTarget(
 	userRole orgDomain.Role,
 	orgID, targetID uuid.UUID,
 ) (*domain.StorageTarget, error) {
-	if userRole != orgDomain.RoleAdmin && userRole != orgDomain.RoleMember {
+	if userRole != orgDomain.RoleAdmin && userRole != orgDomain.RoleMember && userRole != orgDomain.RoleViewer {
 		return nil, domain.ErrUnauthorizedRole
 	}
 	if orgID == uuid.Nil || targetID == uuid.Nil {
@@ -172,7 +172,7 @@ func (s *StorageTargetService) ListStorageTargets(
 	userRole orgDomain.Role,
 	orgID uuid.UUID,
 ) ([]*domain.StorageTarget, error) {
-	if userRole != orgDomain.RoleAdmin && userRole != orgDomain.RoleMember {
+	if userRole != orgDomain.RoleAdmin && userRole != orgDomain.RoleMember && userRole != orgDomain.RoleViewer {
 		return nil, domain.ErrUnauthorizedRole
 	}
 	if orgID == uuid.Nil {

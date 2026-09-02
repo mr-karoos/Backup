@@ -61,10 +61,6 @@ func (r *StorageResolver) Resolve(ctx context.Context, orgID, targetID uuid.UUID
 		return nil, err
 	}
 
-	if target.Status != domain.StorageTargetStatusActive {
-		return nil, domain.ErrStorageTargetNotActive
-	}
-
 	switch target.Type {
 	case domain.StorageTargetTypeLocal:
 		return r.localStorage, nil

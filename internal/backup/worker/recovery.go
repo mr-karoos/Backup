@@ -188,13 +188,29 @@ func cleanupCrashArtifacts(
 			continue // Already tombstoned: skip
 		}
 
-		store := storageProvider
-		if storageResolver != nil && art.StorageTargetID != uuid.Nil {
-			resolved, err := storageResolver.Resolve(ctx, orgID, art.StorageTargetID)
-			if err == nil && resolved != nil {
-				store = resolved
+		var store storage.StorageProvider
+		if storageResolver != nil {
+			if art.StorageTargetID == uuid.Nil {
+				log.Warn("skipping crash artifact cleanup: missing storage_target_id",
+					slog.String("run_id", runID.String()),
+					slog.String("artifact_id", art.ID.String()),
+				)
+				continue
 			}
+			resolved, err := storageResolver.Resolve(ctx, orgID, art.StorageTargetID)
+			if err != nil || resolved == nil {
+				log.Warn("skipping crash artifact cleanup: storage provider resolution failed",
+					slog.String("run_id", runID.String()),
+					slog.String("artifact_id", art.ID.String()),
+					slog.String("target_id", art.StorageTargetID.String()),
+				)
+				continue
+			}
+			store = resolved
+		} else {
+			store = storageProvider
 		}
+
 		if store == nil {
 			continue
 		}

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -36,6 +37,8 @@ func TestEndpointSecurityPolicy_ValidateEndpointURL(t *testing.T) {
 		{"user credentials rejected", policyStrict, "https://user:pass@s3.amazonaws.com", true},
 		{"unsupported scheme ftp", policyStrict, "ftp://s3.amazonaws.com", true},
 		{"url with path rejected", policyStrict, "https://s3.amazonaws.com/some/path", true},
+		{"url with query string rejected", policyStrict, "https://s3.amazonaws.com?foo=bar", true},
+		{"url with fragment rejected", policyStrict, "https://s3.amazonaws.com#frag", true},
 	}
 
 	for _, tt := range tests {
@@ -49,14 +52,19 @@ func TestEndpointSecurityPolicy_ValidateEndpointURL(t *testing.T) {
 }
 
 func TestEndpointSecurityPolicy_SSRFProtection(t *testing.T) {
-	policyNoAllowlist := EndpointSecurityPolicy{
-		AllowInsecureHTTP: true,
+	policyNoAllowlistStrict := EndpointSecurityPolicy{
+		AllowInsecureHTTP: false,
 		PrivateAllowlist:  nil,
 	}
 
-	policyWithAllowlist := EndpointSecurityPolicy{
+	policyWithAllowlistStrict := EndpointSecurityPolicy{
+		AllowInsecureHTTP: false,
+		PrivateAllowlist:  []string{"minio.internal", "192.168.1.100", "10.50.0.0/16", "localhost", "127.0.0.1"},
+	}
+
+	policyWithAllowlistInsecure := EndpointSecurityPolicy{
 		AllowInsecureHTTP: true,
-		PrivateAllowlist:  []string{"minio.internal", "192.168.1.100", "10.50.0.0/16"},
+		PrivateAllowlist:  []string{"minio.internal", "192.168.1.100", "10.50.0.0/16", "localhost", "127.0.0.1"},
 	}
 
 	tests := []struct {
@@ -66,22 +74,28 @@ func TestEndpointSecurityPolicy_SSRFProtection(t *testing.T) {
 		ipStr      string
 		expectPass bool
 	}{
-		{"loopback ipv4 blocked", policyNoAllowlist, "localhost", "127.0.0.1", false},
-		{"loopback ipv6 blocked", policyNoAllowlist, "localhost", "::1", false},
-		{"cloud metadata blocked", policyNoAllowlist, "169.254.169.254", "169.254.169.254", false},
-		{"link-local blocked", policyNoAllowlist, "link-local", "169.254.10.20", false},
-		{"multicast blocked", policyNoAllowlist, "multicast", "224.0.0.1", false},
-		{"private 10.x blocked by default", policyNoAllowlist, "internal.db", "10.0.0.5", false},
-		{"private 172.16.x blocked by default", policyNoAllowlist, "internal.db", "172.16.0.10", false},
-		{"private 192.168.x blocked by default", policyNoAllowlist, "internal.db", "192.168.1.50", false},
-		{"public ip allowed", policyNoAllowlist, "s3.amazonaws.com", "52.216.1.1", true},
+		// Default strict (no allowlist)
+		{"loopback ipv4 blocked by default", policyNoAllowlistStrict, "localhost", "127.0.0.1", false},
+		{"loopback ipv6 blocked by default", policyNoAllowlistStrict, "localhost", "::1", false},
+		{"cloud metadata blocked", policyNoAllowlistStrict, "169.254.169.254", "169.254.169.254", false},
+		{"link-local blocked", policyNoAllowlistStrict, "link-local", "169.254.10.20", false},
+		{"multicast blocked", policyNoAllowlistStrict, "multicast", "224.0.0.1", false},
+		{"private 10.x blocked by default", policyNoAllowlistStrict, "internal.db", "10.0.0.5", false},
+		{"private 172.16.x blocked by default", policyNoAllowlistStrict, "internal.db", "172.16.0.10", false},
+		{"private 192.168.x blocked by default", policyNoAllowlistStrict, "internal.db", "192.168.1.50", false},
+		{"public ip allowed", policyNoAllowlistStrict, "s3.amazonaws.com", "52.216.1.1", true},
 
-		// With allowlist
-		{"allowlisted hostname allowed", policyWithAllowlist, "minio.internal", "10.0.0.5", true},
-		{"allowlisted exact IP allowed", policyWithAllowlist, "other-host", "192.168.1.100", true},
-		{"allowlisted CIDR allowed", policyWithAllowlist, "other-host", "10.50.2.3", true},
-		{"non-allowlisted private IP still blocked", policyWithAllowlist, "other-host", "192.168.1.101", false},
-		{"cloud metadata still blocked even with allowlist", policyWithAllowlist, "169.254.169.254", "169.254.169.254", false},
+		// Strict mode with allowlist: loopback remains blocked when AllowInsecureHTTP=false
+		{"loopback blocked in strict even if allowlisted", policyWithAllowlistStrict, "localhost", "127.0.0.1", false},
+		{"cloud metadata blocked even if allowlisted", policyWithAllowlistStrict, "169.254.169.254", "169.254.169.254", false},
+		{"allowlisted private IP allowed in strict", policyWithAllowlistStrict, "192.168.1.100", "192.168.1.100", true},
+
+		// Insecure development mode with allowlist: local MinIO loopback allowed
+		{"loopback allowed in insecure mode when explicitly allowlisted", policyWithAllowlistInsecure, "localhost", "127.0.0.1", true},
+		{"allowlisted hostname allowed in insecure mode", policyWithAllowlistInsecure, "minio.internal", "10.0.0.5", true},
+		{"allowlisted CIDR allowed in insecure mode", policyWithAllowlistInsecure, "other-host", "10.50.2.3", true},
+		{"non-allowlisted private IP still blocked in insecure mode", policyWithAllowlistInsecure, "other-host", "192.168.1.101", false},
+		{"cloud metadata still blocked even in insecure mode with allowlist", policyWithAllowlistInsecure, "169.254.169.254", "169.254.169.254", false},
 	}
 
 	for _, tt := range tests {
@@ -95,6 +109,56 @@ func TestEndpointSecurityPolicy_SSRFProtection(t *testing.T) {
 				t.Errorf("IsIPAllowed(%s, %s) = %v, expected %v", tt.host, tt.ipStr, allowed, tt.expectPass)
 			}
 		})
+	}
+}
+
+func TestEndpointSecurityPolicy_EnvironmentProxyCannotBypass(t *testing.T) {
+	// Set environment proxies that might attempt to hijack traffic
+	t.Setenv("HTTP_PROXY", "http://malicious-proxy.internal:8080")
+	t.Setenv("HTTPS_PROXY", "http://malicious-proxy.internal:8080")
+	t.Setenv("ALL_PROXY", "socks5://malicious-proxy.internal:1080")
+
+	policy := &EndpointSecurityPolicy{
+		AllowInsecureHTTP: false,
+	}
+
+	client := policy.NewSecureHTTPClient()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+	}
+
+	// Transport.Proxy must be explicitly nil to guarantee direct transport
+	if transport.Proxy != nil {
+		t.Fatalf("transport.Proxy must be nil, got non-nil function")
+	}
+}
+
+func TestEndpointSecurityPolicy_RedirectRejected(t *testing.T) {
+	// Server that attempts an HTTP 302 redirect
+	redirectTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer redirectTarget.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, redirectTarget.URL, http.StatusFound)
+	}))
+	defer srv.Close()
+
+	policy := &EndpointSecurityPolicy{
+		AllowInsecureHTTP: true,
+		PrivateAllowlist:  []string{"127.0.0.1"},
+	}
+
+	client := policy.NewSecureHTTPClient()
+	req, _ := http.NewRequest(http.MethodGet, srv.URL, nil)
+	_, err := client.Do(req)
+	if err == nil {
+		t.Fatalf("expected redirect to be rejected with ErrRedirectNotAllowed, got nil error")
+	}
+	if !errors.Is(err, ErrRedirectNotAllowed) && !strings.Contains(err.Error(), "http redirects are not allowed") {
+		t.Errorf("expected ErrRedirectNotAllowed, got: %v", err)
 	}
 }
 
@@ -253,8 +317,9 @@ func TestS3StorageProvider_EndToEnd(t *testing.T) {
 		t.Errorf("fetched bytes mismatch: %s vs %s", string(fetchedBytes), string(testData))
 	}
 
-	// 4. OpenArtifact Not Found
-	_, err = provider.OpenArtifact(ctx, "organizations/nonexistent/artifacts/123.sql.gz")
+	// 4. OpenArtifact Not Found (valid canonical format, missing object)
+	missingKey := provider.BuildObjectKey(uuid.New(), uuid.New(), uuid.New(), ".sql.gz")
+	_, err = provider.OpenArtifact(ctx, missingKey)
 	if err != storage.ErrArtifactNotFound {
 		t.Errorf("expected ErrArtifactNotFound, got %v", err)
 	}
@@ -271,8 +336,147 @@ func TestS3StorageProvider_EndToEnd(t *testing.T) {
 		t.Errorf("expected object to be deleted")
 	}
 
-	// 6. DeleteArtifact Idempotence
+	// 6. DeleteArtifact Idempotence (missing object returns nil)
 	if err := provider.DeleteArtifact(ctx, res.StorageReference); err != nil {
 		t.Errorf("expected idempotent delete, got error: %v", err)
+	}
+}
+
+func TestS3StorageProvider_CanonicalReferenceValidation(t *testing.T) {
+	orgID := uuid.New()
+	resID := uuid.New()
+	artID := uuid.New()
+
+	pNoPrefix := &S3StorageProvider{prefix: ""}
+	pWithPrefix := &S3StorageProvider{prefix: "custom-prefix"}
+
+	validSQL := fmt.Sprintf("organizations/%s/resources/%s/artifacts/%s.sql.gz", orgID, resID, artID)
+	validTar := fmt.Sprintf("organizations/%s/resources/%s/artifacts/%s.tar.gz", orgID, resID, artID)
+	validWithPrefix := fmt.Sprintf("custom-prefix/organizations/%s/resources/%s/artifacts/%s.sql.gz", orgID, resID, artID)
+
+	tests := []struct {
+		name        string
+		provider    *S3StorageProvider
+		ref         string
+		expectError bool
+	}{
+		{"valid sql.gz", pNoPrefix, validSQL, false},
+		{"valid tar.gz", pNoPrefix, validTar, false},
+		{"valid with prefix", pWithPrefix, validWithPrefix, false},
+		{"empty reference", pNoPrefix, "", true},
+		{"absolute key rejected", pNoPrefix, "/" + validSQL, true},
+		{"backslash rejected", pNoPrefix, strings.ReplaceAll(validSQL, "/", "\\"), true},
+		{"NUL byte rejected", pNoPrefix, validSQL + "\x00", true},
+		{"path traversal rejected", pNoPrefix, fmt.Sprintf("organizations/%s/resources/%s/artifacts/../%s.sql.gz", orgID, resID, artID), true},
+		{"wrong segment count short", pNoPrefix, fmt.Sprintf("organizations/%s/artifacts/%s.sql.gz", orgID, artID), true},
+		{"wrong segment count long", pNoPrefix, fmt.Sprintf("organizations/%s/resources/%s/extra/artifacts/%s.sql.gz", orgID, resID, artID), true},
+		{"invalid org uuid", pNoPrefix, fmt.Sprintf("organizations/not-a-uuid/resources/%s/artifacts/%s.sql.gz", resID, artID), true},
+		{"invalid res uuid", pNoPrefix, fmt.Sprintf("organizations/%s/resources/not-a-uuid/artifacts/%s.sql.gz", orgID, artID), true},
+		{"invalid art uuid", pNoPrefix, fmt.Sprintf("organizations/%s/resources/%s/artifacts/not-a-uuid.sql.gz", orgID, resID), true},
+		{"unsupported extension txt", pNoPrefix, fmt.Sprintf("organizations/%s/resources/%s/artifacts/%s.txt", orgID, resID, artID), true},
+		{"unsupported extension gz without tar/sql", pNoPrefix, fmt.Sprintf("organizations/%s/resources/%s/artifacts/%s.gz", orgID, resID, artID), true},
+		{"missing expected prefix", pWithPrefix, validSQL, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.provider.ValidateStorageReference(tt.ref)
+			if (err != nil) != tt.expectError {
+				t.Errorf("ValidateStorageReference(%q) err = %v, expectError = %v", tt.ref, err, tt.expectError)
+			}
+			if tt.expectError && !errors.Is(err, storage.ErrInvalidStorageReference) {
+				t.Errorf("expected ErrInvalidStorageReference, got %v", err)
+			}
+		})
+	}
+}
+
+func TestS3StorageProvider_OpenAndDelete_MalformedReference(t *testing.T) {
+	p := &S3StorageProvider{bucket: "test-bucket"}
+	ctx := context.Background()
+
+	malformedRefs := []string{
+		"",
+		"../traversal",
+		"/etc/passwd",
+		"organizations/bad/resources/bad/artifacts/bad.sql.gz",
+	}
+
+	for _, ref := range malformedRefs {
+		_, err := p.OpenArtifact(ctx, ref)
+		if !errors.Is(err, storage.ErrInvalidStorageReference) {
+			t.Errorf("OpenArtifact(%q) expected ErrInvalidStorageReference, got %v", ref, err)
+		}
+
+		err = p.DeleteArtifact(ctx, ref)
+		if !errors.Is(err, storage.ErrInvalidStorageReference) {
+			t.Errorf("DeleteArtifact(%q) expected ErrInvalidStorageReference, got %v", ref, err)
+		}
+	}
+}
+
+func TestS3StorageProvider_UploadFailure_NoSaveResult(t *testing.T) {
+	// Server that fails on Put
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := S3ProviderConfig{
+		Bucket:          "failing-bucket",
+		Region:          "us-east-1",
+		Endpoint:        srv.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "KEY",
+		SecretAccessKey: "SECRET",
+		AllowInsecure:   true,
+		HTTPClient:      srv.Client(),
+	}
+
+	p, err := NewS3StorageProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed creating provider: %v", err)
+	}
+
+	ctx := context.Background()
+	res, err := p.SaveArtifact(ctx, uuid.New(), uuid.New(), uuid.New(), uuid.New(), ".sql.gz", bytes.NewReader([]byte("test data")))
+	if err == nil {
+		t.Fatalf("expected upload to fail, got nil error")
+	}
+	if res != nil {
+		t.Fatalf("expected nil SaveResult on upload failure, got: %+v", res)
+	}
+}
+
+func TestS3StorageProvider_ContextCancellation(t *testing.T) {
+	srv, _ := newMockS3Server()
+	defer srv.Close()
+
+	cfg := S3ProviderConfig{
+		Bucket:          "cancel-bucket",
+		Region:          "us-east-1",
+		Endpoint:        srv.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "KEY",
+		SecretAccessKey: "SECRET",
+		AllowInsecure:   true,
+		HTTPClient:      srv.Client(),
+	}
+
+	p, err := NewS3StorageProvider(cfg)
+	if err != nil {
+		t.Fatalf("failed creating provider: %v", err)
+	}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	_, err = p.SaveArtifact(cancelledCtx, uuid.New(), uuid.New(), uuid.New(), uuid.New(), ".sql.gz", bytes.NewReader([]byte("test data")))
+	if err == nil {
+		t.Fatalf("expected cancelled context error, got nil")
 	}
 }

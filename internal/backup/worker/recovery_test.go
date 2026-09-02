@@ -1102,3 +1102,50 @@ func TestRecoveryAndReaper_Comprehensive(t *testing.T) {
 		}
 	})
 }
+
+type mockFailingStorageResolver struct {
+	err error
+}
+
+func (m *mockFailingStorageResolver) Resolve(ctx context.Context, orgID, targetID uuid.UUID) (storage.StorageProvider, error) {
+	return nil, m.err
+}
+
+func TestCrashRecovery_S3Artifact_ResolverError_NoLocalFallback(t *testing.T) {
+	orgID := uuid.New()
+	runID := uuid.New()
+	artID := uuid.New()
+	s3TargetID := uuid.New()
+
+	repo := newMockRecoveryRepo()
+	repo.runs[runID] = &domain.BackupRun{
+		ID:             runID,
+		OrganizationID: orgID,
+		JobID:          uuid.New(),
+		Status:         domain.RunStatusRunning,
+	}
+	repo.artifacts[runID] = []*domain.BackupArtifact{
+		{
+			ID:               artID,
+			OrganizationID:   orgID,
+			RunID:            runID,
+			StorageTargetID:  s3TargetID,
+			StorageReference: "organizations/" + orgID.String() + "/resources/" + uuid.New().String() + "/artifacts/" + artID.String() + ".sql.gz",
+			IsDeleted:        false,
+		},
+	}
+
+	localStore := &mockStorageWithControl{}
+	failingResolver := &mockFailingStorageResolver{
+		err: errors.New("s3 credential decrypt failed"),
+	}
+
+	cleanupCrashArtifacts(context.Background(), repo, localStore, failingResolver, orgID, runID, slog.Default())
+
+	if len(localStore.deletedRefs) > 0 {
+		t.Fatalf("local storage provider must NOT be called when resolver fails, but was called for: %v", localStore.deletedRefs)
+	}
+	if repo.tombstoned[artID] {
+		t.Fatalf("artifact must NOT be tombstoned when physical delete via resolver could not be proven")
+	}
+}

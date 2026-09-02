@@ -132,7 +132,10 @@ func (p *WorkerPool) SetStorageResolver(resolver storage.StorageProviderResolver
 }
 
 func (p *WorkerPool) resolveStorageProvider(ctx context.Context, orgID, targetID uuid.UUID) (storage.StorageProvider, error) {
-	if p.storageResolver != nil && targetID != uuid.Nil {
+	if p.storageResolver != nil {
+		if targetID == uuid.Nil {
+			return nil, domain.ErrStorageTargetNotFound
+		}
 		return p.storageResolver.Resolve(ctx, orgID, targetID)
 	}
 	if p.storageProvider != nil {
@@ -506,9 +509,9 @@ func (p *WorkerPool) executeBackupPipeline(
 	run *domain.BackupRun,
 	job *domain.BackupJob,
 ) error {
-	// 1. Validate EngineType (ADR-033: only direct_stream supported in Step A.1; fail-closed on unsupported)
+	// 1. Validate EngineType (ADR-033: only direct_stream supported in Step A.1; fail-closed on blank or unsupported)
 	if job.EngineType == "" {
-		job.EngineType = domain.EngineTypeDirectStream
+		return domain.ErrInvalidEngineType
 	}
 	if job.EngineType != domain.EngineTypeDirectStream {
 		return domain.ErrUnsupportedEngineType
@@ -542,31 +545,19 @@ func (p *WorkerPool) executeBackupPipeline(
 		return domain.ErrInvalidTargetSpec
 	}
 
-	// 4. Fetch and Validate Storage Target (Deterministic Target Resolution)
-	var storageTarget *domain.StorageTarget
-	if job.StorageTargetID != uuid.Nil {
-		target, err := p.repo.GetStorageTargetByID(ctx, job.OrganizationID, job.StorageTargetID)
-		if err != nil {
-			return err
-		}
-		if target.Status != domain.StorageTargetStatusActive {
-			return domain.ErrStorageTargetNotActive
-		}
-		if !domain.IsEngineCompatibleWithStorage(job.EngineType, target.Type) {
-			return domain.ErrIncompatibleEngineStorage
-		}
-		storageTarget = target
-	} else {
-		defaultTarget, err := p.repo.EnsureDefaultLocalStorageTarget(ctx, job.OrganizationID)
-		if err != nil {
-			return err
-		}
-		if defaultTarget.Type != domain.StorageTargetTypeLocal ||
-			defaultTarget.Status != domain.StorageTargetStatusActive ||
-			!defaultTarget.IsDefault {
-			return domain.ErrStorageTargetNotSupported
-		}
-		storageTarget = defaultTarget
+	// 4. Fetch and Validate Storage Target (Immutable Job Snapshot; fail-closed on missing target)
+	if job.StorageTargetID == uuid.Nil {
+		return domain.ErrStorageTargetNotFound
+	}
+	storageTarget, err := p.repo.GetStorageTargetByID(ctx, job.OrganizationID, job.StorageTargetID)
+	if err != nil {
+		return err
+	}
+	if storageTarget.Status != domain.StorageTargetStatusActive {
+		return domain.ErrStorageTargetNotActive
+	}
+	if !domain.IsEngineCompatibleWithStorage(job.EngineType, storageTarget.Type) {
+		return domain.ErrIncompatibleEngineStorage
 	}
 
 	// 5. Resolve StorageProvider for target

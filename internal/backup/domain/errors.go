@@ -102,6 +102,9 @@ var (
 	// ErrNoVerifiableArtifacts indicates that no active, non-deleted artifacts exist for the requested backup run.
 	ErrNoVerifiableArtifacts = errors.New("no verifiable backup artifacts found for run")
 
+	// ErrInvalidEngineType indicates that the engine type is blank or malformed.
+	ErrInvalidEngineType = errors.New("invalid backup engine type")
+
 	// ErrUnsupportedEngineType indicates that the requested backup engine type is unsupported.
 	ErrUnsupportedEngineType = errors.New("unsupported backup engine type")
 

@@ -16,5 +16,9 @@ ALTER TABLE backup_plans DROP CONSTRAINT IF EXISTS chk_backup_plans_engine_type;
 ALTER TABLE backup_plans DROP COLUMN IF EXISTS storage_target_id;
 ALTER TABLE backup_plans DROP COLUMN IF EXISTS engine_type;
 
+-- Before restoring the old status CHECK (which excludes 'archived'), convert existing 'archived' status to 'disabled'
+UPDATE storage_targets SET status = 'disabled' WHERE status = 'archived';
+
 ALTER TABLE storage_targets DROP CONSTRAINT IF EXISTS chk_storage_targets_status;
+ALTER TABLE storage_targets DROP CONSTRAINT IF EXISTS storage_targets_status_check;
 ALTER TABLE storage_targets ADD CONSTRAINT storage_targets_status_check CHECK (status IN ('active', 'disabled', 'error'));

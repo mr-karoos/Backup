@@ -23,16 +23,17 @@ var (
 	ErrRedirectNotAllowed = errors.New("http redirects are not allowed for s3 endpoints")
 )
 
-// Predefined blocked IP subnets (loopback, link-local, cloud metadata, multicast, unspecified).
-var blockedSubnets []*net.IPNet
+// Predefined unconditionally blocked IP subnets (link-local, cloud metadata, multicast, unspecified).
+var unconditionallyBlockedSubnets []*net.IPNet
+
+// Loopback subnets (127.0.0.0/8, ::1/128). Blocked by default.
+var loopbackSubnets []*net.IPNet
 
 // RFC 1918 and ULA private subnets.
 var privateSubnets []*net.IPNet
 
 func init() {
-	blockedCIDRs := []string{
-		"127.0.0.0/8",    // IPv4 Loopback
-		"::1/128",        // IPv6 Loopback
+	unconditionallyBlockedCIDRs := []string{
 		"169.254.0.0/16", // IPv4 Link-Local & Cloud Metadata (169.254.169.254)
 		"fe80::/10",      // IPv6 Link-Local
 		"224.0.0.0/4",    // IPv4 Multicast
@@ -40,10 +41,21 @@ func init() {
 		"0.0.0.0/8",      // Current network
 		"::/128",         // IPv6 Unspecified
 	}
-	for _, cidr := range blockedCIDRs {
+	for _, cidr := range unconditionallyBlockedCIDRs {
 		_, ipNet, err := net.ParseCIDR(cidr)
 		if err == nil {
-			blockedSubnets = append(blockedSubnets, ipNet)
+			unconditionallyBlockedSubnets = append(unconditionallyBlockedSubnets, ipNet)
+		}
+	}
+
+	loopbackCIDRs := []string{
+		"127.0.0.0/8", // IPv4 Loopback
+		"::1/128",     // IPv6 Loopback
+	}
+	for _, cidr := range loopbackCIDRs {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err == nil {
+			loopbackSubnets = append(loopbackSubnets, ipNet)
 		}
 	}
 
@@ -67,7 +79,7 @@ type EndpointSecurityPolicy struct {
 	PrivateAllowlist  []string // List of allowed hostnames, IP strings, or CIDR blocks
 }
 
-// ValidateEndpointURL checks syntax, scheme, userinfo, and host.
+// ValidateEndpointURL checks syntax, scheme, userinfo, host, path, query, and fragment.
 func (p *EndpointSecurityPolicy) ValidateEndpointURL(endpointURL string) (*url.URL, error) {
 	trimmed := strings.TrimSpace(endpointURL)
 	if trimmed == "" {
@@ -99,6 +111,14 @@ func (p *EndpointSecurityPolicy) ValidateEndpointURL(endpointURL string) (*url.U
 		return nil, errors.New("s3 endpoint URL must not contain a path component")
 	}
 
+	// Reject query parameters and URL fragments fail-closed
+	if u.RawQuery != "" {
+		return nil, errors.New("s3 endpoint URL must not contain query parameters")
+	}
+	if u.Fragment != "" {
+		return nil, errors.New("s3 endpoint URL must not contain a fragment")
+	}
+
 	return u, nil
 }
 
@@ -108,14 +128,31 @@ func (p *EndpointSecurityPolicy) IsIPAllowed(host string, ip net.IP) bool {
 		return false
 	}
 
-	// 1. Check unconditionally blocked ranges (loopback, link-local, multicast, metadata, unspecified)
-	for _, subnet := range blockedSubnets {
+	// 1. Unconditionally blocked ranges (cloud metadata, link-local, multicast, unspecified).
+	// These can NEVER be bypassed or allowlisted under any circumstances.
+	for _, subnet := range unconditionallyBlockedSubnets {
 		if subnet.Contains(ip) {
 			return false
 		}
 	}
 
-	// 2. Check private RFC 1918 / ULA ranges
+	// 2. Loopback ranges (127.0.0.0/8, ::1/128).
+	// Blocked by default. Allowed ONLY in development/test when BOTH AllowInsecureHTTP is true AND explicitly allowlisted.
+	isLoopback := false
+	for _, subnet := range loopbackSubnets {
+		if subnet.Contains(ip) {
+			isLoopback = true
+			break
+		}
+	}
+	if isLoopback {
+		if !p.AllowInsecureHTTP {
+			return false
+		}
+		return p.matchesAllowlist(host, ip)
+	}
+
+	// 3. Check private RFC 1918 / ULA ranges
 	isPrivate := false
 	for _, subnet := range privateSubnets {
 		if subnet.Contains(ip) {
@@ -128,7 +165,11 @@ func (p *EndpointSecurityPolicy) IsIPAllowed(host string, ip net.IP) bool {
 		return true // Public routable IP
 	}
 
-	// 3. If private, check against explicit private allowlist
+	// 4. If private, check against explicit private allowlist
+	return p.matchesAllowlist(host, ip)
+}
+
+func (p *EndpointSecurityPolicy) matchesAllowlist(host string, ip net.IP) bool {
 	for _, allowed := range p.PrivateAllowlist {
 		clean := strings.TrimSpace(allowed)
 		if clean == "" {
@@ -154,12 +195,11 @@ func (p *EndpointSecurityPolicy) IsIPAllowed(host string, ip net.IP) bool {
 			}
 		}
 	}
-
 	return false
 }
 
 // NewSecureHTTPClient returns an *http.Client with connection-time DNS resolution, SSRF validation,
-// and disabled redirects.
+// explicit direct transport (no environment proxies), and disabled redirects.
 func (p *EndpointSecurityPolicy) NewSecureHTTPClient() *http.Client {
 	dialer := &net.Dialer{
 		Timeout:   15 * time.Second,
@@ -167,7 +207,7 @@ func (p *EndpointSecurityPolicy) NewSecureHTTPClient() *http.Client {
 	}
 
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		Proxy:                 nil, // Explicit direct transport; MUST NOT inherit HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
 		DialContext:           p.makeSecureDialContext(dialer),
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          50,

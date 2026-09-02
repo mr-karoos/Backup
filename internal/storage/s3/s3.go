@@ -217,16 +217,73 @@ func (p *S3StorageProvider) SaveArtifact(
 	}, nil
 }
 
+// ValidateStorageReference validates that a storage reference conforms strictly to the canonical
+// platform-generated structure:
+// [prefix/]organizations/{org_uuid}/resources/{resource_uuid}/artifacts/{artifact_uuid}.sql.gz (or .tar.gz)
+// Rejects absolute keys, backslashes, NUL bytes, traversal, wrong segment counts, invalid UUIDs, and unsupported extensions.
+func (p *S3StorageProvider) ValidateStorageReference(storageReference string) error {
+	ref := strings.TrimSpace(storageReference)
+	if ref == "" {
+		return storage.ErrInvalidStorageReference
+	}
+
+	// Reject absolute-style keys, backslashes, NUL bytes, and directory traversal
+	if strings.HasPrefix(ref, "/") || strings.Contains(ref, "\\") || strings.Contains(ref, "\x00") || strings.Contains(ref, "..") {
+		return storage.ErrInvalidStorageReference
+	}
+
+	relRef := ref
+	if p.prefix != "" {
+		expectedPrefix := p.prefix + "/"
+		if !strings.HasPrefix(relRef, expectedPrefix) {
+			return storage.ErrInvalidStorageReference
+		}
+		relRef = strings.TrimPrefix(relRef, expectedPrefix)
+	}
+
+	// Canonical structure: organizations/{org_uuid}/resources/{resource_uuid}/artifacts/{artifact_uuid}.(sql.gz|tar.gz)
+	segments := strings.Split(relRef, "/")
+	if len(segments) != 6 {
+		return storage.ErrInvalidStorageReference
+	}
+
+	if segments[0] != "organizations" || segments[2] != "resources" || segments[4] != "artifacts" {
+		return storage.ErrInvalidStorageReference
+	}
+
+	if _, err := uuid.Parse(segments[1]); err != nil {
+		return storage.ErrInvalidStorageReference
+	}
+	if _, err := uuid.Parse(segments[3]); err != nil {
+		return storage.ErrInvalidStorageReference
+	}
+
+	filename := segments[5]
+	var artUUIDStr string
+	if strings.HasSuffix(filename, ".sql.gz") {
+		artUUIDStr = strings.TrimSuffix(filename, ".sql.gz")
+	} else if strings.HasSuffix(filename, ".tar.gz") {
+		artUUIDStr = strings.TrimSuffix(filename, ".tar.gz")
+	} else {
+		return storage.ErrInvalidStorageReference
+	}
+
+	if _, err := uuid.Parse(artUUIDStr); err != nil {
+		return storage.ErrInvalidStorageReference
+	}
+
+	return nil
+}
+
 // OpenArtifact streams an artifact directly from S3.
 func (p *S3StorageProvider) OpenArtifact(ctx context.Context, storageReference string) (io.ReadCloser, error) {
-	ref := strings.TrimSpace(storageReference)
-	if ref == "" || strings.Contains(ref, "..") {
-		return nil, storage.ErrArtifactNotFound
+	if err := p.ValidateStorageReference(storageReference); err != nil {
+		return nil, err
 	}
 
 	out, err := p.client.GetObject(ctx, &s3client.GetObjectInput{
 		Bucket: aws.String(p.bucket),
-		Key:    aws.String(ref),
+		Key:    aws.String(strings.TrimSpace(storageReference)),
 	})
 	if err != nil {
 		var nsk *types.NoSuchKey
@@ -243,16 +300,15 @@ func (p *S3StorageProvider) OpenArtifact(ctx context.Context, storageReference s
 	return out.Body, nil
 }
 
-// DeleteArtifact deletes the specified object from S3. Idempotent.
+// DeleteArtifact deletes the specified object from S3. Idempotent on missing objects, fails closed on invalid references.
 func (p *S3StorageProvider) DeleteArtifact(ctx context.Context, storageReference string) error {
-	ref := strings.TrimSpace(storageReference)
-	if ref == "" || strings.Contains(ref, "..") {
-		return nil // No-op for invalid reference
+	if err := p.ValidateStorageReference(storageReference); err != nil {
+		return err
 	}
 
 	_, err := p.client.DeleteObject(ctx, &s3client.DeleteObjectInput{
 		Bucket: aws.String(p.bucket),
-		Key:    aws.String(ref),
+		Key:    aws.String(strings.TrimSpace(storageReference)),
 	})
 	if err != nil {
 		var nsk *types.NoSuchKey

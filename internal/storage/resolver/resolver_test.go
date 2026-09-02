@@ -40,11 +40,16 @@ func (m *mockVaultLoader) LoadCredentialForUse(ctx context.Context, orgID, credI
 	return credDomain.TypeS3Credentials, res, nil
 }
 
+type mockLocalStorageProvider struct {
+	storage.StorageProvider
+}
+
 func TestStorageResolver_Resolve(t *testing.T) {
 	orgID := uuid.New()
 	localTargetID := uuid.New()
 	s3TargetID := uuid.New()
 	disabledTargetID := uuid.New()
+	archivedTargetID := uuid.New()
 	credID := uuid.New()
 
 	s3PayloadBytes, err := payload.EncodeS3V1("MYKEY", "MYSECRET", nil)
@@ -78,6 +83,15 @@ func TestStorageResolver_Resolve(t *testing.T) {
 				Type:           domain.StorageTargetTypeLocal,
 				Status:         domain.StorageTargetStatusDisabled,
 			},
+			orgID.String() + ":" + archivedTargetID.String(): {
+				ID:             archivedTargetID,
+				OrganizationID: orgID,
+				Name:           "Archived S3 Target",
+				Type:           domain.StorageTargetTypeS3,
+				Status:         domain.StorageTargetStatusArchived,
+				CredentialID:   &credID,
+				Config:         []byte(`{"bucket":"my-bucket","region":"us-east-1"}`),
+			},
 		},
 	}
 
@@ -87,7 +101,7 @@ func TestStorageResolver_Resolve(t *testing.T) {
 		},
 	}
 
-	var mockLocal storage.StorageProvider
+	var mockLocal storage.StorageProvider = &mockLocalStorageProvider{}
 	resolver := NewStorageResolver(mockLocal, mockRepo, mockVault, false, nil)
 	ctx := context.Background()
 
@@ -111,10 +125,23 @@ func TestStorageResolver_Resolve(t *testing.T) {
 		}
 	})
 
-	t.Run("resolve disabled target fails", func(t *testing.T) {
-		_, err := resolver.Resolve(ctx, orgID, disabledTargetID)
-		if !errors.Is(err, domain.ErrStorageTargetNotActive) {
-			t.Errorf("expected ErrStorageTargetNotActive, got %v", err)
+	t.Run("resolve disabled target succeeds for historical access", func(t *testing.T) {
+		prov, err := resolver.Resolve(ctx, orgID, disabledTargetID)
+		if err != nil {
+			t.Fatalf("expected successful resolution of disabled target for historical access, got: %v", err)
+		}
+		if prov != mockLocal {
+			t.Errorf("expected local provider instance")
+		}
+	})
+
+	t.Run("resolve archived target succeeds for historical access", func(t *testing.T) {
+		prov, err := resolver.Resolve(ctx, orgID, archivedTargetID)
+		if err != nil {
+			t.Fatalf("expected successful resolution of archived target for historical access, got: %v", err)
+		}
+		if prov == nil {
+			t.Errorf("expected s3 provider instance for archived target, got nil")
 		}
 	})
 

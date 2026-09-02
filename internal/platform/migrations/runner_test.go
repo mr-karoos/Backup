@@ -1,13 +1,21 @@
 package migrations
 
 import (
+	"context"
 	"errors"
 	"io"
 	"io/fs"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5"
+
+	"backup-platform/pkg/uuid"
 )
 
 func TestMigrations_EmbeddedFilesExistAndValid(t *testing.T) {
@@ -497,8 +505,9 @@ func TestMigrations_StepA1_StorageEngineEvolutionDefinition(t *testing.T) {
 
 	sqlStr := string(upContent)
 	required := []string{
-		"INSERT INTO storage_targets",
 		"chk_storage_targets_status CHECK (status IN ('active', 'disabled', 'error', 'archived'))",
+		"ranked_local",
+		"INSERT INTO storage_targets",
 		"ALTER TABLE backup_plans ADD COLUMN IF NOT EXISTS engine_type VARCHAR(50) NULL;",
 		"ALTER TABLE backup_plans ADD COLUMN IF NOT EXISTS storage_target_id UUID NULL;",
 		"UPDATE backup_plans bp",
@@ -534,6 +543,7 @@ func TestMigrations_StepA1_StorageEngineEvolutionDefinition(t *testing.T) {
 		"ALTER TABLE backup_plans DROP CONSTRAINT IF EXISTS fk_backup_plans_org_storage;",
 		"ALTER TABLE backup_plans DROP COLUMN IF EXISTS storage_target_id;",
 		"ALTER TABLE backup_plans DROP COLUMN IF EXISTS engine_type;",
+		"UPDATE storage_targets SET status = 'disabled' WHERE status = 'archived';",
 		"ALTER TABLE storage_targets DROP CONSTRAINT IF EXISTS chk_storage_targets_status;",
 	}
 
@@ -541,5 +551,223 @@ func TestMigrations_StepA1_StorageEngineEvolutionDefinition(t *testing.T) {
 		if !strings.Contains(downStr, item) {
 			t.Errorf("000006 down migration missing expected element: %s", item)
 		}
+	}
+}
+
+func TestMigrations_StepA1_Integration(t *testing.T) {
+	testDBURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
+	if testDBURL == "" {
+		t.Skip("skipping migration integration test: TEST_DATABASE_URL not set")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := pgx.Connect(ctx, testDBURL)
+	if err != nil {
+		t.Fatalf("failed connecting to test database: %v", err)
+	}
+	defer func() {
+		_ = conn.Close(ctx)
+	}()
+
+	d, err := iofs.New(FS, "sql")
+	if err != nil {
+		t.Fatalf("failed creating iofs driver: %v", err)
+	}
+
+	m, err := migrate.NewWithSourceInstance("iofs", d, testDBURL)
+	if err != nil {
+		t.Fatalf("failed initializing migrate instance: %v", err)
+	}
+	defer func() {
+		_, _ = m.Close()
+	}()
+
+	// 1. Bring database to version 5 (pre-Step A.1 baseline)
+	if err := m.Migrate(5); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("failed migrating to version 5 baseline: %v", err)
+	}
+
+	// 2. Setup isolated test organizations and legacy data
+	org1ID := uuid.New()
+	org2ID := uuid.New()
+	user1ID := uuid.New()
+	user2ID := uuid.New()
+	res1ID := uuid.New()
+	res2ID := uuid.New()
+	plan1ID := uuid.New()
+	plan2ID := uuid.New()
+	job1ID := uuid.New()
+	job2ID := uuid.New()
+
+	// Clean any previous test data for these IDs
+	_, _ = conn.Exec(ctx, "DELETE FROM organizations WHERE id IN ($1, $2)", org1ID, org2ID)
+
+	// Insert organizations
+	_, err = conn.Exec(ctx, "INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ($1, 'Org One', $3, NOW(), NOW()), ($2, 'Org Two', $4, NOW(), NOW())",
+		org1ID, org2ID, "org-one-"+org1ID.String()[:8], "org-two-"+org2ID.String()[:8])
+	if err != nil {
+		t.Fatalf("failed inserting test organizations: %v", err)
+	}
+	defer func() {
+		_, _ = conn.Exec(context.Background(), "DELETE FROM organizations WHERE id IN ($1, $2)", org1ID, org2ID)
+	}()
+
+	// Insert users
+	_, err = conn.Exec(ctx, `
+		INSERT INTO users (id, email, password_hash, is_active, is_system_admin, created_at, updated_at)
+		VALUES ($1, $3, 'hash', true, false, NOW(), NOW()), ($2, $4, 'hash', true, false, NOW(), NOW())`,
+		user1ID, user2ID, "u1-"+user1ID.String()[:8]+"@example.com", "u2-"+user2ID.String()[:8]+"@example.com")
+	if err != nil {
+		t.Fatalf("failed inserting test users: %v", err)
+	}
+
+	// Insert resources
+	_, err = conn.Exec(ctx, `
+		INSERT INTO resources (id, organization_id, name, type, status, created_at, updated_at)
+		VALUES ($1, $2, 'Res 1', 'ubuntu_ssh', 'active', NOW(), NOW()),
+		       ($3, $4, 'Res 2', 'ubuntu_ssh', 'active', NOW(), NOW())`,
+		res1ID, org1ID, res2ID, org2ID)
+	if err != nil {
+		t.Fatalf("failed inserting test resources: %v", err)
+	}
+
+	// Case A: Org 1 has NO storage targets at all
+	// Case B: Org 2 has a legacy non-local (s3) default target AND a disabled local target
+	s3TargetID := uuid.New()
+	disabledLocalTargetID := uuid.New()
+	_, err = conn.Exec(ctx, `
+		INSERT INTO storage_targets (id, organization_id, name, type, status, is_default, config, created_at, updated_at)
+		VALUES ($1, $2, 'Legacy S3 Default', 's3', 'active', true, '{}'::jsonb, NOW(), NOW()),
+		       ($3, $2, 'Disabled Local', 'local', 'disabled', false, '{}'::jsonb, NOW(), NOW())`,
+		s3TargetID, org2ID, disabledLocalTargetID)
+	if err != nil {
+		t.Fatalf("failed inserting Org 2 storage targets: %v", err)
+	}
+
+	// Insert historical plans and jobs in v5 schema (without engine_type or storage_target_id)
+	_, err = conn.Exec(ctx, `
+		INSERT INTO backup_plans (id, organization_id, resource_id, name, backup_type, target_spec, retention_count, is_enabled, cron_expression, timezone, next_run_at, created_at, updated_at)
+		VALUES ($1, $2, $3, 'Plan 1', 'database_mysql', '{"database_name":"db1"}', 5, false, '0 0 * * *', 'UTC', NOW(), NOW(), NOW()),
+		       ($4, $5, $6, 'Plan 2', 'database_mysql', '{"database_name":"db2"}', 5, false, '0 0 * * *', 'UTC', NOW(), NOW(), NOW())`,
+		plan1ID, org1ID, res1ID, plan2ID, org2ID, res2ID)
+	if err != nil {
+		t.Fatalf("failed inserting v5 backup plans: %v", err)
+	}
+
+	_, err = conn.Exec(ctx, `
+		INSERT INTO backup_jobs (id, organization_id, resource_id, backup_type, target_spec, status, priority, attempt_count, max_retries, created_at, updated_at)
+		VALUES ($1, $2, $3, 'database_mysql', '{"database_name":"db1"}', 'completed', 10, 1, 3, NOW(), NOW()),
+		       ($4, $5, $6, 'database_mysql', '{"database_name":"db2"}', 'completed', 10, 1, 3, NOW(), NOW())`,
+		job1ID, org1ID, res1ID, job2ID, org2ID, res2ID)
+	if err != nil {
+		t.Fatalf("failed inserting v5 backup jobs: %v", err)
+	}
+
+	// 3. Apply migration 000006 (Step A.1 Up)
+	if err := m.Migrate(6); err != nil {
+		t.Fatalf("migration 000006 up failed: %v", err)
+	}
+
+	// 4. Verify Org 1: now has an active default local storage target
+	var org1TargetID uuid.UUID
+	var org1TargetType, org1TargetStatus string
+	var org1IsDefault bool
+	err = conn.QueryRow(ctx, `
+		SELECT id, type, status, is_default FROM storage_targets
+		WHERE organization_id = $1 AND is_default = true`, org1ID).Scan(&org1TargetID, &org1TargetType, &org1TargetStatus, &org1IsDefault)
+	if err != nil {
+		t.Fatalf("failed querying Org 1 default storage target: %v", err)
+	}
+	if org1TargetType != "local" || org1TargetStatus != "active" || !org1IsDefault {
+		t.Errorf("expected Org 1 default target to be local/active/true, got type=%s status=%s is_default=%v", org1TargetType, org1TargetStatus, org1IsDefault)
+	}
+
+	// Verify Org 1 plan and job backfilled to Org 1's local target with engine_type direct_stream
+	var p1Engine string
+	var p1StorageID uuid.UUID
+	err = conn.QueryRow(ctx, `SELECT engine_type, storage_target_id FROM backup_plans WHERE id = $1`, plan1ID).Scan(&p1Engine, &p1StorageID)
+	if err != nil {
+		t.Fatalf("failed querying Org 1 backfilled plan: %v", err)
+	}
+	if p1Engine != "direct_stream" || p1StorageID != org1TargetID {
+		t.Errorf("expected plan 1 engine=direct_stream storage=%s, got engine=%s storage=%s", org1TargetID, p1Engine, p1StorageID)
+	}
+
+	var j1Engine string
+	var j1StorageID uuid.UUID
+	err = conn.QueryRow(ctx, `SELECT engine_type, storage_target_id FROM backup_jobs WHERE id = $1`, job1ID).Scan(&j1Engine, &j1StorageID)
+	if err != nil {
+		t.Fatalf("failed querying Org 1 backfilled job: %v", err)
+	}
+	if j1Engine != "direct_stream" || j1StorageID != org1TargetID {
+		t.Errorf("expected job 1 engine=direct_stream storage=%s, got engine=%s storage=%s", org1TargetID, j1Engine, j1StorageID)
+	}
+
+	// 5. Verify Org 2: disabled local target was promoted to active default local, legacy S3 target demoted
+	var org2TargetID uuid.UUID
+	var org2TargetType, org2TargetStatus string
+	var org2IsDefault bool
+	err = conn.QueryRow(ctx, `
+		SELECT id, type, status, is_default FROM storage_targets
+		WHERE organization_id = $1 AND is_default = true`, org2ID).Scan(&org2TargetID, &org2TargetType, &org2TargetStatus, &org2IsDefault)
+	if err != nil {
+		t.Fatalf("failed querying Org 2 default storage target: %v", err)
+	}
+	if org2TargetID != disabledLocalTargetID || org2TargetType != "local" || org2TargetStatus != "active" || !org2IsDefault {
+		t.Errorf("expected Org 2 local target promoted to active default, got id=%s type=%s status=%s is_default=%v", org2TargetID, org2TargetType, org2TargetStatus, org2IsDefault)
+	}
+
+	var s3IsDefault bool
+	err = conn.QueryRow(ctx, `SELECT is_default FROM storage_targets WHERE id = $1`, s3TargetID).Scan(&s3IsDefault)
+	if err != nil {
+		t.Fatalf("failed querying legacy S3 target: %v", err)
+	}
+	if s3IsDefault {
+		t.Errorf("expected legacy S3 target to be demoted to is_default=false")
+	}
+
+	// Verify Org 2 plan and job backfilled to Org 2's promoted local target
+	var p2Engine string
+	var p2StorageID uuid.UUID
+	err = conn.QueryRow(ctx, `SELECT engine_type, storage_target_id FROM backup_plans WHERE id = $1`, plan2ID).Scan(&p2Engine, &p2StorageID)
+	if err != nil {
+		t.Fatalf("failed querying Org 2 backfilled plan: %v", err)
+	}
+	if p2Engine != "direct_stream" || p2StorageID != disabledLocalTargetID {
+		t.Errorf("expected plan 2 engine=direct_stream storage=%s, got engine=%s storage=%s", disabledLocalTargetID, p2Engine, p2StorageID)
+	}
+
+	// 6. Cross-Tenant Isolation Enforcement: verify composite FK rejects pointing Org 1 plan to Org 2 storage target
+	_, err = conn.Exec(ctx, `UPDATE backup_plans SET storage_target_id = $1 WHERE id = $2`, disabledLocalTargetID, plan1ID)
+	if err == nil {
+		t.Fatalf("expected cross-tenant FK violation when setting Org 1 plan to Org 2 storage target, but got success")
+	}
+
+	// 7. Verify status 'archived' is accepted under v6 schema
+	_, err = conn.Exec(ctx, `UPDATE storage_targets SET status = 'archived' WHERE id = $1`, s3TargetID)
+	if err != nil {
+		t.Fatalf("failed setting storage target to archived: %v", err)
+	}
+
+	// 8. Test Rollback (Down Migration to v5): must safely convert 'archived' to 'disabled'
+	if err := m.Migrate(5); err != nil {
+		t.Fatalf("migration down to version 5 failed with archived target: %v", err)
+	}
+
+	// Verify target was converted to 'disabled'
+	var rolledBackStatus string
+	err = conn.QueryRow(ctx, `SELECT status FROM storage_targets WHERE id = $1`, s3TargetID).Scan(&rolledBackStatus)
+	if err != nil {
+		t.Fatalf("failed querying rolled back target status: %v", err)
+	}
+	if rolledBackStatus != "disabled" {
+		t.Errorf("expected archived target to be converted to disabled on rollback, got: %s", rolledBackStatus)
+	}
+
+	// 9. Re-apply v6 to leave test database in current version
+	if err := m.Migrate(6); err != nil {
+		t.Fatalf("re-applying migration 000006 failed: %v", err)
 	}
 }

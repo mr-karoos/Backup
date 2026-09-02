@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -67,7 +66,10 @@ func (s *VerificationService) SetStorageResolver(resolver storage.StorageProvide
 }
 
 func (s *VerificationService) resolveStorageProvider(ctx context.Context, orgID, targetID uuid.UUID) (storage.StorageProvider, error) {
-	if s.storageResolver != nil && targetID != uuid.Nil {
+	if s.storageResolver != nil {
+		if targetID == uuid.Nil {
+			return nil, domain.ErrStorageTargetNotFound
+		}
 		return s.storageResolver.Resolve(ctx, orgID, targetID)
 	}
 	if s.storage != nil {
@@ -157,10 +159,35 @@ func (s *VerificationService) VerifyRun(
 
 		storeProvider, err := s.resolveStorageProvider(ctx, art.OrganizationID, art.StorageTargetID)
 		if err != nil {
-			verErr = fmt.Errorf("failed resolving storage provider: %w", err)
-		} else {
-			switch art.Format {
-			case domain.ArtifactFormatSQLGzip:
+			s.logger.Error("failed resolving storage provider for artifact verification",
+				slog.String("org_id", orgID.String()),
+				slog.String("artifact_id", art.ID.String()),
+				slog.String("target_id", art.StorageTargetID.String()),
+				slog.String("error", err.Error()),
+			)
+			// Infrastructure error: DO NOT mark verification_status = failed!
+			return nil, domain.ErrBackupServiceUnavailable
+		}
+
+		switch art.Format {
+		case domain.ArtifactFormatSQLGzip:
+			verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
+				ctx,
+				storeProvider,
+				art.StorageReference,
+				art.SizeBytes,
+				art.ChecksumHash,
+			)
+		case domain.ArtifactFormatTarGzip:
+			verMsg, verErr = s.verifier.VerifyFilesArtifact(
+				ctx,
+				storeProvider,
+				art.StorageReference,
+				art.SizeBytes,
+				art.ChecksumHash,
+			)
+		default:
+			if art.ArtifactType == domain.ArtifactTypeDatabaseDump {
 				verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
 					ctx,
 					storeProvider,
@@ -168,7 +195,7 @@ func (s *VerificationService) VerifyRun(
 					art.SizeBytes,
 					art.ChecksumHash,
 				)
-			case domain.ArtifactFormatTarGzip:
+			} else if art.ArtifactType == domain.ArtifactTypeFilesArchive {
 				verMsg, verErr = s.verifier.VerifyFilesArtifact(
 					ctx,
 					storeProvider,
@@ -176,26 +203,8 @@ func (s *VerificationService) VerifyRun(
 					art.SizeBytes,
 					art.ChecksumHash,
 				)
-			default:
-				if art.ArtifactType == domain.ArtifactTypeDatabaseDump {
-					verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
-						ctx,
-						storeProvider,
-						art.StorageReference,
-						art.SizeBytes,
-						art.ChecksumHash,
-					)
-				} else if art.ArtifactType == domain.ArtifactTypeFilesArchive {
-					verMsg, verErr = s.verifier.VerifyFilesArtifact(
-						ctx,
-						storeProvider,
-						art.StorageReference,
-						art.SizeBytes,
-						art.ChecksumHash,
-					)
-				} else {
-					verErr = errors.New("unsupported artifact format for verification")
-				}
+			} else {
+				verErr = errors.New("unsupported artifact format for verification")
 			}
 		}
 

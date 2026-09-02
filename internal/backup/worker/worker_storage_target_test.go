@@ -102,6 +102,121 @@ func TestWorkerPool_StorageTargetResolutionAndEngineValidation(t *testing.T) {
 		}
 	})
 
+	t.Run("Blank engine_type fails closed with ErrInvalidEngineType", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		pool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			nil, nil,
+			engine.NewDirectStreamBackupEngine(),
+			s3MockStore,
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			nil,
+		)
+		pool.SetStorageResolver(resolver)
+
+		run := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, JobID: uuid.New()}
+		job := &domain.BackupJob{
+			ID:              run.JobID,
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      "", // Blank engine type
+			StorageTargetID: s3TargetID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"db1"}},
+		}
+
+		err := pool.executeBackupPipeline(context.Background(), run, job)
+		if !errors.Is(err, domain.ErrInvalidEngineType) {
+			t.Fatalf("expected ErrInvalidEngineType, got %v", err)
+		}
+	})
+
+	t.Run("Missing StorageTargetID fails closed with ErrStorageTargetNotFound", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		pool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			nil, nil,
+			engine.NewDirectStreamBackupEngine(),
+			s3MockStore,
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			nil,
+		)
+		pool.SetStorageResolver(resolver)
+
+		run := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, JobID: uuid.New()}
+		job := &domain.BackupJob{
+			ID:              run.JobID,
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: uuid.Nil, // Missing storage target ID
+			TargetSpec:      domain.TargetSpec{Databases: []string{"db1"}},
+		}
+
+		err := pool.executeBackupPipeline(context.Background(), run, job)
+		if !errors.Is(err, domain.ErrStorageTargetNotFound) {
+			t.Fatalf("expected ErrStorageTargetNotFound, got %v", err)
+		}
+	})
+
+	t.Run("S3 resolver failure fails closed without falling back to Local", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		repo.targets[s3TargetID] = &domain.StorageTarget{
+			ID:             s3TargetID,
+			OrganizationID: orgID,
+			Name:           "S3 Target",
+			Type:           domain.StorageTargetTypeS3,
+			Status:         domain.StorageTargetStatusActive,
+		}
+
+		failingResolver := &mockStorageResolver{
+			providers: map[uuid.UUID]storage.StorageProvider{}, // Empty -> fails
+		}
+
+		localStore, _ := local.NewLocalStorageProvider(t.TempDir())
+		pool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			nil, nil,
+			engine.NewDirectStreamBackupEngine(),
+			localStore, // Local store configured on pool
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			nil,
+		)
+		pool.SetStorageResolver(failingResolver)
+
+		run := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, JobID: uuid.New()}
+		job := &domain.BackupJob{
+			ID:              run.JobID,
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: s3TargetID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"db1"}},
+		}
+
+		err := pool.executeBackupPipeline(context.Background(), run, job)
+		if !errors.Is(err, domain.ErrStorageTargetNotFound) {
+			t.Fatalf("expected ErrStorageTargetNotFound from failing resolver, got %v", err)
+		}
+		if len(repo.artifacts) != 0 {
+			t.Fatalf("expected no artifacts created via local fallback, got %d", len(repo.artifacts))
+		}
+	})
+
 	t.Run("Inactive storage target fails closed with ErrStorageTargetNotActive", func(t *testing.T) {
 		repo := newFakeWorkerRepo(orgID)
 		inactiveTargetID := uuid.New()
@@ -125,6 +240,7 @@ func TestWorkerPool_StorageTargetResolutionAndEngineValidation(t *testing.T) {
 			NewPerResourceMutexManager(),
 			nil,
 		)
+		pool.SetStorageResolver(resolver)
 
 		run := &domain.BackupRun{ID: uuid.New(), OrganizationID: orgID, JobID: uuid.New()}
 		job := &domain.BackupJob{

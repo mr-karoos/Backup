@@ -107,34 +107,6 @@ func (m *mockCredFinder) GetCredentialMetadata(ctx context.Context, orgID, credI
 	return c, nil
 }
 
-func TestStorageTargetService_RBAC(t *testing.T) {
-	repo := newMockStorageTargetRepo()
-	secPolicy := &s3Storage.EndpointSecurityPolicy{AllowInsecureHTTP: false}
-	svc := NewStorageTargetService(repo, nil, secPolicy, nil)
-	orgID := uuid.New()
-
-	// Member cannot create
-	_, err := svc.CreateStorageTarget(context.Background(), orgDomain.RoleMember, orgID, CreateStorageTargetInput{Name: "Target"})
-	if !errors.Is(err, domain.ErrUnauthorizedRole) {
-		t.Fatalf("expected ErrUnauthorizedRole, got %v", err)
-	}
-
-	// Viewer cannot create
-	_, err = svc.CreateStorageTarget(context.Background(), orgDomain.RoleViewer, orgID, CreateStorageTargetInput{Name: "Target"})
-	if !errors.Is(err, domain.ErrUnauthorizedRole) {
-		t.Fatalf("expected ErrUnauthorizedRole, got %v", err)
-	}
-
-	// Member can list
-	list, err := svc.ListStorageTargets(context.Background(), orgDomain.RoleMember, orgID)
-	if err != nil {
-		t.Fatalf("expected member to list targets, got %v", err)
-	}
-	if len(list) != 0 {
-		t.Fatalf("expected 0 targets")
-	}
-}
-
 func TestStorageTargetService_CreateS3Target(t *testing.T) {
 	repo := newMockStorageTargetRepo()
 	credID := uuid.New()
@@ -353,6 +325,81 @@ func TestStorageTargetService_DeleteValidation(t *testing.T) {
 		}
 		if _, ok := repo.targets[customID]; ok {
 			t.Fatalf("target was not deleted from repo")
+		}
+	})
+}
+
+func TestStorageTargetService_RBAC(t *testing.T) {
+	repo := newMockStorageTargetRepo()
+	orgID := uuid.New()
+	targetID := uuid.New()
+	repo.targets[targetID] = &domain.StorageTarget{
+		ID:             targetID,
+		OrganizationID: orgID,
+		Name:           "Test Target",
+		Type:           domain.StorageTargetTypeLocal,
+		Status:         domain.StorageTargetStatusActive,
+	}
+
+	secPolicy := &s3Storage.EndpointSecurityPolicy{AllowInsecureHTTP: false}
+	svc := NewStorageTargetService(repo, nil, secPolicy, nil)
+	ctx := context.Background()
+
+	t.Run("GetStorageTarget allows Admin, Member, and Viewer", func(t *testing.T) {
+		roles := []orgDomain.Role{orgDomain.RoleAdmin, orgDomain.RoleMember, orgDomain.RoleViewer}
+		for _, role := range roles {
+			target, err := svc.GetStorageTarget(ctx, role, orgID, targetID)
+			if err != nil {
+				t.Errorf("expected role %s to be allowed in GetStorageTarget, got: %v", role, err)
+			}
+			if target == nil || target.ID != targetID {
+				t.Errorf("expected target %s returned for role %s", targetID, role)
+			}
+		}
+
+		// Unknown / empty role rejected
+		_, err := svc.GetStorageTarget(ctx, orgDomain.Role("anonymous"), orgID, targetID)
+		if !errors.Is(err, domain.ErrUnauthorizedRole) {
+			t.Errorf("expected ErrUnauthorizedRole for anonymous role, got: %v", err)
+		}
+	})
+
+	t.Run("ListStorageTargets allows Admin, Member, and Viewer", func(t *testing.T) {
+		roles := []orgDomain.Role{orgDomain.RoleAdmin, orgDomain.RoleMember, orgDomain.RoleViewer}
+		for _, role := range roles {
+			targets, err := svc.ListStorageTargets(ctx, role, orgID)
+			if err != nil {
+				t.Errorf("expected role %s to be allowed in ListStorageTargets, got: %v", role, err)
+			}
+			if len(targets) != 1 {
+				t.Errorf("expected 1 target returned for role %s, got: %d", role, len(targets))
+			}
+		}
+
+		// Unknown / empty role rejected
+		_, err := svc.ListStorageTargets(ctx, orgDomain.Role("anonymous"), orgID)
+		if !errors.Is(err, domain.ErrUnauthorizedRole) {
+			t.Errorf("expected ErrUnauthorizedRole for anonymous role, got: %v", err)
+		}
+	})
+
+	t.Run("Write operations remain strictly Admin-only", func(t *testing.T) {
+		nonAdminRoles := []orgDomain.Role{orgDomain.RoleMember, orgDomain.RoleViewer, orgDomain.Role("anonymous")}
+		for _, role := range nonAdminRoles {
+			_, err := svc.CreateStorageTarget(ctx, role, orgID, CreateStorageTargetInput{})
+			if !errors.Is(err, domain.ErrUnauthorizedRole) {
+				t.Errorf("expected CreateStorageTarget to reject role %s with ErrUnauthorizedRole, got: %v", role, err)
+			}
+
+			_, err = svc.UpdateStorageTarget(ctx, role, orgID, targetID, UpdateStorageTargetInput{})
+			if !errors.Is(err, domain.ErrUnauthorizedRole) {
+				t.Errorf("expected UpdateStorageTarget to reject role %s with ErrUnauthorizedRole, got: %v", role, err)
+			}
+
+			err = svc.DeleteStorageTarget(ctx, role, orgID, targetID)
+			if !errors.Is(err, domain.ErrUnauthorizedRole) {
+				t.Errorf("expected DeleteStorageTarget to reject role %s with ErrUnauthorizedRole, got: %v", role, err)
+			}
 		}
 	})
 }

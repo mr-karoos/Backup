@@ -291,6 +291,44 @@ func TestHandler_StorageTargets(t *testing.T) {
 		}
 	})
 
+	t.Run("GET /api/v1/storage-targets/{id} succeeds for Viewer role (200 OK)", func(t *testing.T) {
+		mockSvc := &mockStorageTargetManager{
+			getFunc: func(ctx context.Context, role orgDomain.Role, oID, tID uuid.UUID) (*domain.StorageTarget, error) {
+				if role != orgDomain.RoleViewer {
+					return nil, domain.ErrUnauthorizedRole
+				}
+				return &domain.StorageTarget{
+					ID:             tID,
+					OrganizationID: oID,
+					Name:           "S3 Target",
+					Type:           domain.StorageTargetTypeS3,
+					Status:         domain.StorageTargetStatusActive,
+					IsDefault:      false,
+					CreatedAt:      time.Now().UTC(),
+					UpdatedAt:      time.Now().UTC(),
+				}, nil
+			},
+		}
+
+		h := NewHandler(nil, nil, nil, nil, nil, nil)
+		h.SetStorageTargetService(mockSvc)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/storage-targets/"+targetID.String(), nil)
+		req.SetPathValue("id", targetID.String())
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), &orgHttpapi.TenantContext{
+			OrganizationID: orgID,
+			Role:           orgDomain.RoleViewer,
+			UserID:         uuid.New(),
+		}))
+
+		rec := httptest.NewRecorder()
+		h.GetStorageTarget(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200 OK for viewer, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
 	t.Run("GET /api/v1/storage-targets/{id} returns 404 when target not found", func(t *testing.T) {
 		mockSvc := &mockStorageTargetManager{
 			getFunc: func(ctx context.Context, role orgDomain.Role, oID, tID uuid.UUID) (*domain.StorageTarget, error) {

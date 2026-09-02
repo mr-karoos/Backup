@@ -870,4 +870,50 @@ func TestVerificationService_InfrastructureErrors(t *testing.T) {
 			t.Fatalf("expected ErrBackupServiceUnavailable on missing dependencies, got: %v", err)
 		}
 	})
+
+	t.Run("storage provider resolution failure returns ErrBackupServiceUnavailable without updating artifact to failed", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		targetID := uuid.New()
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				StorageTargetID:  targetID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "organizations/" + orgID.String() + "/resources/" + uuid.New().String() + "/artifacts/" + artID.String() + ".sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "abc",
+			},
+		}
+
+		verifier := &mockVerifier{}
+		svc := NewVerificationService(repo, nil, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		failingResolver := &mockFailingVerifyResolver{err: errors.New("s3 connection timeout")}
+		svc.SetStorageResolver(failingResolver)
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if res != nil {
+			t.Errorf("expected result to be nil on provider resolution error, got: %+v", res)
+		}
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable, got: %v", err)
+		}
+
+		// Verify that artifact verification status was NOT marked failed in the database!
+		if status, updated := repo.updatedArts[artID]; updated {
+			t.Fatalf("artifact must NOT have verification status updated when provider resolution fails, got: %v", status)
+		}
+	})
+}
+
+type mockFailingVerifyResolver struct {
+	err error
+}
+
+func (m *mockFailingVerifyResolver) Resolve(ctx context.Context, orgID, targetID uuid.UUID) (storage.StorageProvider, error) {
+	return nil, m.err
 }

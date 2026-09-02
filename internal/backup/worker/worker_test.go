@@ -324,6 +324,10 @@ func (r *fakeWorkerRepo) TransactionalClaimJob(ctx context.Context, orgID, jobID
 	if !ok || j.Status != domain.JobStatusPending {
 		return nil, nil, errors.New("not pending")
 	}
+	if j.EngineType == "" && j.StorageTargetID == uuid.Nil && r.target != nil {
+		j.EngineType = domain.EngineTypeDirectStream
+		j.StorageTargetID = r.target.ID
+	}
 	j.Status = domain.JobStatusRunning
 	run := &domain.BackupRun{
 		ID:             uuid.New(),
@@ -2478,16 +2482,18 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 	t.Run("invokes retention on successful plan-triggered job", func(t *testing.T) {
 		repo := newFakeWorkerRepo(orgID)
 		job := &domain.BackupJob{
-			ID:             uuid.New(),
-			OrganizationID: orgID,
-			ResourceID:     resID,
-			BackupPlanID:   &planID,
-			TriggerType:    domain.TriggerTypeScheduled,
-			BackupType:     domain.BackupTypeMySQLDatabase,
-			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
-			Status:         domain.JobStatusPending,
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
+			ID:              uuid.New(),
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupPlanID:    &planID,
+			TriggerType:     domain.TriggerTypeScheduled,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: repo.target.ID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:          domain.JobStatusPending,
+			CreatedAt:       time.Now(),
+			UpdatedAt:       time.Now(),
 		}
 		repo.jobs[job.ID] = job
 
@@ -2539,16 +2545,18 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 	t.Run("does not invoke retention for ad-hoc job without plan", func(t *testing.T) {
 		repo := newFakeWorkerRepo(orgID)
 		job := &domain.BackupJob{
-			ID:             uuid.New(),
-			OrganizationID: orgID,
-			ResourceID:     resID,
-			BackupPlanID:   nil, // Ad-hoc job
-			TriggerType:    domain.TriggerTypeManual,
-			BackupType:     domain.BackupTypeMySQLDatabase,
-			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
-			Status:         domain.JobStatusPending,
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
+			ID:              uuid.New(),
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupPlanID:    nil, // Ad-hoc job
+			TriggerType:     domain.TriggerTypeManual,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: repo.target.ID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:          domain.JobStatusPending,
+			CreatedAt:       time.Now(),
+			UpdatedAt:       time.Now(),
 		}
 		repo.jobs[job.ID] = job
 
@@ -2581,16 +2589,18 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 	t.Run("retention error does not mutate successful job/run status or delete artifacts", func(t *testing.T) {
 		repo := newFakeWorkerRepo(orgID)
 		job := &domain.BackupJob{
-			ID:             uuid.New(),
-			OrganizationID: orgID,
-			ResourceID:     resID,
-			BackupPlanID:   &planID,
-			TriggerType:    domain.TriggerTypeScheduled,
-			BackupType:     domain.BackupTypeMySQLDatabase,
-			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
-			Status:         domain.JobStatusPending,
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
+			ID:              uuid.New(),
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupPlanID:    &planID,
+			TriggerType:     domain.TriggerTypeScheduled,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: repo.target.ID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:          domain.JobStatusPending,
+			CreatedAt:       time.Now(),
+			UpdatedAt:       time.Now(),
 		}
 		repo.jobs[job.ID] = job
 
@@ -2638,16 +2648,18 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 	t.Run("pipeline failure never calls retention", func(t *testing.T) {
 		repo := newFakeWorkerRepo(orgID)
 		job := &domain.BackupJob{
-			ID:             uuid.New(),
-			OrganizationID: orgID,
-			ResourceID:     resID,
-			BackupPlanID:   &planID,
-			TriggerType:    domain.TriggerTypeScheduled,
-			BackupType:     domain.BackupTypeMySQLDatabase,
-			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
-			Status:         domain.JobStatusPending,
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
+			ID:              uuid.New(),
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupPlanID:    &planID,
+			TriggerType:     domain.TriggerTypeScheduled,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: repo.target.ID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:          domain.JobStatusPending,
+			CreatedAt:       time.Now(),
+			UpdatedAt:       time.Now(),
 		}
 		repo.jobs[job.ID] = job
 
@@ -2681,16 +2693,18 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 	t.Run("finalize failure never calls retention and invokes worker cleanup", func(t *testing.T) {
 		repo := newFakeWorkerRepo(orgID)
 		job := &domain.BackupJob{
-			ID:             uuid.New(),
-			OrganizationID: orgID,
-			ResourceID:     resID,
-			BackupPlanID:   &planID,
-			TriggerType:    domain.TriggerTypeScheduled,
-			BackupType:     domain.BackupTypeMySQLDatabase,
-			TargetSpec:     domain.TargetSpec{Databases: []string{"testdb"}},
-			Status:         domain.JobStatusPending,
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
+			ID:              uuid.New(),
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupPlanID:    &planID,
+			TriggerType:     domain.TriggerTypeScheduled,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: repo.target.ID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"testdb"}},
+			Status:          domain.JobStatusPending,
+			CreatedAt:       time.Now(),
+			UpdatedAt:       time.Now(),
 		}
 		repo.jobs[job.ID] = job
 		repo.finalizeErr = errors.New("db connection lost during finalize")

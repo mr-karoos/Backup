@@ -383,6 +383,36 @@ func TestArtifactService_DeleteArtifact(t *testing.T) {
 		}
 	})
 
+	t.Run("aborts and DOES NOT tombstone when storage provider returns ErrInvalidStorageReference", func(t *testing.T) {
+		repo := &mockArtifactRepo{
+			getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+				return &domain.BackupArtifact{
+					ID:               aID,
+					OrganizationID:   oID,
+					StorageReference: "invalid/malformed/ref",
+					IsDeleted:        false,
+				}, nil
+			},
+			tombstoneArtifactFunc: func(ctx context.Context, oID, aID uuid.UUID) error {
+				t.Fatalf("database tombstone MUST NOT be called on ErrInvalidStorageReference!")
+				return nil
+			},
+		}
+
+		stor := &mockStorageProvider{
+			deleteArtifactFunc: func(ctx context.Context, storageRef string) error {
+				return storage.ErrInvalidStorageReference
+			},
+		}
+
+		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil)
+
+		err := svc.DeleteArtifact(context.Background(), orgDomain.RoleAdmin, orgID, userID, artID, "127.0.0.1", "test")
+		if !errors.Is(err, domain.ErrArtifactDeleteFailed) {
+			t.Fatalf("expected ErrArtifactDeleteFailed, got: %v", err)
+		}
+	})
+
 	t.Run("rejects non-admin roles with ErrUnauthorizedRole", func(t *testing.T) {
 		svc := NewArtifactService(&mockArtifactRepo{}, &mockStorageProvider{}, &mockAuditService{}, nil)
 		err := svc.DeleteArtifact(context.Background(), orgDomain.RoleMember, orgID, userID, artID, "", "")
