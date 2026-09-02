@@ -419,6 +419,206 @@
 
 ---
 
+## ADR-031 — یکپارچه‌سازی موتور Restic، پروتکل استریم Gated EOF و مخازن Per-Resource
+
+* **Status**: `Accepted`
+* **Context**: سند ADR-017 استفاده از Restic را برای پشتیبان‌گیری افزایشی و Deduplication در فازهای آتی تصویب کرده بود. در Future Phase A نحوه ادغام باینری، پروتکل انتقال داده، چرخه حیات فرآیندها، گرنولاریتی مخازن و راهبرد ایزولاسیون نیازمند انجماد رسمی طراحی است.
+* **Decision**:
+  1. **باینری خارجی تثبیت‌شده (External Pinned Binary)**: رِستیک به صورت باینری خارجی مستقل در نسخه دقیقاً تثبیت‌شده **`restic 0.19.1`** درون کانتینر رسمی برنامه تعبیه شده و بدون وابستگی به کتابخانه‌های ناپایدار داخلی اجرا می‌شود. قابلیت خود‌به‌روزرسانی در زمان اجرا (`restic self-update`) اکیداً ممنوع و غیرفعال است. فرآیند ساخت ایمیج داکر باید امضای دیجیتال PGP کلید رسمی الکساندر نویمان با مشخصات زیر و هش SHA-256 را به صورت قطعی اعتبارسنجی کند:
+     * **Key ID**: `0x91A6868BD3F7A907`
+     * **Fingerprint**: `CF8F 18F2 8445 7597 3F79 D4E1 91A6 868B D3F7 A907`
+  2. **مخزن اختصاصی به ازای هر منبع (Per-Resource Repository)**: مخازن رِستیک به صورت مجزا به ازای هر منبع داده ایجاد می‌شوند. این تصمیم بر پایه دلایل زیر اتخاذ شده است:
+     * **ایزولاسیون عملیاتی (Operational Isolation)**: تطابق کامل با مرزهای هر منبع و سازگاری طبیعی با معماری قفل درون‌حافظه‌ای `PerResourceMutexManager`.
+     * **شعاع تخریب بسیار کوچک (Smaller Blast Radius)**: خرابی دیسک یا مفقودی کلید یک منبع، سایر منابع سازمان را متأثر نمی‌کند.
+     * **کلیدهای رمزنگاری کاملاً مستقل**: هر منبع کلید رمزنگاری مجزا دارد و نشت یک کلید، امنیت سایر منابع را مخدوش نمی‌سازد.
+     * **امحا و آرشیو بسیار ساده منبع**: با حذف یا آرشیو منبع، کل پوشه یا پیشوند مخزن پاک شده و نیازی به Prune ارگانیزاسیونی سنگین نیست.
+     * **نگهداری مستقل (`Isolated Prune/Check Maintenance`)**: عملیات سنگین نگهداری یک منبع، منابع دیگر را مسدود نمی‌کند.
+     * *موازنه فنی (Trade-off)*: Deduplication صرفاً درون تاریخچه همان منبع انجام می‌شود و تعداد مخازن و کلیدها به ازای هر منبع افزایش می‌یابد ($N \times M$).
+  3. **پروتکل استریم محافظت‌شده با دریچه اتمام (Fail-Closed Streaming with Gated EOF)**:
+     * Staging فایل روی دیسک، مسیر Canonical در Phase A نیست؛ داده‌ها به صورت استریم مستقیم از طریق STDIN به رِستیک هدایت می‌شوند.
+     * شناسه آرتیفکت (`artifact_id`) پیش از اجرای دستور رِستیک تولید می‌شود.
+     * پروسس فرزند رِستیک ایجاد شده اما ارسال سیگنال اتمام جریان (EOF) منحصراً توسط ناظر (Supervisor) در Go کنترل می‌شود.
+     * تا زمانی که تابع کانکتور با موفقیت واقعی (`err == nil`) بازنگشته است، به هیچ عنوان Graceful EOF برای رِستیک ارسال نخواهد شد.
+     * در صورت بروز خطا، لغو (Cancellation) یا پنیک در کانکتور: پروسس رِستیک بلافاصله خاتمه می‌یابد (`SIGKILL`)، هیچ EOF ارسالی وجود ندارد، برای خروج پروسس Wait می‌شود و هیچ اسنپ‌شاتی معتبر تلقی نمی‌گردد.
+     * تنها در صورت موفقیت قطعی کانکتور، لوله ورودی بسته شده (Graceful EOF)، رِستیک اجازه نهایی‌سازی اسنپ‌شات پیدا کرده و Exit Code صفر و خروجی JSON آن اعتبارسنجی می‌شود.
+     * در صورت شکست زودهنگام رِستیک در حین نوشتن، کانتکست کانکتور فوراً Cancel می‌شود.
+     * موفقیت نهایی پایپ‌لاین منوط به جمع‌آوری و موفقیت قطعی هر دو طرف (Connector == nil و Restic Exit Code == 0) پیش از ثبت در دیتابیس است.
+  4. **برچسب‌های قطعی اسنپ‌شات (Mandatory Deterministic Snapshot Tags)**:
+     کلیه اسنپ‌شات‌ها باید با برچسب‌های زیر ثبت شوند:
+     * `platform=backup-platform-v1`
+     * `org=<organization_id>`
+     * `resource=<resource_id>`
+     * `run=<run_id>`
+     * `artifact=<artifact_id>`
+     * `target=<deterministic-safe-target-token>`
+  5. **مبنای تطبیق و پاک‌سازی (Reconciliation)**: فرآیند پاک‌سازی اسنپ‌شات‌های معلق منحصراً بر پایه برچسب `artifact=<artifact_id>` عمل خواهد کرد.
+  6. **شرط قبولی (Approval Gate)**: تست‌های تزریق خطا (`Failure-Injection Tests`) برای کلیه شاخه‌های شکست استریمینگ شرط اجباری تأیید گام پیاده‌سازی خواهند بود.
+* **Rationale**: جلوگیری قطعی از ثبت اسنپ‌شات‌های ناقص توسط رِستیک در حین قطعی ارتباط با منبع داده و تضمین پایداری بدون تحمیل سربار دیسک موقت.
+* **Consequences / Trade-offs**: نیاز به پیاده‌سازی ناظر هم‌روند دوطرفه در Go برای کنترل پایپ STDIN و لغو فوری پروسس‌ها.
+* **Related Documents**: [docs/ARCHITECTURE.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/ARCHITECTURE.md), [docs/WORKER_EXECUTION_DESIGN.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/WORKER_EXECUTION_DESIGN.md)
+
+---
+
+## ADR-032 — تفکیک لایه ذخیره‌سازی: StorageProvider در برابر RepositoryTarget و امنیت S3
+
+* **Status**: `Accepted`
+* **Context**: سند ADR-018 ارائه‌دهنده S3 را پیش‌بینی کرده بود، اما استفاده از موتورهای مبتنی بر مخزن محتوامحور (مانند رِستیک) نباید انتزاع ذخیره‌سازی شیءمحور موجود را به صورت پنهان بازتعریف کند.
+* **Decision**:
+  1. **حفظ انتزاع `StorageProvider` برای فایل‌های تخت**: واسط `StorageProvider` با متدهای `SaveArtifact`، `OpenArtifact` و `DeleteArtifact` کماکان برای آرتیفکت‌های تک‌فایلی مستقیم (Direct Stream، دانلودها و فایل‌های انتقالی) روی دیسک محلی و S3 باقی می‌ماند. این واسط بازتعریف پنهانی نخواهد شد.
+  2. **انتزاع مستقل مخازن (`RepositoryTarget` / `RepositoryBackend`)**: برای موتورهای مبتنی بر مخزن ساختاریافته (رِستیک)، مفهوم انتزاعی جدیدی به نام `RepositoryTarget` جهت تعریف نقطه اتصال مخزن به فایل‌سیستم محلی یا باکت S3 همراه با کردانشال‌های مربوطه معرفی می‌گردد.
+  3. **پشتیبانی S3**: اتصال به Amazon S3، MinIO و Cloudflare R2 به صورت کامل پشتیبانی می‌شود.
+  4. **تفکیک اجباری فضای نام مستأجران**: مسیرها و پیشوندها در باکت S3 به صورت خودکار و غیرقابل دور زدن توسط پلتفرم اعمال می‌شوند:
+     `organizations/{orgID}/resources/{resourceID}/...`
+     کاربر مجاز به خروج از این پیشوند یا استفاده از کاراکترهای پیمایش دایرکتوری (`../`) نخواهد بود.
+  5. **الزام اکید HTTPS و امنیت شبکه**: در محیط پروداکشن، استفاده از TLS 1.2+ اجباری است.
+  6. **مهار SSRF و DNS Rebinding**:
+     * اعتبارسنجی دقیق URL (عدم وجود نام‌کاربری/رمز در URL، عدم وجود ریدایرکت‌های ناامن).
+     * حل آدرس DNS پیش از اتصال و مسدودسازی آدرس‌های Link-Local (`169.254.0.0/16`, `fe80::/10`)، Multicast (`224.0.0.0/4`) و سرویس متادیتای کلود AWS IMDS (`169.254.169.254`).
+     * آدرس‌های خصوصی شبکه (RFC 1918) منحصراً در صورت درج صریح توسط مدیر سیستم در لیست مجاز `S3_PRIVATE_ENDPOINTS_ALLOWLIST` برای سرویس‌های داخلی MinIO مجاز خواهند بود.
+     * استفاده از HTTP ناامن و Loopback منحصراً در محیط‌های توسعه و تست با فلگ صریح سیستمی مجاز است.
+* **Rationale**: حفظ اصل مسئولیت واحد (SRP)، عدم آلوده‌سازی انتزاع ذخیره‌سازی تخت با پیچیدگی‌های مخازن محتوامحور، و ایمن‌سازی کامل ارتباطات ابری در برابر نفوذ و سرقت متادیتا.
+* **Consequences / Trade-offs**: نیاز به پیاده‌سازی دو درایور S3 مستقل: یکی درون برنامه برای `StorageProvider` و دیگری هدایت کانفیگ به بک‌اند بومی رِستیک.
+* **Related Documents**: [docs/ARCHITECTURE.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/ARCHITECTURE.md), [docs/SECURITY.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/SECURITY.md)
+
+---
+
+## ADR-033 — مدل داده چندریختی آرتیفکت‌ها، موجودیت مخازن، قرارداد دانلود و اعتبارسنجی دو سطحی
+
+* **Status**: `Accepted`
+* **Context**: دیتابیس فعلی منحصراً بر پایه فایل‌های خروجی با هش SHA-256 و فرمت‌های سنتی طراحی شده است. پشتیبانی از رِستیک مستلزم مدل‌سازی اسنپ‌شات‌ها و سازگاری کامل قراردادهای دانلود و وریفیکیشن بدون تخریب سوابق گذشته است.
+* **Decision**:
+  1. **ایجاد موجودیت مستقل `backup_repositories`**: جدولی اختصاصی با کلیدهای خارجی چندمستأجری به سازمان، منبع، تارگت ذخیره‌سازی و کردانشال سیستمی ایجاد می‌شود تا متادیتای ساختاری مخازن رِستیک (فاقد هرگونه سکرت) را نگهداری کند.
+  2. **چندریختی‌سازی جدول `backup_artifacts`**: جدول موجود `backup_artifacts` حفظ شده و جدول جداگانه‌ای به نام `backup_snapshots` ایجاد **نمی‌شود**.
+     * **آرتیفکت‌های فایل سنتی و Direct Stream**: سمنتیک موجود را کاملاً حفظ می‌کنند (`format in ('sql_gzip', 'tar_gzip')`، `storage_reference` الزامی، `size_bytes > 0`، `checksum_algorithm = 'sha256'`، `checksum_hash` معتبر، `repository_id = NULL`، `snapshot_id = NULL`، `logical_size_bytes = NULL`).
+     * **اسنپ‌شات‌های رِستیک (`format = 'restic_snapshot'`)**:
+       * فیلدهای `storage_reference`, `size_bytes`, `checksum_algorithm`, `checksum_hash` الزماً **`NULL`** خواهند بود (شناسه اسنپ‌شات هرگز در هش یا رفرنس فایل جعل نمی‌شود).
+       * فیلدهای `repository_id`, `snapshot_id`, `logical_size_bytes` الزماً **`NOT NULL`** (`REQUIRED`) خواهند بود.
+       * ستون `engine_metadata JSONB` اطلاعات تکمیلی اسنپ‌شات را نگهداری می‌کند.
+  3. **انتزاع توصیف‌گر دانلود (`DownloadDescriptor`)**:
+     * سرویس دانلود ساختاری شامل `Reader`, `Filename`, `ContentType` و `OptionalContentLength` بازمی‌گرداند.
+     * دانلود Direct Stream: اندازه `Content-Length` را از `size_bytes` حفظ می‌کند.
+     * دانلود Restic: دستور `restic dump` استریم خام فایل را استخراج کرده و در لحظه توسط `gzip.Writer` فشرده می‌شود تا پسوند `.sql.gz` یا `.tar.gz` و `Content-Type: application/gzip` برای کلاینت حفظ شود. هدر `Content-Length` ارسال نمی‌شود (HTTP Chunked Transfer Encoding) و بایت‌های ارسالی برای ثبت در لاگ ممیزی شمارش می‌گردند.
+  4. **ساختار دو سطحی اعتبارسنجی سلامت (Two-Tier Verification)**:
+     * **سطح ۱ (Post-Backup Snapshot Verification)**: سریع و بلادرنگ درون کارگر؛ تایید وجود شناسه اسنپ‌شات در ایندکس مخزن، تطابق برچسب‌های یکتا (`artifact=<id>`)، حضور نام فایل، غیرصفر بودن حجم منطقی، و بررسی هدر ۶۴ کیلوبایتی نمونه با `restic dump`.
+     * **سطح ۲ (Deep Repository Integrity Verification)**: عمیق و زمان‌بندی‌شده در صف پایدار؛ اجرای `restic check` همراه با بررسی زیرمجموعه‌های چرخشی قطعی (`--read-data-subset=1/N ... N/N`) جهت پوشش تدریجی ۱۰۰٪ بلوک‌های داده در طول دوره‌های مشخص.
+* **Rationale**: حفظ ۱۰۰٪ سازگاری رو به عقب برای آرتیفکت‌های موجود، دقت مفهومی در پایگاه داده، و ممانعت از اختلال در کارایی کلاینت‌های دانلود و بازرسی سلامت.
+* **Consequences / Trade-offs**: نیاز به مایگریشن شرطی قیود جدول آرتیفکت‌ها و پردازش جریانی Gzip در زمان دانلود رِستیک.
+* **Related Documents**: [docs/DATA_MODEL.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/DATA_MODEL.md), [docs/API_DESIGN.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/API_DESIGN.md)
+
+---
+
+## ADR-034 — رمزنگاری آرتیفکت‌ها در حالت سکون، تفکیک کلیدهای مستر و استاندارد فریمینگ BPAE
+
+* **Status**: `Accepted`
+* **Context**: سند ADR-020 الزام قطعی رمزنگاری در حالت سکون (Encryption at Rest) را پیش از ورود به محیط‌های عمومی و ابری تعیین کرده است. این استاندارد باید برای هر دو پایپ‌لاین Direct Stream و Restic با تفکیک کلیدها تثبیت شود.
+* **Decision**:
+  1. **تفکیک کامل دامنه کلیدها (Key Domain Separation)**:
+     * کلید `ENCRYPTION_MASTER_KEY` موجود منحصراً برای رمزنگاری سکرت‌های جدول `credentials` باقی می‌ماند.
+     * رمزنگاری آرتیفکت‌ها از دامنه کلید کاملاً مجزای **`ARTIFACT_ENCRYPTION_MASTER_KEY`** و نسخه **`ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION`** استفاده می‌کند.
+     * رابط تأمین‌کننده کلید (`KeyProvider`) باید مبتنی بر نسخه (`version-addressable`) با متدهای `Current()` و `ByVersion(version)` باشد.
+     * یک کلید مستر قدیمی تا زمانی که حتی یک آرتیفکت به نسخه آن ارجاع دارد، نباید از پیکربندی بازنشسته یا حذف شود.
+     * تا زمان پیاده‌سازی کامل چرخش چندکلیدی، جایگزینی مخرب کلید فعال ممنوع است و کلید فعال باید پایدار بماند.
+  2. **پایپ‌لاین رمزنگاری Direct Stream**:
+     * در زمان بکاپ: `Connector raw output -> gzip -> BPAE Encryption -> StorageProvider`.
+     * در زمان دانلود: `StorageProvider -> BPAE Decryption -> exact original gzip stream -> client`.
+     * کلاینت فایل استاندارد فشرده قبلی را بدون تغییر دریافت می‌کند.
+  3. **استاندارد فریمینگ احراز اصالت‌شده BPAE (Authenticated Versioned Framing)**:
+     * برای هر آرتیفکت یک کلید داده تصادفی مستقل ۲۵۶ بیتی (DEK) تولید می‌شود.
+     * کلید DEK با الگوریتم **AES-256-GCM** توسط کلید KEK و نانس تصادفی ۱۲ بایتی بسته‌بندی (`Wrap`) می‌شود.
+     * متادیتای هدر مستقیماً به عنوان AAD عملیات Wrap کلید DEK استفاده می‌شود (`Magic (4B) || FormatVersion (1B) || CipherSuite (1B) || MasterKeyVersion (4B) || OrgID (16B) || ArtifactID (16B)`).
+     * هدر اولیه به طول ۷۴ بایت فاقد سالت یا تگ مستقل است و اندازه فایل در آن فرض نمی‌شود (`stored_size_bytes` پس از اتمام استریم محاسبه می‌گردد).
+     * رکوردهای داده در چانک‌های حداکثر ۶۴ کیلوبایتی با فلگ `0x00` رمزگذاری می‌شوند.
+     * نانس چانک داده: `ArtifactNoncePrefix (4B تصادفی) || chunk_index (8B big-endian)` که عدم تکرار نانس را تضمین می‌کند.
+     * تگ احراز اصالت رکورد پایانی (FINAL Record): با فلگ `0x01` ارسال شده و شامل شمارنده چانک، حجم کل Plaintext و تعداد کل چانک‌ها است. فقدان این رکورد صریحاً به معنای بریدگی یا فساد استریم است.
+     * تفکیک چک‌سام: `checksum_hash` هش SHA-256 داده‌های Plaintext Gzip پیش از رمزنگاری است و هش سایفرتکست نهایی در `stored_size_bytes` و متادیتای انجین ثبت می‌شود.
+  4. **پایپ‌لاین Restic**:
+     * رِستیک از رمزنگاری بومی خود بر پایه **AES-256-CTR + Poly1305 + zstd** با کلیدهای مدیریت‌شده توسط سیستم استفاده می‌کند.
+     * مخازن رِستیک هرگز نباید توسط لایه BPAE به صورت مضاعف رمزنگاری شوند (No Double Encryption).
+* **Rationale**: تضمین محرمانگی و اصالت کامل داده‌ها در حالت سکون روی دیسک محلی و S3 با جلوگیری از شکست‌های امنیتی ناشی از تکرار نانس و قطع ناقص استریم.
+* **Consequences / Trade-offs**: سربار اندک پردازشی رمزنگاری جریانی چانک‌بندی‌شده برای Direct Stream.
+* **Related Documents**: [docs/SECURITY.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/SECURITY.md), [docs/ARCHITECTURE.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/ARCHITECTURE.md)
+
+---
+
+## ADR-035 — ارکستراسیون عملیات مخزن، عدم آنلاک خودکار و صف پایدار نگهداری دوره‌ای
+
+* **Status**: `Accepted`
+* **Context**: مخازن رِستیک علاوه بر بکاپ، در معرض عملیات دانلود، وریفیکیشن، حذف (Forget)، آزادسازی فضا (Prune)، بررسی سلامت (Check) و تطبیق (Reconciliation) قرار دارند. هماهنگی این فرآیندها و بازیابی قفل‌ها در معماری Modular Monolith نیازمند انضباط قطعی است.
+* **Decision**:
+  1. **هماهنگ‌کننده درون‌برنامه‌ای عملیات مخزن (`RepositoryOperationCoordinator`)**:
+     * در معماری تک‌نودی فعلی، هماهنگ‌کننده درون‌برنامه‌ای در سطح شناسه مخزن/منبع (`sync.RWMutex`) پیاده‌سازی می‌شود که مکمل `PerResourceMutexManager` است.
+     * **دسترسی اشتراکی (Shared Access)**: برای عملیات `backup`, `download/dump` و اعتبارسنجی سبک سطح ۱ مجاز است.
+     * **دسترسی انحصاری (Exclusive Access)**: برای عملیات `forget`, `prune`, `deep check`, `key rotation` و `reconciliation` الزامی است.
+     * عملیات حذف کنترل‌شده HTTP در زمان اعمال Retention یا فراخوانی API حذف، باید قفل انحصاری مخزن را اخذ کند تا هم‌زمانی مخرب با بکاپ یا Prune پیش نیاید.
+  2. **ممنوعیت قطعی آزادسازی خودکار قفل‌ها (NO AUTOMATIC RESTIC UNLOCK)**:
+     * نه Reaper انقضای هارت‌بیت و نه فرآیند Startup Recovery مجاز به اجرای دستور `restic unlock` نیستند.
+     * قفل‌های معلق باعث شکست کنترل‌شده جاب و ثبت رویداد عملیاتی می‌شوند و بازیابی قفل صرفاً با مداخله و بررسی اپراتور مجاز خواهد بود.
+     * جهت ردیابی دقیق قفل‌ها در پوشه `/locks/` مخزن، نام میزبان کانتینر اپلیکیشن در Docker Compose به صورت ثابت و پایدار `hostname: backup-platform-node-1` تنظیم می‌شود.
+  3. **صف پایدار مستقل برای عملیات نگهداری دوره‌ای**:
+     * عملیات نگهداری به هیچ وجه درون `backup_jobs` ریخته نمی‌شوند و به تایمرهای ناپایدار حافظه نیز متکی نیستند.
+     * ایجاد دو جدول مستقل در PostgreSQL با همان الگوی صف پایدار اثبات‌شده:
+       * `repository_maintenance_jobs`
+       * `repository_maintenance_runs`
+     * چرخه حیات صف: `enqueue` -> `pending` -> `FOR UPDATE SKIP LOCKED` -> `attempt` -> `lease` -> `heartbeat` -> `retry` -> `finalize` -> `audit`.
+     * ماژول زمان‌بند (Scheduler) صرفاً رکوردهای جاب در وضعیت `pending` ایجاد می‌کند.
+     * کارگر اختصاصی `RepositoryMaintenanceWorker` درون فرآیند باینری Go جاب‌ها را تحویل گرفته و با رعایت قفل انحصاری اجرا می‌کند.
+     * هیچ صف خارجی نظیر Redis، NATS یا Kafka به سیستم اضافه نخواهد شد.
+* **Rationale**: حذف کامل خطر فساد مخازن رِستیک بر اثر آنلاک زودهنگام یا اجرای هم‌زمان Prune و Backup، و تضمین ممیزی‌پذیری و تاب‌آوری عملیات نگهداری در پایگاه داده.
+* **Consequences / Trade-offs**: نیاز به بررسی اپراتور در صورت باقی ماندن قفل‌های ناشی از کرش‌های فیزیکی سرور.
+* **Related Documents**: [docs/WORKER_EXECUTION_DESIGN.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/WORKER_EXECUTION_DESIGN.md), [docs/ARCHITECTURE.md](file:///c:/Users/Kroos/Desktop/backup-platform/docs/ARCHITECTURE.md)
+
+---
+
+## قوانین قطعی انتخاب موتور و مقصد ذخیره‌سازی (Engine & Storage Target Resolution Rules)
+
+در پیاده‌سازی گام‌های Future Phase A، فرآیند تعیین موتور و مقصد ذخیره‌سازی بر اساس قوانین منجمد زیر عمل خواهد کرد:
+
+1. **ستون‌های جدید در ساختار پایگاه داده**:
+   * جدول `backup_plans`: ستون‌های `engine_type VARCHAR(50) NOT NULL` و `storage_target_id UUID NOT NULL`.
+   * جدول `backup_jobs`: ستون‌های `engine_type VARCHAR(50) NOT NULL` و `storage_target_id UUID NOT NULL`.
+2. **قانون تغییرناپذیری جاب (Job Snapshot Invariant)**:
+   رکورد `BackupJob` در زمان ایجاد و ورود به صف، اسنپ‌شاتی تغییرناپذیر از انتخاب موتور و تارگت است. کارگر در زمان اجرا هرگز مجدداً پلن یا تارگت پیش‌فرض را Resolve نخواهد کرد.
+3. **جاب دستی وابسته به پلن (`Manual Job with Plan`)**:
+   مقادیر `engine_type` و `storage_target_id` عیناً از روی پلن به ارث برده می‌شوند؛ کلاینت مجاز به بازنویسی (Override) مقادیر در درخواست نیست.
+4. **جاب دستی بدون پلن (`Manual Job without Plan`)**:
+   درخواست ایجاد جاب دستی می‌تواند مقادیر اختیاری ارسال کند. در صورت عدم ارسال، مقادیر پیش‌فرض سازمان (`engine_type = 'direct_stream'` و `storage_target_id = default local storage target`) جایگزین و به صورت قطعی ذخیره می‌شوند.
+5. **جاب‌های زمان‌بندی‌شده (`Scheduled Jobs`)**:
+   زمان‌بند مقادیر `engine_type` و `storage_target_id` را در لحظه ایجاد جاب از روی رکورد پلن کپی می‌کند.
+6. **قید کلید خارجی سازمانی (Composite Organization FK)**:
+   قید کلید خارجی `(organization_id, storage_target_id) REFERENCES storage_targets(organization_id, id)` تضمین می‌کند استفاده از تارگت متعلق به سازمان دیگر در سطح دیتابیس مسدود گردد.
+7. **مایگریشن سوابق گذشته**:
+   رکوردهای تاریخی و معلق جداول `backup_plans` و `backup_jobs` با مقدار موتور `direct_stream` و تارگت ذخیره‌سازی محلی پیش‌فرض همان سازمان پر شده و سپس قید `NOT NULL` اعمال می‌گردد.
+
+---
+
+## تفکیک مالکیت و رویت‌پذیری کردانشال‌ها (Credential Ownership & System Secrets)
+
+1. **کردانشال‌های S3 (User-Managed)**:
+   توسط مدیر سازمان با نوع `s3_credentials` و ستون `managed_by = 'user'` ثبت و مدیریت می‌شوند.
+2. **پسورد مخزن رِستیک (System-Managed)**:
+   توسط خود پلتفرم با نوع `restic_repository_key` و ستون `managed_by = 'system'` تولید و نگهداری می‌شود.
+3. **رویت‌پذیری در APIهای عمومی (`/api/v1/credentials`)**:
+   * در لیست عمومی کردانشال‌ها فیلتر شده و هرگز نمایش داده نمی‌شوند (`WHERE managed_by = 'user'`).
+   * دریافت تکی با شناسه سکرت سیستمی پاسخ **`404 Not Found`** برمی‌گرداند.
+   * هرگونه تلاش برای ساخت، ویرایش یا حذف از طریق APIهای عمومی با خطای **`403 Forbidden`** رد می‌شود.
+   * مقادیر سکرت این کلیدها تحت هیچ شرایطی در لاگ‌های سیستمی یا پاسخ‌های API ظاهر نمی‌شوند.
+
+---
+
+## موارد صراحتاً خارج از دامنه (Explicitly Out of Scope)
+
+موارد زیر اکیداً در دامنه Future Phase A قرار ندارند:
+* پایگاه داده‌های SQLite و MSSQL
+* عامل ویندوزی (Windows Backup Agent)
+* اتصال‌دهنده‌های DirectAdmin و Plesk
+* کارگرهای توزیع‌شده چندنودی (Distributed Workers)
+* صف‌های پیام خارجی (Redis, NATS, Kafka)
+* ثبت‌نام عمومی کاربران و امکانات تجاری SaaS (صورت‌حساب، اشتراک، سهمیه‌بندی)
+* آزادسازی خودکار قفل‌های رِستیک (Automatic Restic Unlock)
+* کلیه موارد مندرج در Future Phase B و فازهای بعدی
+
+---
+
 ## جدول خلاصه وضعیت کلیه تصمیمات معماری (ADR Summary Table)
 
 | شناسه | عنوان تصمیم معماری | وضعیت (Status) | قلمرو (Scope) |
@@ -451,15 +651,19 @@
 | **ADR-026** | استراتژی اولویت تحویل: تمرکز نخست بر MySQL | `Accepted` | V1 |
 | **ADR-027** | راهبرد آینده پشتیبان‌گیری MSSQL و محیط ویندوز | `Deferred` | Future |
 | **ADR-028** | تفکیک و تعویق قابلیت‌های تجاری ابری (Commercial SaaS) | `Deferred` | Future |
-| **ADR-029** | انتخاب معکوس‌کننده پروکسی و مدیریت TLS (Caddy vs Nginx) | `Pending` | V1 Deployment |
+| **ADR-029** | انتخاب معکوس‌کننده پروکسی و مدیریت TLS (Caddy vs Nginx) | `Closed` | V1 Deployment |
 | **ADR-030** | نظام مدیریت تغییرات معماری (Architecture Change Control) | `Accepted` | V1 / Future |
+| **ADR-031** | یکپارچه‌سازی موتور Restic، پروتکل استریم Gated EOF و مخازن Per-Resource | `Accepted` | Future Phase A |
+| **ADR-032** | تفکیک لایه ذخیره‌سازی: StorageProvider در برابر RepositoryTarget و امنیت S3 | `Accepted` | Future Phase A |
+| **ADR-033** | مدل داده چندریختی آرتیفکت‌ها، موجودیت مخازن، قرارداد دانلود و اعتبارسنجی دو سطحی | `Accepted` | Future Phase A |
+| **ADR-034** | رمزنگاری آرتیفکت‌ها در حالت سکون، تفکیک کلیدهای مستر و استاندارد فریمینگ BPAE | `Accepted` | Future Phase A |
+| **ADR-035** | ارکستراسیون عملیات مخزن، عدم آنلاک خودکار و صف پایدار نگهداری دوره‌ای | `Accepted` | Future Phase A |
 
 ---
 
-## تصمیمات باز قبل از پیاده‌سازی (Open Decisions Before Implementation)
+## وضعیت تصمیمات باز (Open Decisions Status)
 
-تنها یک موضوع در وضعیت باز (`Pending`) قرار دارد که نحوه تصمیم‌گیری آن به شرح زیر است:
-
-### انتخاب معکوس‌کننده پروکسی (Reverse Proxy Choice — Caddy vs Nginx):
-* **وضعیت**: غیرمسدودکننده برای کدنویسی و توسعه؛ تا فاز استقرار نهایی پروداکشن (**Phase 10**) باز می‌ماند.
-* **شرح**: انتخاب میان Caddy و Nginx تاثیری بر کدهای هسته باینری Go ندارد و صرفاً در پیکربندی داکر استقرار پروداکشن و TLS لحاظ خواهد شد.
+کلیه تصمیمات معماری تا انتهای **Future Phase A** منجمد و تصویب شده‌اند:
+* **استقرار نسخه داخلی ۱ (Phase 10)**: با موفقیت انجام شد (ADR-025, ADR-029).
+* **تصمیمات Future Phase A**: تمام محورها شامل گرنولاریتی مخازن، پروتکل Gated EOF، مدل داده چندریختی، فریمینگ BPAE، تفکیک کلیدها، امنیت S3، صف پایدار نگهداری و عدم آنلاک خودکار با قبولی رسمی ADR-031 الی ADR-035 منجمد شدند.
+* **وضعیت فعلی**: **هیچ تصمیم معلق یا باز (Pending / Unresolved) در Future Phase A وجود ندارد.**
