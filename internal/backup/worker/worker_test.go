@@ -216,6 +216,7 @@ type fakeWorkerRepo struct {
 	runs                  map[uuid.UUID]*domain.BackupRun
 	artifacts             map[uuid.UUID]*domain.BackupArtifact
 	target                *domain.StorageTarget
+	targets               map[uuid.UUID]*domain.StorageTarget
 	heartbeats            int
 	finalizedRun          *domain.BackupRun
 	finalizedJob          *domain.BackupJob
@@ -229,19 +230,23 @@ type fakeWorkerRepo struct {
 }
 
 func newFakeWorkerRepo(orgID uuid.UUID) *fakeWorkerRepo {
+	defTarget := &domain.StorageTarget{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		Name:           "Default Local Storage",
+		Type:           domain.StorageTargetTypeLocal,
+		Status:         domain.StorageTargetStatusActive,
+		IsDefault:      true,
+	}
+	targets := make(map[uuid.UUID]*domain.StorageTarget)
+	targets[defTarget.ID] = defTarget
 	return &fakeWorkerRepo{
 		jobs:       make(map[uuid.UUID]*domain.BackupJob),
 		runs:       make(map[uuid.UUID]*domain.BackupRun),
 		artifacts:  make(map[uuid.UUID]*domain.BackupArtifact),
 		tombstones: make(map[uuid.UUID]bool),
-		target: &domain.StorageTarget{
-			ID:             uuid.New(),
-			OrganizationID: orgID,
-			Name:           "Default Local Storage",
-			Type:           domain.StorageTargetTypeLocal,
-			Status:         domain.StorageTargetStatusActive,
-			IsDefault:      true,
-		},
+		target:     defTarget,
+		targets:    targets,
 	}
 }
 
@@ -249,7 +254,15 @@ func (r *fakeWorkerRepo) EnsureDefaultLocalStorageTarget(ctx context.Context, or
 	return r.target, nil
 }
 func (r *fakeWorkerRepo) GetStorageTargetByID(ctx context.Context, orgID, targetID uuid.UUID) (*domain.StorageTarget, error) {
-	return r.target, nil
+	if r.targets != nil {
+		if t, ok := r.targets[targetID]; ok {
+			return t, nil
+		}
+	}
+	if r.target != nil && r.target.ID == targetID {
+		return r.target, nil
+	}
+	return nil, domain.ErrStorageTargetNotFound
 }
 func (r *fakeWorkerRepo) GetPlanByID(ctx context.Context, orgID, planID uuid.UUID) (*domain.BackupPlan, error) {
 	return nil, nil
@@ -475,6 +488,27 @@ func (r *fakeWorkerRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.R
 }
 func (r *fakeWorkerRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
 	return nil, nil
+}
+func (r *fakeWorkerRepo) CreateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (r *fakeWorkerRepo) ListStorageTargets(ctx context.Context, orgID uuid.UUID) ([]*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (r *fakeWorkerRepo) UpdateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (r *fakeWorkerRepo) DeleteStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) error {
+	return nil
+}
+func (r *fakeWorkerRepo) CountArtifactsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (r *fakeWorkerRepo) CountPlansByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (r *fakeWorkerRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
 }
 
 type fakeResourceFinder struct {
@@ -1123,7 +1157,7 @@ func TestWorkerPool_ArtifactCleanup_Scenarios(t *testing.T) {
 		mockStorage := &customMockStorageProvider{}
 
 		pool := &WorkerPool{repo: repo, storageProvider: mockStorage, logger: slog.Default()}
-		err := pool.cleanupArtifact(context.Background(), orgID, artID, storageRef)
+		err := pool.cleanupArtifact(context.Background(), orgID, artID, uuid.Nil, storageRef)
 		if err != nil {
 			t.Fatalf("unexpected cleanup error: %v", err)
 		}
@@ -1138,7 +1172,7 @@ func TestWorkerPool_ArtifactCleanup_Scenarios(t *testing.T) {
 		mockStorage := &customMockStorageProvider{deleteErr: storage.ErrArtifactNotFound}
 
 		pool := &WorkerPool{repo: repo, storageProvider: mockStorage, logger: slog.Default()}
-		err := pool.cleanupArtifact(context.Background(), orgID, artID, storageRef)
+		err := pool.cleanupArtifact(context.Background(), orgID, artID, uuid.Nil, storageRef)
 		if err != nil {
 			t.Fatalf("unexpected cleanup error: %v", err)
 		}
@@ -1153,7 +1187,7 @@ func TestWorkerPool_ArtifactCleanup_Scenarios(t *testing.T) {
 		mockStorage := &customMockStorageProvider{deleteErr: storage.ErrStorageIO}
 
 		pool := &WorkerPool{repo: repo, storageProvider: mockStorage, logger: slog.Default()}
-		err := pool.cleanupArtifact(context.Background(), orgID, artID, storageRef)
+		err := pool.cleanupArtifact(context.Background(), orgID, artID, uuid.Nil, storageRef)
 		if err == nil {
 			t.Fatalf("expected error from physical delete failure")
 		}

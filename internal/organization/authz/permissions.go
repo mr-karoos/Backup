@@ -18,6 +18,8 @@ const (
 	PermissionBackupArtifactDownload Permission = "backup_artifact:download"
 	PermissionBackupArtifactDelete   Permission = "backup_artifact:delete"
 	PermissionAuditLogRead           Permission = "audit_log:read"
+	PermissionStorageTargetRead      Permission = "storage_target:read"
+	PermissionStorageTargetWrite     Permission = "storage_target:write"
 )
 
 var adminPermissions = []Permission{
@@ -31,6 +33,8 @@ var adminPermissions = []Permission{
 	PermissionBackupArtifactDownload,
 	PermissionBackupArtifactDelete,
 	PermissionAuditLogRead,
+	PermissionStorageTargetRead,
+	PermissionStorageTargetWrite,
 }
 
 var memberPermissions = []Permission{
@@ -39,11 +43,13 @@ var memberPermissions = []Permission{
 	PermissionBackupJobExecute,
 	PermissionBackupRunVerify,
 	PermissionBackupArtifactDownload,
+	PermissionStorageTargetRead,
 }
 
 var viewerPermissions = []Permission{
 	PermissionResourceRead,
 	PermissionBackupPlanRead,
+	PermissionStorageTargetRead,
 }
 
 // PermissionsForRole returns the canonical V1 typed permission set for a given organization role.

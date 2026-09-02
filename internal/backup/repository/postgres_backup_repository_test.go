@@ -542,11 +542,13 @@ func TestPostgresBackupRepository_EnqueueScheduledJobAndAdvanceNextRun(t *testin
 							*(dest[1].(*uuid.UUID)) = orgID
 							*(dest[2].(*uuid.UUID)) = resID
 							*(dest[3].(*domain.BackupType)) = domain.BackupTypeMySQLDatabase
-							*(dest[4].(*[]byte)) = []byte(`{"databases":["db1"]}`)
-							*(dest[5].(*domain.PlanStatus)) = domain.PlanStatusActive
-							*(dest[6].(*bool)) = true
-							*(dest[7].(**time.Time)) = &now
-							*(dest[8].(*time.Time)) = now
+							*(dest[4].(*domain.EngineType)) = domain.EngineTypeDirectStream
+							*(dest[5].(*uuid.UUID)) = uuid.New()
+							*(dest[6].(*[]byte)) = []byte(`{"databases":["db1"]}`)
+							*(dest[7].(*domain.PlanStatus)) = domain.PlanStatusActive
+							*(dest[8].(*bool)) = true
+							*(dest[9].(**time.Time)) = &now
+							*(dest[10].(*time.Time)) = now
 							return nil
 						},
 					}
@@ -560,10 +562,12 @@ func TestPostgresBackupRepository_EnqueueScheduledJobAndAdvanceNextRun(t *testin
 							*(dest[4].(*domain.TriggerType)) = domain.TriggerTypeScheduled
 							*(dest[5].(**uuid.UUID)) = nil
 							*(dest[6].(*domain.BackupType)) = domain.BackupTypeMySQLDatabase
-							*(dest[7].(*[]byte)) = []byte(`{"databases":["db1"]}`)
-							*(dest[8].(*domain.JobStatus)) = domain.JobStatusPending
-							*(dest[9].(*time.Time)) = now
-							*(dest[10].(*time.Time)) = now
+							*(dest[7].(*domain.EngineType)) = domain.EngineTypeDirectStream
+							*(dest[8].(*uuid.UUID)) = uuid.New()
+							*(dest[9].(*[]byte)) = []byte(`{"databases":["db1"]}`)
+							*(dest[10].(*domain.JobStatus)) = domain.JobStatusPending
+							*(dest[11].(*time.Time)) = now
+							*(dest[12].(*time.Time)) = now
 							return nil
 						},
 					}
@@ -622,11 +626,13 @@ func TestPostgresBackupRepository_EnqueueScheduledJobAndAdvanceNextRun(t *testin
 							*(dest[1].(*uuid.UUID)) = orgID
 							*(dest[2].(*uuid.UUID)) = resID
 							*(dest[3].(*domain.BackupType)) = domain.BackupTypeMySQLDatabase
-							*(dest[4].(*[]byte)) = []byte(`{"databases":["db1"]}`)
-							*(dest[5].(*domain.PlanStatus)) = domain.PlanStatusActive
-							*(dest[6].(*bool)) = true
-							*(dest[7].(**time.Time)) = &now
-							*(dest[8].(*time.Time)) = now
+							*(dest[4].(*domain.EngineType)) = domain.EngineTypeDirectStream
+							*(dest[5].(*uuid.UUID)) = uuid.New()
+							*(dest[6].(*[]byte)) = []byte(`{"databases":["db1"]}`)
+							*(dest[7].(*domain.PlanStatus)) = domain.PlanStatusActive
+							*(dest[8].(*bool)) = true
+							*(dest[9].(**time.Time)) = &now
+							*(dest[10].(*time.Time)) = now
 							return nil
 						},
 					}
@@ -688,11 +694,13 @@ func TestPostgresBackupRepository_EnqueueScheduledJobAndAdvanceNextRun(t *testin
 							*(dest[1].(*uuid.UUID)) = orgID
 							*(dest[2].(*uuid.UUID)) = resID
 							*(dest[3].(*domain.BackupType)) = domain.BackupTypeMySQLDatabase
-							*(dest[4].(*[]byte)) = []byte(`{"databases":["db1"]}`)
-							*(dest[5].(*domain.PlanStatus)) = domain.PlanStatusActive
-							*(dest[6].(*bool)) = true
-							*(dest[7].(**time.Time)) = &now
-							*(dest[8].(*time.Time)) = now
+							*(dest[4].(*domain.EngineType)) = domain.EngineTypeDirectStream
+							*(dest[5].(*uuid.UUID)) = uuid.New()
+							*(dest[6].(*[]byte)) = []byte(`{"databases":["db1"]}`)
+							*(dest[7].(*domain.PlanStatus)) = domain.PlanStatusActive
+							*(dest[8].(*bool)) = true
+							*(dest[9].(**time.Time)) = &now
+							*(dest[10].(*time.Time)) = now
 							return nil
 						},
 					}
@@ -755,11 +763,13 @@ func TestPostgresBackupRepository_EnqueueScheduledJobAndAdvanceNextRun(t *testin
 							*(dest[1].(*uuid.UUID)) = orgID
 							*(dest[2].(*uuid.UUID)) = resID
 							*(dest[3].(*domain.BackupType)) = domain.BackupTypeMySQLDatabase
-							*(dest[4].(*[]byte)) = []byte(`{"databases":["db1"]}`)
-							*(dest[5].(*domain.PlanStatus)) = domain.PlanStatusActive
-							*(dest[6].(*bool)) = true
-							*(dest[7].(**time.Time)) = &now
-							*(dest[8].(*time.Time)) = now.Add(5 * time.Minute) // Modified concurrently
+							*(dest[4].(*domain.EngineType)) = domain.EngineTypeDirectStream
+							*(dest[5].(*uuid.UUID)) = uuid.New()
+							*(dest[6].(*[]byte)) = []byte(`{"databases":["db1"]}`)
+							*(dest[7].(*domain.PlanStatus)) = domain.PlanStatusActive
+							*(dest[8].(*bool)) = true
+							*(dest[9].(**time.Time)) = &now
+							*(dest[10].(*time.Time)) = now.Add(5 * time.Minute) // Modified concurrently
 							return nil
 						},
 					}

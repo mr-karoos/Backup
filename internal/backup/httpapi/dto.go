@@ -13,22 +13,26 @@ import (
 
 // CreateBackupJobRequest defines the JSON payload for creating a manual backup job.
 type CreateBackupJobRequest struct {
-	BackupPlanID *uuid.UUID         `json:"backup_plan_id,omitempty"`
-	ResourceID   *uuid.UUID         `json:"resource_id,omitempty"`
-	BackupType   domain.BackupType  `json:"backup_type,omitempty"`
-	TargetSpec   *domain.TargetSpec `json:"target_spec,omitempty"`
+	BackupPlanID    *uuid.UUID         `json:"backup_plan_id,omitempty"`
+	ResourceID      *uuid.UUID         `json:"resource_id,omitempty"`
+	BackupType      domain.BackupType  `json:"backup_type,omitempty"`
+	EngineType      *domain.EngineType `json:"engine_type,omitempty"`
+	StorageTargetID *uuid.UUID         `json:"storage_target_id,omitempty"`
+	TargetSpec      *domain.TargetSpec `json:"target_spec,omitempty"`
 }
 
 // BackupJobResponse defines the JSON response returned for a backup job.
 type BackupJobResponse struct {
-	ID           uuid.UUID          `json:"id"`
-	ResourceID   uuid.UUID          `json:"resource_id"`
-	BackupPlanID *uuid.UUID         `json:"backup_plan_id"`
-	BackupType   domain.BackupType  `json:"backup_type"`
-	TargetSpec   domain.TargetSpec  `json:"target_spec"`
-	Status       domain.JobStatus   `json:"status"`
-	TriggerType  domain.TriggerType `json:"trigger_type"`
-	CreatedAt    time.Time          `json:"created_at"`
+	ID              uuid.UUID          `json:"id"`
+	ResourceID      uuid.UUID          `json:"resource_id"`
+	BackupPlanID    *uuid.UUID         `json:"backup_plan_id"`
+	BackupType      domain.BackupType  `json:"backup_type"`
+	EngineType      domain.EngineType  `json:"engine_type"`
+	StorageTargetID uuid.UUID          `json:"storage_target_id"`
+	TargetSpec      domain.TargetSpec  `json:"target_spec"`
+	Status          domain.JobStatus   `json:"status"`
+	TriggerType     domain.TriggerType `json:"trigger_type"`
+	CreatedAt       time.Time          `json:"created_at"`
 }
 
 func toBackupJobResponse(j *domain.BackupJob) *BackupJobResponse {
@@ -36,14 +40,16 @@ func toBackupJobResponse(j *domain.BackupJob) *BackupJobResponse {
 		return nil
 	}
 	return &BackupJobResponse{
-		ID:           j.ID,
-		ResourceID:   j.ResourceID,
-		BackupPlanID: j.BackupPlanID,
-		BackupType:   j.BackupType,
-		TargetSpec:   j.TargetSpec,
-		Status:       j.Status,
-		TriggerType:  j.TriggerType,
-		CreatedAt:    j.CreatedAt,
+		ID:              j.ID,
+		ResourceID:      j.ResourceID,
+		BackupPlanID:    j.BackupPlanID,
+		BackupType:      j.BackupType,
+		EngineType:      j.EngineType,
+		StorageTargetID: j.StorageTargetID,
+		TargetSpec:      j.TargetSpec,
+		Status:          j.Status,
+		TriggerType:     j.TriggerType,
+		CreatedAt:       j.CreatedAt,
 	}
 }
 
@@ -78,6 +84,8 @@ type CreateBackupPlanRequest struct {
 	Name              string                `json:"name"`
 	ResourceID        uuid.UUID             `json:"resource_id"`
 	BackupType        domain.BackupType     `json:"backup_type"`
+	EngineType        *domain.EngineType    `json:"engine_type,omitempty"`
+	StorageTargetID   *uuid.UUID            `json:"storage_target_id,omitempty"`
 	DatabaseSelection *DatabaseSelectionDTO `json:"database_selection,omitempty"`
 	FileSelection     *FileSelectionDTO     `json:"file_selection,omitempty"`
 	Schedule          ScheduleDTO           `json:"schedule"`
@@ -87,6 +95,8 @@ type CreateBackupPlanRequest struct {
 // UpdateBackupPlanRequest defines the JSON payload for updating a backup plan.
 type UpdateBackupPlanRequest struct {
 	Name              string                `json:"name"`
+	EngineType        *domain.EngineType    `json:"engine_type,omitempty"`
+	StorageTargetID   *uuid.UUID            `json:"storage_target_id,omitempty"`
 	DatabaseSelection *DatabaseSelectionDTO `json:"database_selection,omitempty"`
 	FileSelection     *FileSelectionDTO     `json:"file_selection,omitempty"`
 	Schedule          ScheduleDTO           `json:"schedule"`
@@ -96,11 +106,13 @@ type UpdateBackupPlanRequest struct {
 
 // CreateBackupPlanResponse defines the minimal response returned on plan creation.
 type CreateBackupPlanResponse struct {
-	ID         uuid.UUID         `json:"id"`
-	Name       string            `json:"name"`
-	ResourceID uuid.UUID         `json:"resource_id"`
-	Status     domain.PlanStatus `json:"status"`
-	CreatedAt  time.Time         `json:"created_at"`
+	ID              uuid.UUID         `json:"id"`
+	Name            string            `json:"name"`
+	ResourceID      uuid.UUID         `json:"resource_id"`
+	EngineType      domain.EngineType `json:"engine_type"`
+	StorageTargetID uuid.UUID         `json:"storage_target_id"`
+	Status          domain.PlanStatus `json:"status"`
+	CreatedAt       time.Time         `json:"created_at"`
 }
 
 // BackupPlanResponse defines the representation of a backup plan in list and detail responses.
@@ -110,6 +122,8 @@ type BackupPlanResponse struct {
 	ResourceName      string                `json:"resource_name"`
 	Name              string                `json:"name"`
 	BackupType        domain.BackupType     `json:"backup_type"`
+	EngineType        domain.EngineType     `json:"engine_type"`
+	StorageTargetID   uuid.UUID             `json:"storage_target_id"`
 	Status            domain.PlanStatus     `json:"status"`
 	DatabaseSelection *DatabaseSelectionDTO `json:"database_selection,omitempty"`
 	FileSelection     *FileSelectionDTO     `json:"file_selection,omitempty"`
@@ -124,11 +138,13 @@ func toCreateBackupPlanResponse(p *domain.BackupPlan) *CreateBackupPlanResponse 
 		return nil
 	}
 	return &CreateBackupPlanResponse{
-		ID:         p.ID,
-		Name:       p.Name,
-		ResourceID: p.ResourceID,
-		Status:     p.Status,
-		CreatedAt:  p.CreatedAt,
+		ID:              p.ID,
+		Name:            p.Name,
+		ResourceID:      p.ResourceID,
+		EngineType:      p.EngineType,
+		StorageTargetID: p.StorageTargetID,
+		Status:          p.Status,
+		CreatedAt:       p.CreatedAt,
 	}
 }
 
@@ -202,6 +218,8 @@ func toBackupPlanResponse(p *domain.BackupPlan, resourceName string, includeUpda
 		ResourceName:      resourceName,
 		Name:              p.Name,
 		BackupType:        p.BackupType,
+		EngineType:        p.EngineType,
+		StorageTargetID:   p.StorageTargetID,
 		Status:            p.Status,
 		DatabaseSelection: dbSel,
 		FileSelection:     fileSel,
@@ -361,4 +379,69 @@ func toVerifyBackupRunResponse(res *service.RunVerificationResult) *VerifyBackup
 			ExtractedSampleCheck: res.Details.ExtractedSampleCheck,
 		},
 	}
+}
+
+// S3TargetConfigDTO defines the S3 target configuration in API requests and responses.
+type S3TargetConfigDTO struct {
+	Bucket         string `json:"bucket"`
+	Endpoint       string `json:"endpoint"`
+	Region         string `json:"region"`
+	ForcePathStyle bool   `json:"force_path_style"`
+}
+
+// CreateStorageTargetRequest defines the JSON payload for creating a storage target.
+type CreateStorageTargetRequest struct {
+	Name         string                   `json:"name"`
+	Type         domain.StorageTargetType `json:"type"`
+	S3Config     *S3TargetConfigDTO       `json:"s3_config,omitempty"`
+	CredentialID *uuid.UUID               `json:"credential_id,omitempty"`
+}
+
+// UpdateStorageTargetRequest defines the JSON payload for updating a storage target.
+type UpdateStorageTargetRequest struct {
+	Name         *string                     `json:"name,omitempty"`
+	S3Config     *S3TargetConfigDTO          `json:"s3_config,omitempty"`
+	CredentialID *uuid.UUID                  `json:"credential_id,omitempty"`
+	Status       *domain.StorageTargetStatus `json:"status,omitempty"`
+}
+
+// StorageTargetResponse defines the JSON response returned for a storage target.
+type StorageTargetResponse struct {
+	ID           uuid.UUID                  `json:"id"`
+	Name         string                     `json:"name"`
+	Type         domain.StorageTargetType   `json:"type"`
+	Status       domain.StorageTargetStatus `json:"status"`
+	IsDefault    bool                       `json:"is_default"`
+	S3Config     *S3TargetConfigDTO         `json:"s3_config,omitempty"`
+	CredentialID *uuid.UUID                 `json:"credential_id,omitempty"`
+	CreatedAt    time.Time                  `json:"created_at"`
+	UpdatedAt    time.Time                  `json:"updated_at"`
+}
+
+func toStorageTargetResponse(t *domain.StorageTarget) *StorageTargetResponse {
+	if t == nil {
+		return nil
+	}
+	resp := &StorageTargetResponse{
+		ID:           t.ID,
+		Name:         t.Name,
+		Type:         t.Type,
+		Status:       t.Status,
+		IsDefault:    t.IsDefault,
+		CredentialID: t.CredentialID,
+		CreatedAt:    t.CreatedAt,
+		UpdatedAt:    t.UpdatedAt,
+	}
+	if t.Type == domain.StorageTargetTypeS3 {
+		s3Cfg, _ := domain.ParseS3TargetConfig(t.Config)
+		if s3Cfg != nil {
+			resp.S3Config = &S3TargetConfigDTO{
+				Bucket:         s3Cfg.Bucket,
+				Endpoint:       s3Cfg.Endpoint,
+				Region:         s3Cfg.Region,
+				ForcePathStyle: s3Cfg.ForcePathStyle,
+			}
+		}
+	}
+	return resp
 }

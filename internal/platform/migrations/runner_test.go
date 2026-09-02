@@ -380,6 +380,7 @@ func TestMigrations_LoadUpAndDownViaDriver(t *testing.T) {
 		{v: 3, identifier: "backup_execution_foundation"},
 		{v: 4, identifier: "backup_plan_scheduler_integrity"},
 		{v: 5, identifier: "artifact_lifecycle_audit"},
+		{v: 6, identifier: "storage_engine_evolution_a1"},
 	}
 
 	for _, tc := range versions {
@@ -485,5 +486,60 @@ func TestValidatePostgresVersionNum(t *testing.T) {
 				t.Errorf("ValidatePostgresVersionNum(%q) = %v, expected %v", tc.input, err, tc.expectedErr)
 			}
 		})
+	}
+}
+
+func TestMigrations_StepA1_StorageEngineEvolutionDefinition(t *testing.T) {
+	upContent, err := fs.ReadFile(FS, "sql/000006_storage_engine_evolution_a1.up.sql")
+	if err != nil {
+		t.Fatalf("failed to read up migration 000006 file: %v", err)
+	}
+
+	sqlStr := string(upContent)
+	required := []string{
+		"INSERT INTO storage_targets",
+		"chk_storage_targets_status CHECK (status IN ('active', 'disabled', 'error', 'archived'))",
+		"ALTER TABLE backup_plans ADD COLUMN IF NOT EXISTS engine_type VARCHAR(50) NULL;",
+		"ALTER TABLE backup_plans ADD COLUMN IF NOT EXISTS storage_target_id UUID NULL;",
+		"UPDATE backup_plans bp",
+		"chk_backup_plans_engine_type CHECK (engine_type IN ('direct_stream'))",
+		"CONSTRAINT fk_backup_plans_org_storage FOREIGN KEY (organization_id, storage_target_id) REFERENCES storage_targets(organization_id, id) ON DELETE RESTRICT",
+		"ALTER TABLE backup_jobs ADD COLUMN IF NOT EXISTS engine_type VARCHAR(50) NULL;",
+		"ALTER TABLE backup_jobs ADD COLUMN IF NOT EXISTS storage_target_id UUID NULL;",
+		"UPDATE backup_jobs bj",
+		"chk_backup_jobs_engine_type CHECK (engine_type IN ('direct_stream'))",
+		"CONSTRAINT fk_backup_jobs_org_storage FOREIGN KEY (organization_id, storage_target_id) REFERENCES storage_targets(organization_id, id) ON DELETE RESTRICT",
+		"CREATE INDEX IF NOT EXISTS idx_backup_plans_org_storage",
+		"CREATE INDEX IF NOT EXISTS idx_backup_jobs_org_storage",
+	}
+
+	for _, item := range required {
+		if !strings.Contains(sqlStr, item) {
+			t.Errorf("000006 migration missing expected element: %s", item)
+		}
+	}
+
+	downContent, err := fs.ReadFile(FS, "sql/000006_storage_engine_evolution_a1.down.sql")
+	if err != nil {
+		t.Fatalf("failed to read down migration 000006 file: %v", err)
+	}
+
+	downStr := string(downContent)
+	requiredDown := []string{
+		"DROP INDEX IF EXISTS idx_backup_jobs_org_storage;",
+		"DROP INDEX IF EXISTS idx_backup_plans_org_storage;",
+		"ALTER TABLE backup_jobs DROP CONSTRAINT IF EXISTS fk_backup_jobs_org_storage;",
+		"ALTER TABLE backup_jobs DROP COLUMN IF EXISTS storage_target_id;",
+		"ALTER TABLE backup_jobs DROP COLUMN IF EXISTS engine_type;",
+		"ALTER TABLE backup_plans DROP CONSTRAINT IF EXISTS fk_backup_plans_org_storage;",
+		"ALTER TABLE backup_plans DROP COLUMN IF EXISTS storage_target_id;",
+		"ALTER TABLE backup_plans DROP COLUMN IF EXISTS engine_type;",
+		"ALTER TABLE storage_targets DROP CONSTRAINT IF EXISTS chk_storage_targets_status;",
+	}
+
+	for _, item := range requiredDown {
+		if !strings.Contains(downStr, item) {
+			t.Errorf("000006 down migration missing expected element: %s", item)
+		}
 	}
 }

@@ -95,18 +95,205 @@ func (r *PostgresBackupRepository) GetStorageTargetByID(ctx context.Context, org
 	target, err := scanStorageTarget(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, domain.ErrStorageTargetNotSupported
+			return nil, domain.ErrStorageTargetNotFound
 		}
 		return nil, fmt.Errorf("failed retrieving storage target: %w", err)
 	}
 	return target, nil
 }
 
+// CreateStorageTarget inserts a new storage target record for the tenant organization.
+func (r *PostgresBackupRepository) CreateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	if target == nil {
+		return nil, errors.New("storage target cannot be nil")
+	}
+
+	q := r.txManager.Querier()
+	configJSON := target.Config
+	if len(configJSON) == 0 {
+		configJSON = []byte("{}")
+	}
+
+	query := `
+		INSERT INTO storage_targets (
+			id, organization_id, name, type, status, is_default, credential_id, config, created_at, updated_at
+		) VALUES (
+			$1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+		)
+		RETURNING id, organization_id, name, type, status, is_default, credential_id, config, created_at, updated_at;
+	`
+	row := q.QueryRow(
+		ctx,
+		query,
+		target.ID,
+		target.OrganizationID,
+		target.Name,
+		target.Type,
+		target.Status,
+		target.IsDefault,
+		target.CredentialID,
+		configJSON,
+	)
+
+	created, err := scanStorageTarget(row)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			if pgErr.Code == "23503" { // foreign key violation (e.g. credential_id not found in org)
+				return nil, errors.New("referenced credential does not exist in organization")
+			}
+			if pgErr.Code == "23505" { // unique violation
+				return nil, errors.New("storage target conflict or duplicate default target")
+			}
+		}
+		return nil, fmt.Errorf("failed creating storage target: %w", err)
+	}
+
+	return created, nil
+}
+
+// ListStorageTargets lists active, non-archived storage targets for an organization.
+func (r *PostgresBackupRepository) ListStorageTargets(ctx context.Context, orgID uuid.UUID) ([]*domain.StorageTarget, error) {
+	q := r.txManager.Querier()
+	query := `
+		SELECT id, organization_id, name, type, status, is_default, credential_id, config, created_at, updated_at
+		FROM storage_targets
+		WHERE organization_id = $1 AND status <> 'archived'
+		ORDER BY is_default DESC, created_at ASC;
+	`
+	rows, err := q.Query(ctx, query, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("failed listing storage targets: %w", err)
+	}
+	defer rows.Close()
+
+	var targets []*domain.StorageTarget
+	for rows.Next() {
+		target, err := scanStorageTarget(rows)
+		if err != nil {
+			return nil, fmt.Errorf("failed scanning storage target row: %w", err)
+		}
+		targets = append(targets, target)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed iterating storage target rows: %w", err)
+	}
+
+	return targets, nil
+}
+
+// UpdateStorageTarget updates an existing storage target for an organization.
+func (r *PostgresBackupRepository) UpdateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	if target == nil {
+		return nil, errors.New("storage target cannot be nil")
+	}
+
+	q := r.txManager.Querier()
+	configJSON := target.Config
+	if len(configJSON) == 0 {
+		configJSON = []byte("{}")
+	}
+
+	query := `
+		UPDATE storage_targets
+		SET name = $3,
+		    status = $4,
+		    is_default = $5,
+		    credential_id = $6,
+		    config = $7,
+		    updated_at = NOW()
+		WHERE organization_id = $1 AND id = $2 AND status <> 'archived'
+		RETURNING id, organization_id, name, type, status, is_default, credential_id, config, created_at, updated_at;
+	`
+	row := q.QueryRow(
+		ctx,
+		query,
+		target.OrganizationID,
+		target.ID,
+		target.Name,
+		target.Status,
+		target.IsDefault,
+		target.CredentialID,
+		configJSON,
+	)
+
+	updated, err := scanStorageTarget(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrStorageTargetNotFound
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			if pgErr.Code == "23503" {
+				return nil, errors.New("referenced credential does not exist in organization")
+			}
+			if pgErr.Code == "23505" {
+				return nil, errors.New("storage target conflict or duplicate default target")
+			}
+		}
+		return nil, fmt.Errorf("failed updating storage target: %w", err)
+	}
+
+	return updated, nil
+}
+
+// DeleteStorageTarget permanently deletes or unlinks a storage target if not referenced.
+func (r *PostgresBackupRepository) DeleteStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) error {
+	q := r.txManager.Querier()
+	query := `DELETE FROM storage_targets WHERE organization_id = $1 AND id = $2;`
+	tag, err := q.Exec(ctx, query, orgID, targetID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return domain.ErrStorageTargetInUse
+		}
+		return fmt.Errorf("failed deleting storage target: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return domain.ErrStorageTargetNotFound
+	}
+	return nil
+}
+
+// CountArtifactsByStorageTarget counts active artifacts stored in the given target.
+func (r *PostgresBackupRepository) CountArtifactsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	q := r.txManager.Querier()
+	query := `SELECT COUNT(*) FROM backup_artifacts WHERE organization_id = $1 AND storage_target_id = $2 AND is_deleted = false;`
+	var count int64
+	if err := q.QueryRow(ctx, query, orgID, targetID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed counting artifacts for storage target: %w", err)
+	}
+	return count, nil
+}
+
+// CountPlansByStorageTarget counts active/paused plans using the given target.
+func (r *PostgresBackupRepository) CountPlansByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	q := r.txManager.Querier()
+	query := `SELECT COUNT(*) FROM backup_plans WHERE organization_id = $1 AND storage_target_id = $2 AND status <> 'archived';`
+	var count int64
+	if err := q.QueryRow(ctx, query, orgID, targetID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed counting plans for storage target: %w", err)
+	}
+	return count, nil
+}
+
+// CountActiveJobsByStorageTarget counts pending or running jobs using the given target.
+func (r *PostgresBackupRepository) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	q := r.txManager.Querier()
+	query := `SELECT COUNT(*) FROM backup_jobs WHERE organization_id = $1 AND storage_target_id = $2 AND status IN ('pending', 'running');`
+	var count int64
+	if err := q.QueryRow(ctx, query, orgID, targetID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed counting active jobs for storage target: %w", err)
+	}
+	return count, nil
+}
+
 // GetPlanByID retrieves a backup plan by ID within an organization.
 func (r *PostgresBackupRepository) GetPlanByID(ctx context.Context, orgID, planID uuid.UUID) (*domain.BackupPlan, error) {
 	q := r.txManager.Querier()
 	query := `
-		SELECT id, organization_id, resource_id, name, backup_type, target_spec,
+		SELECT id, organization_id, resource_id, name, backup_type, engine_type, storage_target_id, target_spec,
 		       schedule_cron, schedule_timezone, is_schedule_enabled, retention_count,
 		       retention_days, status, next_run_at, created_at, updated_at
 		FROM backup_plans
@@ -127,6 +314,8 @@ func (r *PostgresBackupRepository) GetPlanByID(ctx context.Context, orgID, planI
 		&p.ResourceID,
 		&p.Name,
 		&p.BackupType,
+		&p.EngineType,
+		&p.StorageTargetID,
 		&targetSpecBytes,
 		&scheduleCron,
 		&p.ScheduleTimezone,
@@ -168,11 +357,11 @@ func (r *PostgresBackupRepository) CreatePlan(ctx context.Context, plan *domain.
 
 	query := `
 		INSERT INTO backup_plans (
-			id, organization_id, resource_id, name, backup_type, target_spec,
+			id, organization_id, resource_id, name, backup_type, engine_type, storage_target_id, target_spec,
 			schedule_cron, schedule_timezone, is_schedule_enabled, retention_count,
 			retention_days, status, next_run_at, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW()
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW()
 		)
 		RETURNING created_at, updated_at;
 	`
@@ -184,6 +373,8 @@ func (r *PostgresBackupRepository) CreatePlan(ctx context.Context, plan *domain.
 		plan.ResourceID,
 		plan.Name,
 		plan.BackupType,
+		plan.EngineType,
+		plan.StorageTargetID,
 		targetSpecBytes,
 		plan.ScheduleCron,
 		plan.ScheduleTimezone,
@@ -207,7 +398,7 @@ func (r *PostgresBackupRepository) CreatePlan(ctx context.Context, plan *domain.
 func (r *PostgresBackupRepository) GetPlanWithResourceByID(ctx context.Context, orgID, planID uuid.UUID) (*domain.BackupPlanWithResource, error) {
 	q := r.txManager.Querier()
 	query := `
-		SELECT p.id, p.organization_id, p.resource_id, p.name, p.backup_type, p.target_spec,
+		SELECT p.id, p.organization_id, p.resource_id, p.name, p.backup_type, p.engine_type, p.storage_target_id, p.target_spec,
 		       p.schedule_cron, p.schedule_timezone, p.is_schedule_enabled, p.retention_count,
 		       p.retention_days, p.status, p.next_run_at, p.created_at, p.updated_at,
 		       r.name AS resource_name
@@ -231,6 +422,8 @@ func (r *PostgresBackupRepository) GetPlanWithResourceByID(ctx context.Context, 
 		&p.ResourceID,
 		&p.Name,
 		&p.BackupType,
+		&p.EngineType,
+		&p.StorageTargetID,
 		&targetSpecBytes,
 		&scheduleCron,
 		&p.ScheduleTimezone,
@@ -274,7 +467,7 @@ func (r *PostgresBackupRepository) ListPlans(ctx context.Context, orgID uuid.UUI
 	args = append(args, orgID)
 
 	query := `
-		SELECT p.id, p.organization_id, p.resource_id, p.name, p.backup_type, p.target_spec,
+		SELECT p.id, p.organization_id, p.resource_id, p.name, p.backup_type, p.engine_type, p.storage_target_id, p.target_spec,
 		       p.schedule_cron, p.schedule_timezone, p.is_schedule_enabled, p.retention_count,
 		       p.retention_days, p.status, p.next_run_at, p.created_at, p.updated_at,
 		       r.name AS resource_name
@@ -320,6 +513,8 @@ func (r *PostgresBackupRepository) ListPlans(ctx context.Context, orgID uuid.UUI
 			&p.ResourceID,
 			&p.Name,
 			&p.BackupType,
+			&p.EngineType,
+			&p.StorageTargetID,
 			&targetSpecBytes,
 			&scheduleCron,
 			&p.ScheduleTimezone,
@@ -369,14 +564,16 @@ func (r *PostgresBackupRepository) UpdatePlan(ctx context.Context, plan *domain.
 	query := `
 		UPDATE backup_plans
 		SET name = $3,
-		    target_spec = $4,
-		    schedule_cron = $5,
-		    schedule_timezone = $6,
-		    is_schedule_enabled = $7,
-		    retention_count = $8,
-		    retention_days = $9,
-		    status = $10,
-		    next_run_at = $11,
+		    engine_type = $4,
+		    storage_target_id = $5,
+		    target_spec = $6,
+		    schedule_cron = $7,
+		    schedule_timezone = $8,
+		    is_schedule_enabled = $9,
+		    retention_count = $10,
+		    retention_days = $11,
+		    status = $12,
+		    next_run_at = $13,
 		    updated_at = NOW()
 		WHERE organization_id = $1 AND id = $2 AND status <> 'archived'
 		RETURNING updated_at, created_at;
@@ -387,6 +584,8 @@ func (r *PostgresBackupRepository) UpdatePlan(ctx context.Context, plan *domain.
 		plan.OrganizationID,
 		plan.ID,
 		plan.Name,
+		plan.EngineType,
+		plan.StorageTargetID,
 		targetSpecBytes,
 		plan.ScheduleCron,
 		plan.ScheduleTimezone,
@@ -437,7 +636,7 @@ func (r *PostgresBackupRepository) FindDuePlans(ctx context.Context, now time.Ti
 	}
 
 	query := `
-		SELECT id, organization_id, resource_id, name, backup_type, target_spec,
+		SELECT id, organization_id, resource_id, name, backup_type, engine_type, storage_target_id, target_spec,
 		       schedule_cron, schedule_timezone, is_schedule_enabled, retention_count,
 		       retention_days, status, next_run_at, created_at, updated_at
 		FROM backup_plans
@@ -474,6 +673,8 @@ func (r *PostgresBackupRepository) FindDuePlans(ctx context.Context, now time.Ti
 			&p.ResourceID,
 			&p.Name,
 			&p.BackupType,
+			&p.EngineType,
+			&p.StorageTargetID,
 			&targetSpecBytes,
 			&scheduleCron,
 			&p.ScheduleTimezone,
@@ -521,7 +722,7 @@ func (r *PostgresBackupRepository) EnqueueScheduledJobAndAdvanceNextRun(
 	err := r.txManager.WithinTx(ctx, func(q database.Querier) error {
 		// 1. Lock and revalidate plan row
 		lockQuery := `
-			SELECT id, organization_id, resource_id, backup_type, target_spec, status,
+			SELECT id, organization_id, resource_id, backup_type, engine_type, storage_target_id, target_spec, status,
 			       is_schedule_enabled, next_run_at, updated_at
 			FROM backup_plans
 			WHERE id = $1
@@ -531,6 +732,8 @@ func (r *PostgresBackupRepository) EnqueueScheduledJobAndAdvanceNextRun(
 
 		var currentID, currentOrgID, currentResID uuid.UUID
 		var currentBackupType domain.BackupType
+		var currentEngineType domain.EngineType
+		var currentStorageTargetID uuid.UUID
 		var targetSpecBytes []byte
 		var currentStatus domain.PlanStatus
 		var currentEnabled bool
@@ -542,6 +745,8 @@ func (r *PostgresBackupRepository) EnqueueScheduledJobAndAdvanceNextRun(
 			&currentOrgID,
 			&currentResID,
 			&currentBackupType,
+			&currentEngineType,
+			&currentStorageTargetID,
 			&targetSpecBytes,
 			&currentStatus,
 			&currentEnabled,
@@ -584,15 +789,15 @@ func (r *PostgresBackupRepository) EnqueueScheduledJobAndAdvanceNextRun(
 			insertQuery := `
 				INSERT INTO backup_jobs (
 					id, organization_id, resource_id, backup_plan_id, trigger_type,
-					created_by_user_id, backup_type, target_spec, status, created_at, updated_at
+					created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at
 				) VALUES (
-					$1, $2, $3, $4, 'scheduled', NULL, $5, $6, 'pending', NOW(), NOW()
+					$1, $2, $3, $4, 'scheduled', NULL, $5, $6, $7, $8, 'pending', NOW(), NOW()
 				)
 				ON CONFLICT (organization_id, backup_plan_id)
 				WHERE trigger_type = 'scheduled' AND status = 'pending' AND backup_plan_id IS NOT NULL
 				DO NOTHING
 				RETURNING id, organization_id, resource_id, backup_plan_id, trigger_type,
-				          created_by_user_id, backup_type, target_spec, status, created_at, updated_at;
+				          created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at;
 			`
 			inserted := &domain.BackupJob{}
 			var specBytes []byte
@@ -604,6 +809,8 @@ func (r *PostgresBackupRepository) EnqueueScheduledJobAndAdvanceNextRun(
 				currentResID,
 				currentID,
 				currentBackupType,
+				currentEngineType,
+				currentStorageTargetID,
 				targetBytes,
 			)
 			if scanErr := insRow.Scan(
@@ -614,6 +821,8 @@ func (r *PostgresBackupRepository) EnqueueScheduledJobAndAdvanceNextRun(
 				&inserted.TriggerType,
 				&inserted.CreatedByUserID,
 				&inserted.BackupType,
+				&inserted.EngineType,
+				&inserted.StorageTargetID,
 				&specBytes,
 				&inserted.Status,
 				&inserted.CreatedAt,
@@ -670,13 +879,13 @@ func (r *PostgresBackupRepository) CreateJob(ctx context.Context, job *domain.Ba
 	query := `
 		INSERT INTO backup_jobs (
 			id, organization_id, resource_id, backup_plan_id, trigger_type,
-			created_by_user_id, backup_type, target_spec, status, created_at, updated_at
+			created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at
 		) VALUES (
 			$1, $2, $3, $4, $5,
-			$6, $7, $8, $9, NOW(), NOW()
+			$6, $7, $8, $9, $10, 'pending', NOW(), NOW()
 		)
 		RETURNING id, organization_id, resource_id, backup_plan_id, trigger_type,
-		          created_by_user_id, backup_type, target_spec, status, created_at, updated_at;
+		          created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at;
 	`
 	row := q.QueryRow(
 		ctx,
@@ -688,8 +897,9 @@ func (r *PostgresBackupRepository) CreateJob(ctx context.Context, job *domain.Ba
 		job.TriggerType,
 		job.CreatedByUserID,
 		job.BackupType,
+		job.EngineType,
+		job.StorageTargetID,
 		targetSpecJSON,
-		domain.JobStatusPending,
 	)
 
 	created, err := scanBackupJob(row)
@@ -711,7 +921,7 @@ func (r *PostgresBackupRepository) GetJobByID(ctx context.Context, orgID, jobID 
 	q := r.txManager.Querier()
 	query := `
 		SELECT id, organization_id, resource_id, backup_plan_id, trigger_type,
-		       created_by_user_id, backup_type, target_spec, status, created_at, updated_at
+		       created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at
 		FROM backup_jobs
 		WHERE organization_id = $1 AND id = $2;
 	`
@@ -731,7 +941,7 @@ func (r *PostgresBackupRepository) GetActiveManualJobForResource(ctx context.Con
 	q := r.txManager.Querier()
 	query := `
 		SELECT id, organization_id, resource_id, backup_plan_id, trigger_type,
-		       created_by_user_id, backup_type, target_spec, status, created_at, updated_at
+		       created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at
 		FROM backup_jobs
 		WHERE organization_id = $1 AND resource_id = $2 AND trigger_type = 'manual' AND status IN ('pending', 'running')
 		LIMIT 1;
@@ -752,7 +962,7 @@ func (r *PostgresBackupRepository) GetActiveJobConflictForResource(ctx context.C
 	q := r.txManager.Querier()
 	query := `
 		SELECT id, organization_id, resource_id, backup_plan_id, trigger_type,
-		       created_by_user_id, backup_type, target_spec, status, created_at, updated_at
+		       created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at
 		FROM backup_jobs
 		WHERE organization_id = $1 AND resource_id = $2
 		  AND (
@@ -786,7 +996,7 @@ func (r *PostgresBackupRepository) FindPendingJobs(ctx context.Context, limit in
 	if afterCreatedAt == nil || afterID == nil {
 		query := `
 			SELECT id, organization_id, resource_id, backup_plan_id, trigger_type,
-			       created_by_user_id, backup_type, target_spec, status, created_at, updated_at
+			       created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at
 			FROM backup_jobs
 			WHERE status = 'pending'
 			ORDER BY created_at ASC, id ASC
@@ -796,7 +1006,7 @@ func (r *PostgresBackupRepository) FindPendingJobs(ctx context.Context, limit in
 	} else {
 		query := `
 			SELECT id, organization_id, resource_id, backup_plan_id, trigger_type,
-			       created_by_user_id, backup_type, target_spec, status, created_at, updated_at
+			       created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at
 			FROM backup_jobs
 			WHERE status = 'pending'
 			  AND (created_at > $2 OR (created_at = $2 AND id > $3))
@@ -840,7 +1050,7 @@ func (r *PostgresBackupRepository) TransactionalClaimJob(ctx context.Context, or
 			SET status = 'running', updated_at = NOW()
 			WHERE id = $1 AND organization_id = $2 AND status = 'pending'
 			RETURNING id, organization_id, resource_id, backup_plan_id, trigger_type,
-			          created_by_user_id, backup_type, target_spec, status, created_at, updated_at;
+			          created_by_user_id, backup_type, engine_type, storage_target_id, target_spec, status, created_at, updated_at;
 		`
 		jobRow := tx.QueryRow(ctx, updateJobQuery, jobID, orgID)
 		var scanErr error
@@ -1569,6 +1779,8 @@ func scanBackupJob(s scannable) (*domain.BackupJob, error) {
 		&j.TriggerType,
 		&rawUserID,
 		&j.BackupType,
+		&j.EngineType,
+		&j.StorageTargetID,
 		&targetSpecBytes,
 		&j.Status,
 		&j.CreatedAt,

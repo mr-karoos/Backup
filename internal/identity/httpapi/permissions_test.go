@@ -21,6 +21,8 @@ func TestPermissionsForRole(t *testing.T) {
 			"backup_artifact:download",
 			"backup_artifact:delete",
 			"audit_log:read",
+			"storage_target:read",
+			"storage_target:write",
 		}
 		if len(perms) != len(expected) {
 			t.Fatalf("expected %d admin perms, got %d", len(expected), len(perms))
@@ -40,6 +42,7 @@ func TestPermissionsForRole(t *testing.T) {
 			"backup_job:execute",
 			"backup_run:verify",
 			"backup_artifact:download",
+			"storage_target:read",
 		}
 		if len(perms) != len(expected) {
 			t.Fatalf("expected %d member perms, got %d", len(expected), len(perms))
@@ -56,6 +59,7 @@ func TestPermissionsForRole(t *testing.T) {
 			"backup_plan:write",
 			"backup_artifact:delete",
 			"audit_log:read",
+			"storage_target:write",
 			"restore:execute",
 		}
 		for _, f := range forbiddenForMember {
@@ -70,6 +74,7 @@ func TestPermissionsForRole(t *testing.T) {
 		expected := []string{
 			"resource:read",
 			"backup_plan:read",
+			"storage_target:read",
 		}
 		if len(perms) != len(expected) {
 			t.Fatalf("expected %d viewer perms, got %d", len(expected), len(perms))

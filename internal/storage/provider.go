@@ -45,3 +45,8 @@ type StorageProvider interface {
 type TemporaryArtifactCleaner interface {
 	CleanOrphanTemporaryArtifacts(ctx context.Context) (int, error)
 }
+
+// StorageProviderResolver specifies the resolution contract to obtain a StorageProvider for a target ID.
+type StorageProviderResolver interface {
+	Resolve(ctx context.Context, orgID, targetID uuid.UUID) (StorageProvider, error)
+}

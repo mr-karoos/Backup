@@ -638,8 +638,8 @@ func TestHandler_Me(t *testing.T) {
 	if m.OrganizationSlug != "test-org" || m.Role != "admin" {
 		t.Errorf("unexpected membership details: %+v", m)
 	}
-	if len(m.Permissions) != 10 {
-		t.Errorf("expected 10 canonical permissions attached for admin role, got %d", len(m.Permissions))
+	if len(m.Permissions) != 12 {
+		t.Errorf("expected 12 canonical permissions attached for admin role, got %d", len(m.Permissions))
 	}
 }
 

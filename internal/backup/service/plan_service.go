@@ -43,6 +43,8 @@ type CreatePlanInput struct {
 	Name              string                  `json:"name"`
 	ResourceID        uuid.UUID               `json:"resource_id"`
 	BackupType        domain.BackupType       `json:"backup_type"`
+	EngineType        *domain.EngineType      `json:"engine_type,omitempty"`
+	StorageTargetID   *uuid.UUID              `json:"storage_target_id,omitempty"`
 	DatabaseSelection *DatabaseSelectionInput `json:"database_selection,omitempty"`
 	FileSelection     *FileSelectionInput     `json:"file_selection,omitempty"`
 	Schedule          ScheduleInput           `json:"schedule"`
@@ -52,6 +54,8 @@ type CreatePlanInput struct {
 // UpdatePlanInput encapsulates parameters for updating an existing BackupPlan.
 type UpdatePlanInput struct {
 	Name              string                  `json:"name"`
+	EngineType        *domain.EngineType      `json:"engine_type,omitempty"`
+	StorageTargetID   *uuid.UUID              `json:"storage_target_id,omitempty"`
 	DatabaseSelection *DatabaseSelectionInput `json:"database_selection,omitempty"`
 	FileSelection     *FileSelectionInput     `json:"file_selection,omitempty"`
 	Schedule          ScheduleInput           `json:"schedule"`
@@ -61,18 +65,28 @@ type UpdatePlanInput struct {
 
 // BackupPlanService coordinates business logic, authorization, validation, and persistence for backup plans.
 type BackupPlanService struct {
-	repo           repository.BackupPlanRepository
-	resourceFinder ResourceFinder
-	nowFunc        func() time.Time
+	repo              repository.BackupPlanRepository
+	storageTargetRepo repository.StorageTargetRepository
+	resourceFinder    ResourceFinder
+	nowFunc           func() time.Time
 }
 
 // NewBackupPlanService constructs a new BackupPlanService.
 func NewBackupPlanService(repo repository.BackupPlanRepository, resourceFinder ResourceFinder) *BackupPlanService {
-	return &BackupPlanService{
+	svc := &BackupPlanService{
 		repo:           repo,
 		resourceFinder: resourceFinder,
 		nowFunc:        time.Now,
 	}
+	if stRepo, ok := repo.(repository.StorageTargetRepository); ok {
+		svc.storageTargetRepo = stRepo
+	}
+	return svc
+}
+
+// SetStorageTargetRepository configures a dedicated storage target repository if not already provided.
+func (s *BackupPlanService) SetStorageTargetRepository(stRepo repository.StorageTargetRepository) {
+	s.storageTargetRepo = stRepo
 }
 
 // SetNowFunc sets the custom time supplier for testing.
@@ -148,13 +162,51 @@ func (s *BackupPlanService) CreatePlan(
 		retentionDays = input.RetentionPolicy.KeepDays
 	}
 
-	// 7. Construct and persist plan
+	// 7. Validate and Resolve EngineType
+	engineType := domain.EngineTypeDirectStream
+	if input.EngineType != nil {
+		if err := domain.ValidateEngineType(*input.EngineType); err != nil {
+			return nil, err
+		}
+		engineType = *input.EngineType
+	}
+
+	// 8. Validate and Resolve StorageTarget
+	var storageTargetID uuid.UUID
+	if input.StorageTargetID != nil && *input.StorageTargetID != uuid.Nil {
+		storageTargetID = *input.StorageTargetID
+		if s.storageTargetRepo != nil {
+			target, err := s.storageTargetRepo.GetStorageTargetByID(ctx, orgID, storageTargetID)
+			if err != nil {
+				if errors.Is(err, domain.ErrStorageTargetNotFound) || errors.Is(err, domain.ErrStorageTargetNotSupported) {
+					return nil, domain.ErrStorageTargetNotFound
+				}
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+			if target.Status != domain.StorageTargetStatusActive {
+				return nil, domain.ErrStorageTargetNotActive
+			}
+			if !domain.IsEngineCompatibleWithStorage(engineType, target.Type) {
+				return nil, domain.ErrIncompatibleEngineStorage
+			}
+		}
+	} else if s.storageTargetRepo != nil {
+		defaultTarget, err := s.storageTargetRepo.EnsureDefaultLocalStorageTarget(ctx, orgID)
+		if err != nil {
+			return nil, domain.ErrBackupServiceUnavailable
+		}
+		storageTargetID = defaultTarget.ID
+	}
+
+	// 9. Construct and persist plan
 	plan := &domain.BackupPlan{
 		ID:                uuid.New(),
 		OrganizationID:    orgID,
 		ResourceID:        input.ResourceID,
 		Name:              trimmedName,
 		BackupType:        input.BackupType,
+		EngineType:        engineType,
+		StorageTargetID:   storageTargetID,
 		TargetSpec:        *targetSpec,
 		ScheduleCron:      scheduleCron,
 		ScheduleTimezone:  scheduleTimezone,
@@ -247,12 +299,51 @@ func (s *BackupPlanService) UpdatePlan(
 		retentionDays = input.RetentionPolicy.KeepDays
 	}
 
+	// 7. Validate and Update EngineType
+	engineType := existing.EngineType
+	if input.EngineType != nil {
+		if err := domain.ValidateEngineType(*input.EngineType); err != nil {
+			return nil, err
+		}
+		engineType = *input.EngineType
+	}
+
+	// 8. Validate and Update StorageTarget
+	storageTargetID := existing.StorageTargetID
+	if input.StorageTargetID != nil && *input.StorageTargetID != uuid.Nil {
+		storageTargetID = *input.StorageTargetID
+		if s.storageTargetRepo != nil {
+			target, err := s.storageTargetRepo.GetStorageTargetByID(ctx, orgID, storageTargetID)
+			if err != nil {
+				if errors.Is(err, domain.ErrStorageTargetNotFound) || errors.Is(err, domain.ErrStorageTargetNotSupported) {
+					return nil, domain.ErrStorageTargetNotFound
+				}
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+			if target.Status != domain.StorageTargetStatusActive {
+				return nil, domain.ErrStorageTargetNotActive
+			}
+			if !domain.IsEngineCompatibleWithStorage(engineType, target.Type) {
+				return nil, domain.ErrIncompatibleEngineStorage
+			}
+		}
+	} else if s.storageTargetRepo != nil && storageTargetID != uuid.Nil {
+		target, err := s.storageTargetRepo.GetStorageTargetByID(ctx, orgID, storageTargetID)
+		if err == nil && target != nil {
+			if !domain.IsEngineCompatibleWithStorage(engineType, target.Type) {
+				return nil, domain.ErrIncompatibleEngineStorage
+			}
+		}
+	}
+
 	updatedPlan := &domain.BackupPlan{
 		ID:                existing.ID,
 		OrganizationID:    orgID,
 		ResourceID:        existing.ResourceID,
 		Name:              trimmedName,
 		BackupType:        existing.BackupType,
+		EngineType:        engineType,
+		StorageTargetID:   storageTargetID,
 		TargetSpec:        *targetSpec,
 		ScheduleCron:      scheduleCron,
 		ScheduleTimezone:  scheduleTimezone,

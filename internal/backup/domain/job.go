@@ -34,6 +34,8 @@ type BackupJob struct {
 	TriggerType     TriggerType
 	CreatedByUserID *uuid.UUID
 	BackupType      BackupType
+	EngineType      EngineType
+	StorageTargetID uuid.UUID
 	TargetSpec      TargetSpec
 	Status          JobStatus
 	CreatedAt       time.Time

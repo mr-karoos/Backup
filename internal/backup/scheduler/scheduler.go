@@ -131,14 +131,16 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) (int, error) {
 			}
 
 			jobToInsert := &domain.BackupJob{
-				ID:             uuid.New(),
-				OrganizationID: plan.OrganizationID,
-				ResourceID:     plan.ResourceID,
-				BackupPlanID:   &plan.ID,
-				TriggerType:    domain.TriggerTypeScheduled,
-				BackupType:     plan.BackupType,
-				TargetSpec:     plan.TargetSpec,
-				Status:         domain.JobStatusPending,
+				ID:              uuid.New(),
+				OrganizationID:  plan.OrganizationID,
+				ResourceID:      plan.ResourceID,
+				BackupPlanID:    &plan.ID,
+				TriggerType:     domain.TriggerTypeScheduled,
+				BackupType:      plan.BackupType,
+				EngineType:      plan.EngineType,
+				StorageTargetID: plan.StorageTargetID,
+				TargetSpec:      plan.TargetSpec,
+				Status:          domain.JobStatusPending,
 			}
 
 			enqueued, err := s.repo.EnqueueScheduledJobAndAdvanceNextRun(ctx, plan.ID, plan.UpdatedAt, jobToInsert, newNextRunAt)

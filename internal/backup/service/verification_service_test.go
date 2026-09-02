@@ -138,6 +138,27 @@ func (m *mockVerificationRepo) RecoverInterruptedRuns(ctx context.Context) ([]do
 func (m *mockVerificationRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
 	return nil, nil
 }
+func (m *mockVerificationRepo) CreateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) ListStorageTargets(ctx context.Context, orgID uuid.UUID) ([]*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) UpdateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) DeleteStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) error {
+	return nil
+}
+func (m *mockVerificationRepo) CountArtifactsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (m *mockVerificationRepo) CountPlansByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (m *mockVerificationRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
 
 var _ repository.BackupRepository = (*mockVerificationRepo)(nil)
 

@@ -44,6 +44,7 @@ type CleanupSummary struct {
 type Processor struct {
 	repo            PlanAndRunRepository
 	storageProvider StorageProvider
+	storageResolver storage.StorageProviderResolver
 	auditRecorder   AuditRecorder
 	logger          *slog.Logger
 	nowFunc         func() time.Time
@@ -66,6 +67,11 @@ func NewProcessor(
 		logger:          logger,
 		nowFunc:         time.Now,
 	}
+}
+
+// SetStorageResolver configures a dynamic storage provider resolver.
+func (p *Processor) SetStorageResolver(resolver storage.StorageProviderResolver) {
+	p.storageResolver = resolver
 }
 
 // SetNowFunc injects a custom clock supplier for deterministic unit and integration testing.
@@ -178,7 +184,7 @@ func (p *Processor) ApplyAfterSuccessfulRun(
 	}
 
 	// Fail closed: Mandatory operational dependencies must be present before executing cleanup
-	if p.storageProvider == nil {
+	if p.storageProvider == nil && p.storageResolver == nil {
 		p.logger.Error("storage provider dependency is missing; aborting retention cleanup",
 			slog.String("org_id", orgID.String()),
 			slog.String("plan_id", planID.String()),
@@ -211,8 +217,31 @@ func (p *Processor) ApplyAfterSuccessfulRun(
 
 			summary.ArtifactsAttempted++
 
+			storeProvider := p.storageProvider
+			if p.storageResolver != nil && art.StorageTargetID != uuid.Nil {
+				resolved, err := p.storageResolver.Resolve(ctx, orgID, art.StorageTargetID)
+				if err != nil {
+					p.logger.Warn("failed resolving storage provider during retention cleanup",
+						slog.String("org_id", orgID.String()),
+						slog.String("artifact_id", art.ID.String()),
+						slog.String("target_id", art.StorageTargetID.String()),
+						slog.String("error", err.Error()),
+					)
+					continue
+				}
+				storeProvider = resolved
+			}
+
+			if storeProvider == nil {
+				p.logger.Warn("no storage provider available for artifact retention deletion",
+					slog.String("org_id", orgID.String()),
+					slog.String("artifact_id", art.ID.String()),
+				)
+				continue
+			}
+
 			// 1. Physical file deletion first
-			delErr := p.storageProvider.DeleteArtifact(ctx, art.StorageReference)
+			delErr := storeProvider.DeleteArtifact(ctx, art.StorageReference)
 			if delErr != nil && !errors.Is(delErr, storage.ErrArtifactNotFound) {
 				p.logger.Warn("failed to delete artifact physical file during retention",
 					slog.String("org_id", orgID.String()),

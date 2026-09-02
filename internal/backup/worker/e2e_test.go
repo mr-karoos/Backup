@@ -309,6 +309,27 @@ func (r *memoryBackupRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain
 func (r *memoryBackupRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
 	return nil, nil
 }
+func (r *memoryBackupRepo) CreateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (r *memoryBackupRepo) ListStorageTargets(ctx context.Context, orgID uuid.UUID) ([]*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (r *memoryBackupRepo) UpdateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (r *memoryBackupRepo) DeleteStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) error {
+	return nil
+}
+func (r *memoryBackupRepo) CountArtifactsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (r *memoryBackupRepo) CountPlansByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (r *memoryBackupRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
 
 type memoryResourceFinder struct {
 	resWithConn *resDomain.ResourceWithConnector

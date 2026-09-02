@@ -463,4 +463,49 @@ func TestConfig_ValidateDirect(t *testing.T) {
 			t.Errorf("expected version validation error, got: %v", err)
 		}
 	})
+
+	t.Run("s3 insecure endpoints rejected in production and staging", func(t *testing.T) {
+		c := validCfg
+		c.AppEnv = EnvProduction
+		c.AuthCookieSecure = true
+		c.S3AllowInsecureEndpoints = true
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "S3_ALLOW_INSECURE_ENDPOINTS cannot be true in production and staging environments") {
+			t.Errorf("expected rejection of insecure S3 endpoints in production, got: %v", err)
+		}
+
+		c.AppEnv = EnvStaging
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "S3_ALLOW_INSECURE_ENDPOINTS cannot be true in production and staging environments") {
+			t.Errorf("expected rejection of insecure S3 endpoints in staging, got: %v", err)
+		}
+
+		c.AppEnv = EnvDevelopment
+		if err := c.Validate(); err != nil {
+			t.Errorf("expected insecure S3 endpoints allowed in development, got: %v", err)
+		}
+	})
+}
+
+func TestConfig_S3EnvironmentLoading(t *testing.T) {
+	setValidRequiredSecrets(t)
+	t.Setenv("S3_ALLOW_INSECURE_ENDPOINTS", "true")
+	t.Setenv("S3_PRIVATE_ENDPOINTS_ALLOWLIST", "10.0.0.0/8, minio.local , 192.168.1.50")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected load error: %v", err)
+	}
+
+	if !cfg.S3AllowInsecureEndpoints {
+		t.Errorf("expected S3AllowInsecureEndpoints = true")
+	}
+
+	expectedAllowlist := []string{"10.0.0.0/8", "minio.local", "192.168.1.50"}
+	if len(cfg.S3PrivateEndpointsAllowlist) != len(expectedAllowlist) {
+		t.Fatalf("expected %d allowlist entries, got %d", len(expectedAllowlist), len(cfg.S3PrivateEndpointsAllowlist))
+	}
+	for i, v := range expectedAllowlist {
+		if cfg.S3PrivateEndpointsAllowlist[i] != v {
+			t.Errorf("expected allowlist[%d] = %s, got %s", i, v, cfg.S3PrivateEndpointsAllowlist[i])
+		}
+	}
 }

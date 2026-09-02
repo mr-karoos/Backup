@@ -27,6 +27,26 @@ const (
 	BackupTypeBoth          BackupType = "both"
 )
 
+// EngineType represents the concrete backup engine used for artifact generation.
+type EngineType string
+
+const (
+	EngineTypeDirectStream EngineType = "direct_stream"
+)
+
+// IsValid checks whether the engine type is supported in this release.
+func (e EngineType) IsValid() bool {
+	return e == EngineTypeDirectStream
+}
+
+// ValidateEngineType verifies that the engine type is supported.
+func ValidateEngineType(e EngineType) error {
+	if !e.IsValid() {
+		return ErrUnsupportedEngineType
+	}
+	return nil
+}
+
 // BackupPlan represents a scheduled or manual policy for resource backups.
 type BackupPlan struct {
 	ID                uuid.UUID
@@ -34,6 +54,8 @@ type BackupPlan struct {
 	ResourceID        uuid.UUID
 	Name              string
 	BackupType        BackupType
+	EngineType        EngineType
+	StorageTargetID   uuid.UUID
 	TargetSpec        TargetSpec
 	ScheduleCron      *string
 	ScheduleTimezone  string

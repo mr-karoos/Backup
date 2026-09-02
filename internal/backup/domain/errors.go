@@ -101,4 +101,37 @@ var (
 
 	// ErrNoVerifiableArtifacts indicates that no active, non-deleted artifacts exist for the requested backup run.
 	ErrNoVerifiableArtifacts = errors.New("no verifiable backup artifacts found for run")
+
+	// ErrUnsupportedEngineType indicates that the requested backup engine type is unsupported.
+	ErrUnsupportedEngineType = errors.New("unsupported backup engine type")
+
+	// ErrStorageTargetNotFound indicates that the storage target does not exist in the organization.
+	ErrStorageTargetNotFound = errors.New("storage target not found")
+
+	// ErrStorageTargetNotActive indicates that the storage target is disabled or archived.
+	ErrStorageTargetNotActive = errors.New("storage target is not active")
+
+	// ErrStorageTargetLocationImmutable indicates that S3 location fields cannot be changed once artifacts exist.
+	ErrStorageTargetLocationImmutable = errors.New("storage target location cannot be modified while historical artifacts exist")
+
+	// ErrCannotDeleteDefaultStorageTarget indicates that the organization default storage target cannot be deleted or archived.
+	ErrCannotDeleteDefaultStorageTarget = errors.New("cannot delete or archive default storage target")
+
+	// ErrStorageTargetInUse indicates that the storage target cannot be deleted because it is in use.
+	ErrStorageTargetInUse = errors.New("storage target is referenced by backup plans or historical artifacts")
+
+	// ErrPlanOverrideForbidden indicates that a manual job referencing a plan cannot override engine or storage target.
+	ErrPlanOverrideForbidden = errors.New("cannot override engine_type or storage_target_id when triggering a plan-based job")
+
+	// ErrInvalidStorageTargetName indicates that the target name is invalid.
+	ErrInvalidStorageTargetName = errors.New("storage target name must be between 1 and 100 characters")
+
+	// ErrInvalidStorageTargetConfig indicates that the target configuration is invalid.
+	ErrInvalidStorageTargetConfig = errors.New("invalid storage target configuration")
+
+	// ErrStorageTargetCredentialRequired indicates that credentials are required for S3 storage targets.
+	ErrStorageTargetCredentialRequired = errors.New("credential is required for s3 storage target")
+
+	// ErrIncompatibleEngineStorage indicates that the selected engine cannot store artifacts to the selected target type.
+	ErrIncompatibleEngineStorage = errors.New("incompatible engine and storage target type")
 )

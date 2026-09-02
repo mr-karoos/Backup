@@ -18,10 +18,11 @@ import (
 
 // ArtifactService coordinates artifact queries, authorized streaming downloads, and physical deletions.
 type ArtifactService struct {
-	repo          repository.BackupRepository
-	storage       storage.StorageProvider
-	auditRecorder auditService.AuditRecorder
-	logger        *slog.Logger
+	repo            repository.BackupRepository
+	storage         storage.StorageProvider
+	storageResolver storage.StorageProviderResolver
+	auditRecorder   auditService.AuditRecorder
+	logger          *slog.Logger
 }
 
 // NewArtifactService constructs a new ArtifactService.
@@ -40,6 +41,21 @@ func NewArtifactService(
 		auditRecorder: auditRecorder,
 		logger:        logger,
 	}
+}
+
+// SetStorageResolver configures a dynamic storage provider resolver.
+func (s *ArtifactService) SetStorageResolver(resolver storage.StorageProviderResolver) {
+	s.storageResolver = resolver
+}
+
+func (s *ArtifactService) resolveStorageProvider(ctx context.Context, orgID, targetID uuid.UUID) (storage.StorageProvider, error) {
+	if s.storageResolver != nil && targetID != uuid.Nil {
+		return s.storageResolver.Resolve(ctx, orgID, targetID)
+	}
+	if s.storage != nil {
+		return s.storage, nil
+	}
+	return nil, errors.New("no storage provider configured")
 }
 
 // ListArtifacts returns all active (non-deleted) artifacts for an organization.
@@ -118,7 +134,12 @@ func (s *ArtifactService) OpenArtifactDownload(
 	}
 
 	// 4. Open artifact stream from StorageProvider
-	reader, err := s.storage.OpenArtifact(ctx, artifact.StorageReference)
+	provider, err := s.resolveStorageProvider(ctx, orgID, artifact.StorageTargetID)
+	if err != nil {
+		s.logger.Error("failed resolving storage provider for artifact download", slog.String("target_id", artifact.StorageTargetID.String()), slog.String("error", err.Error()))
+		return nil, nil, domain.ErrBackupServiceUnavailable
+	}
+	reader, err := provider.OpenArtifact(ctx, artifact.StorageReference)
 	if err != nil {
 		s.logger.Error("failed opening physical artifact for download")
 		if errors.Is(err, storage.ErrArtifactNotFound) {
@@ -209,7 +230,12 @@ func (s *ArtifactService) DeleteArtifact(
 	}
 
 	// 4. Physical Deletion First: delete bytes from storage provider
-	if err := s.storage.DeleteArtifact(ctx, artifact.StorageReference); err != nil {
+	provider, err := s.resolveStorageProvider(ctx, orgID, artifact.StorageTargetID)
+	if err != nil {
+		s.logger.Error("failed resolving storage provider for artifact deletion", slog.String("target_id", artifact.StorageTargetID.String()), slog.String("error", err.Error()))
+		return domain.ErrArtifactDeleteFailed
+	}
+	if err := provider.DeleteArtifact(ctx, artifact.StorageReference); err != nil {
 		s.logger.Error("physical artifact deletion failed")
 		// Do NOT tombstone database record if physical delete failed!
 		return domain.ErrArtifactDeleteFailed

@@ -15,6 +15,7 @@ import (
 type mockBackupRepo struct {
 	plans             map[uuid.UUID]*domain.BackupPlan
 	jobs              map[uuid.UUID]*domain.BackupJob
+	targets           map[uuid.UUID]*domain.StorageTarget
 	activeJobConflict *domain.BackupJob
 	storageTarget     *domain.StorageTarget
 	storageTargetErr  error
@@ -31,7 +32,12 @@ func (m *mockBackupRepo) EnsureDefaultLocalStorageTarget(ctx context.Context, or
 	return &domain.StorageTarget{ID: uuid.New(), OrganizationID: orgID, Type: domain.StorageTargetTypeLocal, Status: domain.StorageTargetStatusActive, IsDefault: true}, nil
 }
 func (m *mockBackupRepo) GetStorageTargetByID(ctx context.Context, orgID, targetID uuid.UUID) (*domain.StorageTarget, error) {
-	return nil, nil
+	if m.targets != nil {
+		if t, ok := m.targets[targetID]; ok && t.OrganizationID == orgID {
+			return t, nil
+		}
+	}
+	return nil, domain.ErrStorageTargetNotFound
 }
 func (m *mockBackupRepo) GetPlanByID(ctx context.Context, orgID, planID uuid.UUID) (*domain.BackupPlan, error) {
 	if p, ok := m.plans[planID]; ok && p.OrganizationID == orgID {
@@ -108,6 +114,31 @@ func (m *mockBackupRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.R
 }
 func (m *mockBackupRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
 	return nil, nil
+}
+func (m *mockBackupRepo) CreateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	if m.targets == nil {
+		m.targets = make(map[uuid.UUID]*domain.StorageTarget)
+	}
+	m.targets[target.ID] = target
+	return target, nil
+}
+func (m *mockBackupRepo) ListStorageTargets(ctx context.Context, orgID uuid.UUID) ([]*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockBackupRepo) UpdateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockBackupRepo) DeleteStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) error {
+	return nil
+}
+func (m *mockBackupRepo) CountArtifactsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (m *mockBackupRepo) CountPlansByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (m *mockBackupRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
 }
 
 type mockResourceFinder struct {
@@ -458,6 +489,118 @@ func TestBackupJobService_CreateManualJob(t *testing.T) {
 		}
 		if len(job.TargetSpec.Databases) != 0 {
 			t.Errorf("expected empty databases (mode all) for job, got %v", job.TargetSpec.Databases)
+		}
+	})
+
+	t.Run("Plan-triggered job inherits engine_type and storage_target_id", func(t *testing.T) {
+		planID := uuid.New()
+		customTargetID := uuid.New()
+		emptyExclude := []string{}
+		plan := &domain.BackupPlan{
+			ID:              planID,
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			Name:            "S3 Plan",
+			BackupType:      domain.BackupTypeWebsiteFiles,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: customTargetID,
+			TargetSpec:      domain.TargetSpec{Paths: []string{"/var/www"}, ExcludePatterns: &emptyExclude},
+			Status:          domain.PlanStatusActive,
+		}
+
+		repo := &mockBackupRepo{
+			jobs:  make(map[uuid.UUID]*domain.BackupJob),
+			plans: map[uuid.UUID]*domain.BackupPlan{planID: plan},
+		}
+		rf := &mockResourceFinder{resources: map[uuid.UUID]*resDomain.Resource{resID: activeResource}}
+		svc := NewBackupJobService(repo, rf)
+
+		input := CreateManualJobInput{
+			BackupPlanID: &planID,
+		}
+
+		job, err := svc.CreateManualJob(ctx, orgDomain.RoleMember, orgID, userID, input)
+		if err != nil {
+			t.Fatalf("unexpected error creating plan-triggered job: %v", err)
+		}
+		if job.EngineType != domain.EngineTypeDirectStream {
+			t.Fatalf("expected EngineType %s, got %s", domain.EngineTypeDirectStream, job.EngineType)
+		}
+		if job.StorageTargetID != customTargetID {
+			t.Fatalf("expected StorageTargetID %s, got %s", customTargetID, job.StorageTargetID)
+		}
+	})
+
+	t.Run("Plan-triggered job with engine_type override is rejected with ErrPlanOverrideForbidden", func(t *testing.T) {
+		planID := uuid.New()
+		emptyExclude := []string{}
+		plan := &domain.BackupPlan{
+			ID:              planID,
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			Name:            "Standard Plan",
+			BackupType:      domain.BackupTypeWebsiteFiles,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: uuid.New(),
+			TargetSpec:      domain.TargetSpec{Paths: []string{"/var/www"}, ExcludePatterns: &emptyExclude},
+			Status:          domain.PlanStatusActive,
+		}
+
+		repo := &mockBackupRepo{
+			jobs:  make(map[uuid.UUID]*domain.BackupJob),
+			plans: map[uuid.UUID]*domain.BackupPlan{planID: plan},
+		}
+		rf := &mockResourceFinder{resources: map[uuid.UUID]*resDomain.Resource{resID: activeResource}}
+		svc := NewBackupJobService(repo, rf)
+
+		eng := domain.EngineTypeDirectStream
+		input := CreateManualJobInput{
+			BackupPlanID: &planID,
+			EngineType:   &eng,
+		}
+
+		_, err := svc.CreateManualJob(ctx, orgDomain.RoleMember, orgID, userID, input)
+		if !errors.Is(err, domain.ErrPlanOverrideForbidden) {
+			t.Fatalf("expected ErrPlanOverrideForbidden, got %v", err)
+		}
+	})
+
+	t.Run("Ad-hoc job with custom S3 storage target succeeds", func(t *testing.T) {
+		customTargetID := uuid.New()
+		target := &domain.StorageTarget{
+			ID:             customTargetID,
+			OrganizationID: orgID,
+			Name:           "Custom S3",
+			Type:           domain.StorageTargetTypeS3,
+			Status:         domain.StorageTargetStatusActive,
+		}
+
+		repo := &mockBackupRepo{
+			jobs: make(map[uuid.UUID]*domain.BackupJob),
+		}
+		repo.CreateStorageTarget(ctx, target)
+		rf := &mockResourceFinder{resources: map[uuid.UUID]*resDomain.Resource{resID: activeResource}}
+		svc := NewBackupJobService(repo, rf)
+
+		eng := domain.EngineTypeDirectStream
+		emptyExclude := []string{}
+		input := CreateManualJobInput{
+			ResourceID:      &resID,
+			BackupType:      domain.BackupTypeWebsiteFiles,
+			EngineType:      &eng,
+			StorageTargetID: &customTargetID,
+			TargetSpec:      &domain.TargetSpec{Paths: []string{"/var/www"}, ExcludePatterns: &emptyExclude},
+		}
+
+		job, err := svc.CreateManualJob(ctx, orgDomain.RoleAdmin, orgID, userID, input)
+		if err != nil {
+			t.Fatalf("unexpected error creating ad-hoc S3 job: %v", err)
+		}
+		if job.StorageTargetID != customTargetID {
+			t.Fatalf("expected StorageTargetID %s, got %s", customTargetID, job.StorageTargetID)
+		}
+		if job.EngineType != domain.EngineTypeDirectStream {
+			t.Fatalf("expected EngineType %s, got %s", domain.EngineTypeDirectStream, job.EngineType)
 		}
 	})
 }

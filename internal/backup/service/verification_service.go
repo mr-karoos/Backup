@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -33,11 +34,12 @@ type RunVerificationResult struct {
 
 // VerificationService coordinates on-demand verification of backup runs and their artifacts.
 type VerificationService struct {
-	repo     repository.BackupRepository
-	storage  storage.StorageProvider
-	verifier verification.Verifier
-	logger   *slog.Logger
-	nowFunc  func() time.Time
+	repo            repository.BackupRepository
+	storage         storage.StorageProvider
+	storageResolver storage.StorageProviderResolver
+	verifier        verification.Verifier
+	logger          *slog.Logger
+	nowFunc         func() time.Time
 }
 
 // NewVerificationService constructs a new VerificationService.
@@ -57,6 +59,21 @@ func NewVerificationService(
 		logger:   logger,
 		nowFunc:  time.Now,
 	}
+}
+
+// SetStorageResolver configures a dynamic storage provider resolver.
+func (s *VerificationService) SetStorageResolver(resolver storage.StorageProviderResolver) {
+	s.storageResolver = resolver
+}
+
+func (s *VerificationService) resolveStorageProvider(ctx context.Context, orgID, targetID uuid.UUID) (storage.StorageProvider, error) {
+	if s.storageResolver != nil && targetID != uuid.Nil {
+		return s.storageResolver.Resolve(ctx, orgID, targetID)
+	}
+	if s.storage != nil {
+		return s.storage, nil
+	}
+	return nil, errors.New("no storage provider configured")
 }
 
 // SetNowFunc overrides the clock for deterministic testing.
@@ -80,7 +97,7 @@ func (s *VerificationService) VerifyRun(
 	}
 
 	// 2. Fail closed on uninitialized core dependencies
-	if s.repo == nil || s.storage == nil || s.verifier == nil {
+	if s.repo == nil || (s.storage == nil && s.storageResolver == nil) || s.verifier == nil {
 		s.logger.Error("verification service dependencies not initialized")
 		return nil, domain.ErrBackupServiceUnavailable
 	}
@@ -138,42 +155,47 @@ func (s *VerificationService) VerifyRun(
 		var verMsg string
 		var verErr error
 
-		switch art.Format {
-		case domain.ArtifactFormatSQLGzip:
-			verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
-				ctx,
-				s.storage,
-				art.StorageReference,
-				art.SizeBytes,
-				art.ChecksumHash,
-			)
-		case domain.ArtifactFormatTarGzip:
-			verMsg, verErr = s.verifier.VerifyFilesArtifact(
-				ctx,
-				s.storage,
-				art.StorageReference,
-				art.SizeBytes,
-				art.ChecksumHash,
-			)
-		default:
-			if art.ArtifactType == domain.ArtifactTypeDatabaseDump {
+		storeProvider, err := s.resolveStorageProvider(ctx, art.OrganizationID, art.StorageTargetID)
+		if err != nil {
+			verErr = fmt.Errorf("failed resolving storage provider: %w", err)
+		} else {
+			switch art.Format {
+			case domain.ArtifactFormatSQLGzip:
 				verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
 					ctx,
-					s.storage,
+					storeProvider,
 					art.StorageReference,
 					art.SizeBytes,
 					art.ChecksumHash,
 				)
-			} else if art.ArtifactType == domain.ArtifactTypeFilesArchive {
+			case domain.ArtifactFormatTarGzip:
 				verMsg, verErr = s.verifier.VerifyFilesArtifact(
 					ctx,
-					s.storage,
+					storeProvider,
 					art.StorageReference,
 					art.SizeBytes,
 					art.ChecksumHash,
 				)
-			} else {
-				verErr = errors.New("unsupported artifact format for verification")
+			default:
+				if art.ArtifactType == domain.ArtifactTypeDatabaseDump {
+					verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
+						ctx,
+						storeProvider,
+						art.StorageReference,
+						art.SizeBytes,
+						art.ChecksumHash,
+					)
+				} else if art.ArtifactType == domain.ArtifactTypeFilesArchive {
+					verMsg, verErr = s.verifier.VerifyFilesArtifact(
+						ctx,
+						storeProvider,
+						art.StorageReference,
+						art.SizeBytes,
+						art.ChecksumHash,
+					)
+				} else {
+					verErr = errors.New("unsupported artifact format for verification")
+				}
 			}
 		}
 

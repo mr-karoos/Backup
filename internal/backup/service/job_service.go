@@ -18,10 +18,12 @@ type ResourceFinder interface {
 
 // CreateManualJobInput encapsulates the parameters for creating a manual backup job.
 type CreateManualJobInput struct {
-	BackupPlanID *uuid.UUID         `json:"backup_plan_id,omitempty"`
-	ResourceID   *uuid.UUID         `json:"resource_id,omitempty"`
-	BackupType   domain.BackupType  `json:"backup_type,omitempty"`
-	TargetSpec   *domain.TargetSpec `json:"target_spec,omitempty"`
+	BackupPlanID    *uuid.UUID         `json:"backup_plan_id,omitempty"`
+	ResourceID      *uuid.UUID         `json:"resource_id,omitempty"`
+	BackupType      domain.BackupType  `json:"backup_type,omitempty"`
+	EngineType      *domain.EngineType `json:"engine_type,omitempty"`
+	StorageTargetID *uuid.UUID         `json:"storage_target_id,omitempty"`
+	TargetSpec      *domain.TargetSpec `json:"target_spec,omitempty"`
 }
 
 // BackupJobService coordinates the business logic for creating and managing backup jobs.
@@ -53,10 +55,17 @@ func (s *BackupJobService) CreateManualJob(
 
 	var targetResourceID uuid.UUID
 	var targetBackupType domain.BackupType
+	var targetEngineType domain.EngineType
+	var targetStorageTargetID uuid.UUID
 	var targetSpec domain.TargetSpec
 
 	if input.BackupPlanID != nil {
 		// --- Case 1: Plan-Triggered Backup Job ---
+		// Override of engine_type or storage_target_id on a plan-backed job is strictly forbidden
+		if input.EngineType != nil || input.StorageTargetID != nil {
+			return nil, domain.ErrPlanOverrideForbidden
+		}
+
 		// Disallow mixing plan ID with ad-hoc fields
 		if input.ResourceID != nil || input.BackupType != "" || input.TargetSpec != nil {
 			return nil, domain.ErrInvalidTargetSpec
@@ -84,6 +93,8 @@ func (s *BackupJobService) CreateManualJob(
 
 		targetResourceID = plan.ResourceID
 		targetBackupType = plan.BackupType
+		targetEngineType = plan.EngineType
+		targetStorageTargetID = plan.StorageTargetID
 		targetSpec = *normalizedSpec
 	} else {
 		// --- Case 2: Ad-Hoc Manual Backup Job ---
@@ -104,6 +115,47 @@ func (s *BackupJobService) CreateManualJob(
 		}
 		if input.BackupType == domain.BackupTypeMySQLDatabase && len(normalizedSpec.Databases) == 0 {
 			return nil, domain.ErrInvalidTargetSpec
+		}
+
+		// Resolve engine_type
+		targetEngineType = domain.EngineTypeDirectStream
+		if input.EngineType != nil {
+			if err := domain.ValidateEngineType(*input.EngineType); err != nil {
+				return nil, err
+			}
+			targetEngineType = *input.EngineType
+		}
+
+		// Resolve storage_target_id
+		if input.StorageTargetID != nil && *input.StorageTargetID != uuid.Nil {
+			target, err := s.repo.GetStorageTargetByID(ctx, orgID, *input.StorageTargetID)
+			if err != nil {
+				if errors.Is(err, domain.ErrStorageTargetNotFound) || errors.Is(err, domain.ErrStorageTargetNotSupported) {
+					return nil, domain.ErrStorageTargetNotFound
+				}
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+			if target == nil {
+				return nil, domain.ErrStorageTargetNotFound
+			}
+			if target.Status != domain.StorageTargetStatusActive {
+				return nil, domain.ErrStorageTargetNotActive
+			}
+			if !domain.IsEngineCompatibleWithStorage(targetEngineType, target.Type) {
+				return nil, domain.ErrIncompatibleEngineStorage
+			}
+			targetStorageTargetID = target.ID
+		} else {
+			storageTarget, err := s.repo.EnsureDefaultLocalStorageTarget(ctx, orgID)
+			if err != nil {
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+			if storageTarget.Type != domain.StorageTargetTypeLocal ||
+				storageTarget.Status != domain.StorageTargetStatusActive ||
+				!storageTarget.IsDefault {
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+			targetStorageTargetID = storageTarget.ID
 		}
 
 		targetResourceID = *input.ResourceID
@@ -139,18 +191,7 @@ func (s *BackupJobService) CreateManualJob(
 		return nil, domain.ErrManualBackupConflict
 	}
 
-	// 3. Ensure and validate Default Storage Target
-	storageTarget, err := s.repo.EnsureDefaultLocalStorageTarget(ctx, orgID)
-	if err != nil {
-		return nil, domain.ErrBackupServiceUnavailable
-	}
-	if storageTarget.Type != domain.StorageTargetTypeLocal ||
-		storageTarget.Status != domain.StorageTargetStatusActive ||
-		!storageTarget.IsDefault {
-		return nil, domain.ErrBackupServiceUnavailable
-	}
-
-	// 4. Construct and insert pending BackupJob
+	// 3. Construct and insert pending BackupJob
 	job := &domain.BackupJob{
 		ID:              uuid.New(),
 		OrganizationID:  orgID,
@@ -159,6 +200,8 @@ func (s *BackupJobService) CreateManualJob(
 		TriggerType:     domain.TriggerTypeManual,
 		CreatedByUserID: &userID,
 		BackupType:      targetBackupType,
+		EngineType:      targetEngineType,
+		StorageTargetID: targetStorageTargetID,
 		TargetSpec:      targetSpec,
 		Status:          domain.JobStatusPending,
 	}

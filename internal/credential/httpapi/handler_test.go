@@ -1672,3 +1672,117 @@ func TestCredentialHandler_Delete(t *testing.T) {
 		}
 	})
 }
+
+func TestHandler_S3Credentials(t *testing.T) {
+	orgID := uuid.New()
+	credID := uuid.New()
+
+	t.Run("Create s3_credentials successfully encodes S3PayloadV1", func(t *testing.T) {
+		svc := &fakeCredentialService{
+			createdMeta: &domain.CredentialMetadata{
+				ID:             credID,
+				OrganizationID: orgID,
+				Name:           "Production S3 Key",
+				Type:           domain.TypeS3Credentials,
+				CreatedAt:      time.Now(),
+			},
+		}
+		h := NewHandler(svc, nil)
+
+		body := map[string]any{
+			"name":              "Production S3 Key",
+			"type":              "s3_credentials",
+			"access_key_id":     "AKIAIOSFODNN7EXAMPLE",
+			"secret_access_key": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+		}
+		raw, _ := json.Marshal(body)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/credentials", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req = attachAdminTenantContext(req, orgID)
+
+		rec := httptest.NewRecorder()
+		h.Create(rec, req)
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("expected 201 Created, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		if svc.capturedType != domain.TypeS3Credentials {
+			t.Fatalf("expected capturedType %s, got %s", domain.TypeS3Credentials, svc.capturedType)
+		}
+
+		s3Payload, err := payload.DecodeS3(svc.bufferSnapshotOnCreate)
+		if err != nil {
+			t.Fatalf("failed decoding captured S3 payload: %v", err)
+		}
+		if s3Payload.AccessKeyID != "AKIAIOSFODNN7EXAMPLE" {
+			t.Fatalf("expected access key AKIAIOSFODNN7EXAMPLE, got %s", s3Payload.AccessKeyID)
+		}
+		if s3Payload.SecretAccessKey != "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY" {
+			t.Fatalf("expected secret key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY, got %s", s3Payload.SecretAccessKey)
+		}
+	})
+
+	t.Run("Create s3_credentials missing secret_access_key fails with 422", func(t *testing.T) {
+		svc := &fakeCredentialService{}
+		h := NewHandler(svc, nil)
+
+		body := map[string]any{
+			"name":          "Incomplete S3 Key",
+			"type":          "s3_credentials",
+			"access_key_id": "AKIAIOSFODNN7EXAMPLE",
+		}
+		raw, _ := json.Marshal(body)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/credentials", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req = attachAdminTenantContext(req, orgID)
+
+		rec := httptest.NewRecorder()
+		h.Create(rec, req)
+
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("expected 422 Unprocessable Entity, got %d", rec.Code)
+		}
+	})
+
+	t.Run("Update s3_credentials successfully replaces S3PayloadV1", func(t *testing.T) {
+		svc := &fakeCredentialService{
+			currentMeta: &domain.CredentialMetadata{
+				ID:             credID,
+				OrganizationID: orgID,
+				Name:           "Old S3 Key",
+				Type:           domain.TypeS3Credentials,
+			},
+		}
+		h := NewHandler(svc, nil)
+
+		body := map[string]any{
+			"name":              "Updated S3 Key",
+			"access_key_id":     "NEWAKIAIOSFODNN7EXAMPLE",
+			"secret_access_key": "NEWsecretkey1234567890",
+		}
+		raw, _ := json.Marshal(body)
+
+		req := httptest.NewRequest(http.MethodPut, "/api/v1/credentials/"+credID.String(), bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.SetPathValue("id", credID.String())
+		req = attachAdminTenantContext(req, orgID)
+
+		rec := httptest.NewRecorder()
+		h.Update(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		s3Payload, err := payload.DecodeS3(svc.bufferSnapshotOnUpdate)
+		if err != nil {
+			t.Fatalf("failed decoding captured updated S3 payload: %v", err)
+		}
+		if s3Payload.AccessKeyID != "NEWAKIAIOSFODNN7EXAMPLE" {
+			t.Fatalf("expected new access key, got %s", s3Payload.AccessKeyID)
+		}
+	})
+}

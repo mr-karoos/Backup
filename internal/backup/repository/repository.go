@@ -8,11 +8,23 @@ import (
 	"backup-platform/pkg/uuid"
 )
 
+// StorageTargetRepository defines the storage interface for managing storage targets within tenant organizations.
+type StorageTargetRepository interface {
+	EnsureDefaultLocalStorageTarget(ctx context.Context, orgID uuid.UUID) (*domain.StorageTarget, error)
+	GetStorageTargetByID(ctx context.Context, orgID, targetID uuid.UUID) (*domain.StorageTarget, error)
+	CreateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error)
+	ListStorageTargets(ctx context.Context, orgID uuid.UUID) ([]*domain.StorageTarget, error)
+	UpdateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error)
+	DeleteStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) error
+	CountArtifactsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error)
+	CountPlansByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error)
+	CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error)
+}
+
 // BackupRepository abstracts all database persistence operations for plans, jobs, runs, artifacts, and storage targets.
 type BackupRepository interface {
 	// Storage Targets
-	EnsureDefaultLocalStorageTarget(ctx context.Context, orgID uuid.UUID) (*domain.StorageTarget, error)
-	GetStorageTargetByID(ctx context.Context, orgID, targetID uuid.UUID) (*domain.StorageTarget, error)
+	StorageTargetRepository
 
 	// Backup Plans (Read-only query in Phase 5)
 	GetPlanByID(ctx context.Context, orgID, planID uuid.UUID) (*domain.BackupPlan, error)

@@ -24,6 +24,17 @@ func RunStartupRecovery(
 	storageProvider storage.StorageProvider,
 	log *slog.Logger,
 ) error {
+	return RunStartupRecoveryWithResolver(ctx, repo, storageProvider, nil, log)
+}
+
+// RunStartupRecoveryWithResolver recovers orphaned running runs with dynamic storage resolver support.
+func RunStartupRecoveryWithResolver(
+	ctx context.Context,
+	repo repository.BackupRepository,
+	storageProvider storage.StorageProvider,
+	storageResolver storage.StorageProviderResolver,
+	log *slog.Logger,
+) error {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -46,7 +57,7 @@ func RunStartupRecovery(
 		// 3. Clean active artifacts for each successfully recovered run using a bounded independent context
 		for _, run := range recoveredRuns {
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			cleanupCrashArtifacts(cleanupCtx, repo, storageProvider, run.OrganizationID, run.ID, log)
+			cleanupCrashArtifacts(cleanupCtx, repo, storageProvider, storageResolver, run.OrganizationID, run.ID, log)
 			cleanupCancel()
 		}
 	}
@@ -64,6 +75,7 @@ func RunStartupRecovery(
 type StaleRunReaper struct {
 	repo            repository.BackupRepository
 	storageProvider storage.StorageProvider
+	storageResolver storage.StorageProviderResolver
 	interval        time.Duration
 	logger          *slog.Logger
 	cancel          context.CancelFunc
@@ -91,6 +103,11 @@ func NewStaleRunReaper(
 	}
 }
 
+// SetStorageResolver configures a dynamic storage provider resolver for StaleRunReaper.
+func (r *StaleRunReaper) SetStorageResolver(resolver storage.StorageProviderResolver) {
+	r.storageResolver = resolver
+}
+
 // Start begins periodic background execution of stale run reaping.
 func (r *StaleRunReaper) Start(ctx context.Context) {
 	reaperCtx, cancel := context.WithCancel(ctx)
@@ -112,7 +129,7 @@ func (r *StaleRunReaper) Start(ctx context.Context) {
 					r.logger.Info("reaped expired backup runs", slog.Int("reaped_runs", len(reapedRuns)))
 					for _, run := range reapedRuns {
 						cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-						cleanupCrashArtifacts(cleanupCtx, r.repo, r.storageProvider, run.OrganizationID, run.ID, r.logger)
+						cleanupCrashArtifacts(cleanupCtx, r.repo, r.storageProvider, r.storageResolver, run.OrganizationID, run.ID, r.logger)
 						cleanupCancel()
 					}
 				}
@@ -150,10 +167,11 @@ func cleanupCrashArtifacts(
 	ctx context.Context,
 	repo repository.BackupRepository,
 	storageProvider storage.StorageProvider,
+	storageResolver storage.StorageProviderResolver,
 	orgID, runID uuid.UUID,
 	log *slog.Logger,
 ) {
-	if repo == nil || storageProvider == nil || orgID == uuid.Nil || runID == uuid.Nil {
+	if repo == nil || (storageProvider == nil && storageResolver == nil) || orgID == uuid.Nil || runID == uuid.Nil {
 		return
 	}
 
@@ -170,8 +188,19 @@ func cleanupCrashArtifacts(
 			continue // Already tombstoned: skip
 		}
 
+		store := storageProvider
+		if storageResolver != nil && art.StorageTargetID != uuid.Nil {
+			resolved, err := storageResolver.Resolve(ctx, orgID, art.StorageTargetID)
+			if err == nil && resolved != nil {
+				store = resolved
+			}
+		}
+		if store == nil {
+			continue
+		}
+
 		// 1. Delete physical file from storage provider
-		delErr := storageProvider.DeleteArtifact(ctx, art.StorageReference)
+		delErr := store.DeleteArtifact(ctx, art.StorageReference)
 		if delErr != nil && !errors.Is(delErr, storage.ErrArtifactNotFound) {
 			log.Warn("failed deleting artifact physical file during crash recovery",
 				slog.String("artifact_id", art.ID.String()),

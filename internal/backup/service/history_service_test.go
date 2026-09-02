@@ -97,6 +97,27 @@ func (m *mockHistoryRepo) RecoverInterruptedRuns(ctx context.Context) ([]domain.
 func (m *mockHistoryRepo) ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error) {
 	return nil, nil
 }
+func (m *mockHistoryRepo) CreateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockHistoryRepo) ListStorageTargets(ctx context.Context, orgID uuid.UUID) ([]*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockHistoryRepo) UpdateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockHistoryRepo) DeleteStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) error {
+	return nil
+}
+func (m *mockHistoryRepo) CountArtifactsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (m *mockHistoryRepo) CountPlansByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (m *mockHistoryRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
 
 func TestHistoryService_ListRuns(t *testing.T) {
 	orgID := uuid.New()

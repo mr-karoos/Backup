@@ -31,17 +31,19 @@ const (
 
 // Config represents the application startup configuration loaded from environment variables.
 type Config struct {
-	AppEnv                     string
-	HTTPAddr                   string
-	DatabaseURL                string
-	LogLevel                   string
-	StorageRoot                string
-	BootstrapAdminEmail        string
-	BootstrapAdminPassword     string
-	JWTSigningKey              string
-	AuthCookieSecure           bool
-	EncryptionMasterKey        []byte
-	EncryptionMasterKeyVersion int
+	AppEnv                      string
+	HTTPAddr                    string
+	DatabaseURL                 string
+	LogLevel                    string
+	StorageRoot                 string
+	BootstrapAdminEmail         string
+	BootstrapAdminPassword      string
+	JWTSigningKey               string
+	AuthCookieSecure            bool
+	EncryptionMasterKey         []byte
+	EncryptionMasterKeyVersion  int
+	S3PrivateEndpointsAllowlist []string
+	S3AllowInsecureEndpoints    bool
 }
 
 // Load reads configuration from environment variables and validates all constraints.
@@ -99,18 +101,42 @@ func Load() (*Config, error) {
 		databaseURL = DefaultDevDatabase
 	}
 
+	// S3 Insecure Endpoints policy (default false)
+	s3AllowInsecure := false
+	if s3InsecureStr := strings.TrimSpace(os.Getenv("S3_ALLOW_INSECURE_ENDPOINTS")); s3InsecureStr != "" {
+		parsed, err := strconv.ParseBool(s3InsecureStr)
+		if err != nil {
+			return nil, errors.New("invalid S3_ALLOW_INSECURE_ENDPOINTS: must be a valid boolean")
+		}
+		s3AllowInsecure = parsed
+	}
+
+	// S3 Private Endpoints Allowlist (comma-separated list of IP CIDRs or hostnames)
+	var s3Allowlist []string
+	if rawAllowlist := strings.TrimSpace(os.Getenv("S3_PRIVATE_ENDPOINTS_ALLOWLIST")); rawAllowlist != "" {
+		parts := strings.Split(rawAllowlist, ",")
+		for _, p := range parts {
+			trimmed := strings.TrimSpace(p)
+			if trimmed != "" {
+				s3Allowlist = append(s3Allowlist, trimmed)
+			}
+		}
+	}
+
 	cfg := &Config{
-		AppEnv:                     appEnv,
-		HTTPAddr:                   httpAddr,
-		DatabaseURL:                databaseURL,
-		LogLevel:                   logLevel,
-		StorageRoot:                storageRoot,
-		BootstrapAdminEmail:        bootstrapAdminEmail,
-		BootstrapAdminPassword:     bootstrapAdminPassword,
-		JWTSigningKey:              jwtSigningKey,
-		AuthCookieSecure:           authCookieSecure,
-		EncryptionMasterKey:        decodedMasterKey,
-		EncryptionMasterKeyVersion: masterKeyVersion,
+		AppEnv:                      appEnv,
+		HTTPAddr:                    httpAddr,
+		DatabaseURL:                 databaseURL,
+		LogLevel:                    logLevel,
+		StorageRoot:                 storageRoot,
+		BootstrapAdminEmail:         bootstrapAdminEmail,
+		BootstrapAdminPassword:      bootstrapAdminPassword,
+		JWTSigningKey:               jwtSigningKey,
+		AuthCookieSecure:            authCookieSecure,
+		EncryptionMasterKey:         decodedMasterKey,
+		EncryptionMasterKeyVersion:  masterKeyVersion,
+		S3PrivateEndpointsAllowlist: s3Allowlist,
+		S3AllowInsecureEndpoints:    s3AllowInsecure,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -185,6 +211,11 @@ func (c *Config) Validate() error {
 	// Cookie security policy validation: Staging and Production MUST have Secure=true
 	if (c.AppEnv == EnvProduction || c.AppEnv == EnvStaging) && !c.AuthCookieSecure {
 		return errors.New("AUTH_COOKIE_SECURE must be true in production and staging environments")
+	}
+
+	// S3 insecure endpoints policy validation: Staging and Production MUST NOT allow insecure HTTP endpoints
+	if (c.AppEnv == EnvProduction || c.AppEnv == EnvStaging) && c.S3AllowInsecureEndpoints {
+		return errors.New("S3_ALLOW_INSECURE_ENDPOINTS cannot be true in production and staging environments")
 	}
 
 	// Bootstrap credentials validation: if one is set, both must be provided

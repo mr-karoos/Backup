@@ -68,6 +68,7 @@ type WorkerPool struct {
 	fileCapabilityRegistry *connector.FileBackupCapabilityRegistry
 	engine                 engine.BackupEngine
 	storageProvider        storage.StorageProvider
+	storageResolver        storage.StorageProviderResolver
 	verifier               verification.Verifier
 	mutexManager           *PerResourceMutexManager
 	logger                 *slog.Logger
@@ -123,6 +124,21 @@ func NewWorkerPool(
 		nowFunc:                time.Now,
 		databaseDiscoverer:     sshconn.NewSSHDatabaseDiscoverer(nil),
 	}
+}
+
+// SetStorageResolver configures a dynamic storage provider resolver for S3/Local multi-target resolution.
+func (p *WorkerPool) SetStorageResolver(resolver storage.StorageProviderResolver) {
+	p.storageResolver = resolver
+}
+
+func (p *WorkerPool) resolveStorageProvider(ctx context.Context, orgID, targetID uuid.UUID) (storage.StorageProvider, error) {
+	if p.storageResolver != nil && targetID != uuid.Nil {
+		return p.storageResolver.Resolve(ctx, orgID, targetID)
+	}
+	if p.storageProvider != nil {
+		return p.storageProvider, nil
+	}
+	return nil, errors.New("no storage provider configured in worker pool")
 }
 
 // SetRetentionManager injects a custom retention manager into the worker pool.
@@ -425,8 +441,13 @@ func (p *WorkerPool) executeJobSafely(
 	p.cleanupRunArtifacts(run.OrganizationID, run.ID)
 }
 
-func (p *WorkerPool) cleanupArtifact(ctx context.Context, orgID, artID uuid.UUID, storageRef string) error {
-	delErr := p.storageProvider.DeleteArtifact(ctx, storageRef)
+func (p *WorkerPool) cleanupArtifact(ctx context.Context, orgID, artID, targetID uuid.UUID, storageRef string) error {
+	store, err := p.resolveStorageProvider(ctx, orgID, targetID)
+	if err != nil {
+		p.logger.Warn("failed resolving storage provider during cleanup", slog.String("target_id", targetID.String()))
+		return err
+	}
+	delErr := store.DeleteArtifact(ctx, storageRef)
 	if delErr != nil && !errors.Is(delErr, storage.ErrArtifactNotFound) {
 		p.logger.Warn("failed to delete artifact physical file during cleanup",
 			slog.String("artifact_id", artID.String()),
@@ -443,8 +464,14 @@ func (p *WorkerPool) cleanupArtifact(ctx context.Context, orgID, artID uuid.UUID
 	return nil
 }
 
-func (p *WorkerPool) cleanupUnpersistedArtifact(ctx context.Context, storageRef string) {
-	if delErr := p.storageProvider.DeleteArtifact(ctx, storageRef); delErr != nil && !errors.Is(delErr, storage.ErrArtifactNotFound) {
+func (p *WorkerPool) cleanupUnpersistedArtifact(ctx context.Context, store storage.StorageProvider, storageRef string) {
+	if store == nil {
+		store = p.storageProvider
+	}
+	if store == nil {
+		return
+	}
+	if delErr := store.DeleteArtifact(ctx, storageRef); delErr != nil && !errors.Is(delErr, storage.ErrArtifactNotFound) {
 		p.logger.Warn("failed to delete unpersisted artifact physical file")
 	}
 }
@@ -465,7 +492,7 @@ func (p *WorkerPool) cleanupRunArtifacts(orgID, runID uuid.UUID) {
 		if art == nil || art.IsDeleted {
 			continue
 		}
-		if err := p.cleanupArtifact(cleanupCtx, orgID, art.ID, art.StorageReference); err != nil {
+		if err := p.cleanupArtifact(cleanupCtx, orgID, art.ID, art.StorageTargetID, art.StorageReference); err != nil {
 			p.logger.Warn("failed cleaning up artifact for run",
 				slog.String("run_id", runID.String()),
 				slog.String("artifact_id", art.ID.String()),
@@ -479,7 +506,15 @@ func (p *WorkerPool) executeBackupPipeline(
 	run *domain.BackupRun,
 	job *domain.BackupJob,
 ) error {
-	// 1. Validate and Normalize Job Target Specification
+	// 1. Validate EngineType (ADR-033: only direct_stream supported in Step A.1; fail-closed on unsupported)
+	if job.EngineType == "" {
+		job.EngineType = domain.EngineTypeDirectStream
+	}
+	if job.EngineType != domain.EngineTypeDirectStream {
+		return domain.ErrUnsupportedEngineType
+	}
+
+	// 2. Validate and Normalize Job Target Specification
 	if job.BackupType != domain.BackupTypeMySQLDatabase && job.BackupType != domain.BackupTypeWebsiteFiles {
 		return domain.ErrUnsupportedBackupType
 	}
@@ -489,7 +524,7 @@ func (p *WorkerPool) executeBackupPipeline(
 	}
 	job.TargetSpec = *normalizedSpec
 
-	// 2. Fetch Resource and Connector Configuration
+	// 3. Fetch Resource and Connector Configuration
 	resWithConn, err := p.resFinder.FindByIDForOrganization(ctx, job.OrganizationID, job.ResourceID)
 	if err != nil {
 		return err
@@ -507,18 +542,40 @@ func (p *WorkerPool) executeBackupPipeline(
 		return domain.ErrInvalidTargetSpec
 	}
 
-	// 3. Fetch and Validate Default Storage Target
-	storageTarget, err := p.repo.EnsureDefaultLocalStorageTarget(ctx, job.OrganizationID)
+	// 4. Fetch and Validate Storage Target (Deterministic Target Resolution)
+	var storageTarget *domain.StorageTarget
+	if job.StorageTargetID != uuid.Nil {
+		target, err := p.repo.GetStorageTargetByID(ctx, job.OrganizationID, job.StorageTargetID)
+		if err != nil {
+			return err
+		}
+		if target.Status != domain.StorageTargetStatusActive {
+			return domain.ErrStorageTargetNotActive
+		}
+		if !domain.IsEngineCompatibleWithStorage(job.EngineType, target.Type) {
+			return domain.ErrIncompatibleEngineStorage
+		}
+		storageTarget = target
+	} else {
+		defaultTarget, err := p.repo.EnsureDefaultLocalStorageTarget(ctx, job.OrganizationID)
+		if err != nil {
+			return err
+		}
+		if defaultTarget.Type != domain.StorageTargetTypeLocal ||
+			defaultTarget.Status != domain.StorageTargetStatusActive ||
+			!defaultTarget.IsDefault {
+			return domain.ErrStorageTargetNotSupported
+		}
+		storageTarget = defaultTarget
+	}
+
+	// 5. Resolve StorageProvider for target
+	targetStorageProvider, err := p.resolveStorageProvider(ctx, job.OrganizationID, storageTarget.ID)
 	if err != nil {
 		return err
 	}
-	if storageTarget.Type != domain.StorageTargetTypeLocal ||
-		storageTarget.Status != domain.StorageTargetStatusActive ||
-		!storageTarget.IsDefault {
-		return domain.ErrStorageTargetNotSupported
-	}
 
-	// 4. Branch by BackupType
+	// 6. Branch by BackupType
 	switch job.BackupType {
 	case domain.BackupTypeMySQLDatabase:
 		cap, ok := p.capabilityRegistry.Get(resWithConn.Resource.Type)
@@ -536,7 +593,7 @@ func (p *WorkerPool) executeBackupPipeline(
 				return ctx.Err()
 			}
 
-			if err := p.executeDatabaseTarget(ctx, run, job, resWithConn, storageTarget, cap, dbName); err != nil {
+			if err := p.executeDatabaseTarget(ctx, run, job, resWithConn, storageTarget, targetStorageProvider, cap, dbName); err != nil {
 				return err
 			}
 		}
@@ -554,7 +611,7 @@ func (p *WorkerPool) executeBackupPipeline(
 				return ctx.Err()
 			}
 
-			if err := p.executeFileTarget(ctx, run, job, resWithConn, storageTarget, fileCap, sourcePath, excludes); err != nil {
+			if err := p.executeFileTarget(ctx, run, job, resWithConn, storageTarget, targetStorageProvider, fileCap, sourcePath, excludes); err != nil {
 				return err
 			}
 		}
@@ -571,6 +628,7 @@ func (p *WorkerPool) executeDatabaseTarget(
 	job *domain.BackupJob,
 	resWithConn *resDomain.ResourceWithConnector,
 	storageTarget *domain.StorageTarget,
+	targetStorageProvider storage.StorageProvider,
 	cap connector.DatabaseBackupCapability,
 	dbName string,
 ) error {
@@ -612,7 +670,7 @@ func (p *WorkerPool) executeDatabaseTarget(
 		target,
 		credPayload,
 		dbName,
-		p.storageProvider,
+		targetStorageProvider,
 		job.OrganizationID,
 		job.ResourceID,
 		run.ID,
@@ -642,7 +700,7 @@ func (p *WorkerPool) executeDatabaseTarget(
 	_, createArtErr := p.repo.CreateArtifact(ctx, artRecord)
 	if createArtErr != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		p.cleanupUnpersistedArtifact(cleanupCtx, saveRes.StorageReference)
+		p.cleanupUnpersistedArtifact(cleanupCtx, targetStorageProvider, saveRes.StorageReference)
 		cleanupCancel()
 		return createArtErr
 	}
@@ -650,7 +708,7 @@ func (p *WorkerPool) executeDatabaseTarget(
 	// Verification Phase
 	verDetails, verErr := p.verifier.VerifyDatabaseArtifact(
 		ctx,
-		p.storageProvider,
+		targetStorageProvider,
 		saveRes.StorageReference,
 		saveRes.SizeBytes,
 		saveRes.ChecksumSHA256,
@@ -664,7 +722,7 @@ func (p *WorkerPool) executeDatabaseTarget(
 			return updateErr
 		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if clErr := p.cleanupArtifact(cleanupCtx, job.OrganizationID, artifactID, saveRes.StorageReference); clErr != nil {
+		if clErr := p.cleanupArtifact(cleanupCtx, job.OrganizationID, artifactID, storageTarget.ID, saveRes.StorageReference); clErr != nil {
 			p.logger.Warn("failed cleaning up artifact after verification failure",
 				slog.String("run_id", run.ID.String()),
 				slog.String("artifact_id", artifactID.String()),
@@ -688,6 +746,7 @@ func (p *WorkerPool) executeFileTarget(
 	job *domain.BackupJob,
 	resWithConn *resDomain.ResourceWithConnector,
 	storageTarget *domain.StorageTarget,
+	targetStorageProvider storage.StorageProvider,
 	fileCap connector.FileBackupCapability,
 	sourcePath string,
 	excludePatterns []string,
@@ -735,7 +794,7 @@ func (p *WorkerPool) executeFileTarget(
 		target,
 		credPayload,
 		config,
-		p.storageProvider,
+		targetStorageProvider,
 		job.OrganizationID,
 		job.ResourceID,
 		run.ID,
@@ -765,7 +824,7 @@ func (p *WorkerPool) executeFileTarget(
 	_, createArtErr := p.repo.CreateArtifact(ctx, artRecord)
 	if createArtErr != nil {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		p.cleanupUnpersistedArtifact(cleanupCtx, saveRes.StorageReference)
+		p.cleanupUnpersistedArtifact(cleanupCtx, targetStorageProvider, saveRes.StorageReference)
 		cleanupCancel()
 		return createArtErr
 	}
@@ -773,7 +832,7 @@ func (p *WorkerPool) executeFileTarget(
 	// Verification Phase
 	verDetails, verErr := p.verifier.VerifyFilesArtifact(
 		ctx,
-		p.storageProvider,
+		targetStorageProvider,
 		saveRes.StorageReference,
 		saveRes.SizeBytes,
 		saveRes.ChecksumSHA256,
@@ -787,7 +846,7 @@ func (p *WorkerPool) executeFileTarget(
 			return updateErr
 		}
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if clErr := p.cleanupArtifact(cleanupCtx, job.OrganizationID, artifactID, saveRes.StorageReference); clErr != nil {
+		if clErr := p.cleanupArtifact(cleanupCtx, job.OrganizationID, artifactID, storageTarget.ID, saveRes.StorageReference); clErr != nil {
 			p.logger.Warn("failed cleaning up artifact after verification failure",
 				slog.String("run_id", run.ID.String()),
 				slog.String("artifact_id", artifactID.String()),

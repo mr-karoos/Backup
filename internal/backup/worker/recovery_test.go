@@ -283,6 +283,28 @@ func (m *mockRecoveryRepo) ReapStaleRuns(ctx context.Context) ([]domain.Recovere
 	return reaped, nil
 }
 
+func (m *mockRecoveryRepo) CreateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockRecoveryRepo) ListStorageTargets(ctx context.Context, orgID uuid.UUID) ([]*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockRecoveryRepo) UpdateStorageTarget(ctx context.Context, target *domain.StorageTarget) (*domain.StorageTarget, error) {
+	return nil, nil
+}
+func (m *mockRecoveryRepo) DeleteStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) error {
+	return nil
+}
+func (m *mockRecoveryRepo) CountArtifactsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (m *mockRecoveryRepo) CountPlansByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+func (m *mockRecoveryRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
+
 var _ repository.BackupRepository = (*mockRecoveryRepo)(nil)
 
 type mockStorageWithControl struct {

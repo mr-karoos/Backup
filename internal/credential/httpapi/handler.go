@@ -88,6 +88,18 @@ func clearCreateCredentialRequest(req *CreateCredentialRequest) {
 		*req.Passphrase = ""
 		req.Passphrase = nil
 	}
+	if req.AccessKeyID != nil {
+		*req.AccessKeyID = ""
+		req.AccessKeyID = nil
+	}
+	if req.SecretAccessKey != nil {
+		*req.SecretAccessKey = ""
+		req.SecretAccessKey = nil
+	}
+	if req.SessionToken != nil {
+		*req.SessionToken = ""
+		req.SessionToken = nil
+	}
 }
 
 // clearUpdateCredentialRequest clears sensitive plaintext string references from the update request DTO with best effort.
@@ -102,6 +114,18 @@ func clearUpdateCredentialRequest(req *UpdateCredentialRequest) {
 	if req.Passphrase != nil {
 		*req.Passphrase = ""
 		req.Passphrase = nil
+	}
+	if req.AccessKeyID != nil {
+		*req.AccessKeyID = ""
+		req.AccessKeyID = nil
+	}
+	if req.SecretAccessKey != nil {
+		*req.SecretAccessKey = ""
+		req.SecretAccessKey = nil
+	}
+	if req.SessionToken != nil {
+		*req.SessionToken = ""
+		req.SessionToken = nil
 	}
 }
 
@@ -178,35 +202,52 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Validate secret non-empty (do not auto-trim password/token whitespace, but zero length is invalid)
-	if len(req.Secret) == 0 {
-		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "secret payload cannot be empty", nil)
-		return
-	}
-
-	// 4. Validate passphrase applicability
-	if credType != domain.TypeSSHPrivateKey && req.Passphrase != nil && len(*req.Passphrase) > 0 {
-		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "passphrase is only supported for ssh_private_key", nil)
-		return
-	}
-
-	// 5. Type-specific validation and fingerprint computation
+	var payloadBytes []byte
 	var fingerprint *string
-	if credType == domain.TypeSSHPrivateKey {
-		fp, err := processSSHKey(req.Secret, req.Passphrase)
-		if err != nil {
-			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "invalid SSH private key or passphrase", nil)
+
+	if credType == domain.TypeS3Credentials {
+		// S3 credentials validation
+		if req.AccessKeyID == nil || len(*req.AccessKeyID) == 0 ||
+			req.SecretAccessKey == nil || len(*req.SecretAccessKey) == 0 {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "access_key_id and secret_access_key are required for s3_credentials", nil)
 			return
 		}
-		fingerprint = fp
-	}
-
-	// 6. Build intermediate versioned JSON plaintext payload
-	payloadBytes, err := payload.EncodeV1(req.Secret, req.Passphrase)
-	clearCreateCredentialRequest(&req)
-	if err != nil {
-		httpapi.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "internal error processing credential", nil)
-		return
+		if req.Passphrase != nil && len(*req.Passphrase) > 0 {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "passphrase is only supported for ssh_private_key", nil)
+			return
+		}
+		pb, err := payload.EncodeS3V1(*req.AccessKeyID, *req.SecretAccessKey, req.SessionToken)
+		clearCreateCredentialRequest(&req)
+		if err != nil {
+			httpapi.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "internal error processing credential", nil)
+			return
+		}
+		payloadBytes = pb
+	} else {
+		// Standard single-secret credentials
+		if len(req.Secret) == 0 {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "secret payload cannot be empty", nil)
+			return
+		}
+		if credType != domain.TypeSSHPrivateKey && req.Passphrase != nil && len(*req.Passphrase) > 0 {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "passphrase is only supported for ssh_private_key", nil)
+			return
+		}
+		if credType == domain.TypeSSHPrivateKey {
+			fp, err := processSSHKey(req.Secret, req.Passphrase)
+			if err != nil {
+				httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "invalid SSH private key or passphrase", nil)
+				return
+			}
+			fingerprint = fp
+		}
+		pb, err := payload.EncodeV1(req.Secret, req.Passphrase)
+		clearCreateCredentialRequest(&req)
+		if err != nil {
+			httpapi.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "internal error processing credential", nil)
+			return
+		}
+		payloadBytes = pb
 	}
 	defer secretcrypto.ZeroBytes(payloadBytes)
 
@@ -285,8 +326,9 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	defer clearUpdateCredentialRequest(&req)
 
 	// Require at least one editable field to be present
-	if req.Name == nil && req.Secret == nil {
-		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "at least one of name or secret must be provided", nil)
+	hasSecretUpdate := req.Secret != nil || req.AccessKeyID != nil || req.SecretAccessKey != nil
+	if req.Name == nil && !hasSecretUpdate {
+		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "at least one of name, secret, or access credentials must be provided", nil)
 		return
 	}
 
@@ -301,7 +343,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Case 1: Name-only update (no secret replacement)
-	if req.Secret == nil {
+	if !hasSecretUpdate {
 		if req.Passphrase != nil {
 			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "passphrase can only be updated when a new secret is provided", nil)
 			return
@@ -337,11 +379,6 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Case 2: Secret update (with or without name)
-	if len(*req.Secret) == 0 {
-		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "secret payload cannot be empty", nil)
-		return
-	}
-
 	// Load current metadata to verify existence and inspect credential type
 	currentMeta, err := h.service.GetCredentialMetadata(r.Context(), tenantCtx.OrganizationID, credID)
 	if err != nil {
@@ -355,29 +392,50 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate passphrase applicability against existing credential type
-	if currentMeta.Type != domain.TypeSSHPrivateKey && req.Passphrase != nil && len(*req.Passphrase) > 0 {
-		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "passphrase is only supported for ssh_private_key", nil)
-		return
-	}
-
-	// Process SSH key and calculate fingerprint if type is ssh_private_key
+	var payloadBytes []byte
 	var fingerprint *string
-	if currentMeta.Type == domain.TypeSSHPrivateKey {
-		fp, err := processSSHKey(*req.Secret, req.Passphrase)
-		if err != nil {
-			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "invalid SSH private key or passphrase", nil)
+
+	if currentMeta.Type == domain.TypeS3Credentials {
+		if req.AccessKeyID == nil || len(*req.AccessKeyID) == 0 ||
+			req.SecretAccessKey == nil || len(*req.SecretAccessKey) == 0 {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "both access_key_id and secret_access_key are required when updating s3_credentials", nil)
 			return
 		}
-		fingerprint = fp
-	}
-
-	// Build intermediate versioned JSON plaintext payload
-	payloadBytes, err := payload.EncodeV1(*req.Secret, req.Passphrase)
-	clearUpdateCredentialRequest(&req)
-	if err != nil {
-		httpapi.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "internal error processing credential", nil)
-		return
+		if req.Passphrase != nil && len(*req.Passphrase) > 0 {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "passphrase is only supported for ssh_private_key", nil)
+			return
+		}
+		pb, err := payload.EncodeS3V1(*req.AccessKeyID, *req.SecretAccessKey, req.SessionToken)
+		clearUpdateCredentialRequest(&req)
+		if err != nil {
+			httpapi.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "internal error processing credential", nil)
+			return
+		}
+		payloadBytes = pb
+	} else {
+		if req.Secret == nil || len(*req.Secret) == 0 {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "secret payload cannot be empty", nil)
+			return
+		}
+		if currentMeta.Type != domain.TypeSSHPrivateKey && req.Passphrase != nil && len(*req.Passphrase) > 0 {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "passphrase is only supported for ssh_private_key", nil)
+			return
+		}
+		if currentMeta.Type == domain.TypeSSHPrivateKey {
+			fp, err := processSSHKey(*req.Secret, req.Passphrase)
+			if err != nil {
+				httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "invalid SSH private key or passphrase", nil)
+				return
+			}
+			fingerprint = fp
+		}
+		pb, err := payload.EncodeV1(*req.Secret, req.Passphrase)
+		clearUpdateCredentialRequest(&req)
+		if err != nil {
+			httpapi.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "internal error processing credential", nil)
+			return
+		}
+		payloadBytes = pb
 	}
 	defer secretcrypto.ZeroBytes(payloadBytes)
 

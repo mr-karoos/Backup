@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -62,14 +63,24 @@ type BackupVerifier interface {
 	VerifyRun(ctx context.Context, role orgDomain.Role, orgID, runID uuid.UUID) (*service.RunVerificationResult, error)
 }
 
-// Handler handles HTTP endpoints for backup operations, plans, history, artifacts, and verification.
+// StorageTargetManager specifies the storage target management interface.
+type StorageTargetManager interface {
+	CreateStorageTarget(ctx context.Context, role orgDomain.Role, orgID uuid.UUID, input service.CreateStorageTargetInput) (*domain.StorageTarget, error)
+	GetStorageTarget(ctx context.Context, role orgDomain.Role, orgID, targetID uuid.UUID) (*domain.StorageTarget, error)
+	ListStorageTargets(ctx context.Context, role orgDomain.Role, orgID uuid.UUID) ([]*domain.StorageTarget, error)
+	UpdateStorageTarget(ctx context.Context, role orgDomain.Role, orgID, targetID uuid.UUID, input service.UpdateStorageTargetInput) (*domain.StorageTarget, error)
+	DeleteStorageTarget(ctx context.Context, role orgDomain.Role, orgID, targetID uuid.UUID) error
+}
+
+// Handler handles HTTP endpoints for backup operations, plans, history, artifacts, verification, and storage targets.
 type Handler struct {
-	jobService      BackupJobCreator
-	planService     BackupPlanManager
-	historyService  BackupHistoryManager
-	artifactService BackupArtifactManager
-	verifyService   BackupVerifier
-	logger          *slog.Logger
+	jobService           BackupJobCreator
+	planService          BackupPlanManager
+	historyService       BackupHistoryManager
+	artifactService      BackupArtifactManager
+	verifyService        BackupVerifier
+	storageTargetService StorageTargetManager
+	logger               *slog.Logger
 }
 
 // NewHandler constructs a new Backup HTTP Handler.
@@ -92,6 +103,11 @@ func NewHandler(
 		verifyService:   verifyService,
 		logger:          log,
 	}
+}
+
+// SetStorageTargetService injects the storage target service into the handler.
+func (h *Handler) SetStorageTargetService(svc StorageTargetManager) {
+	h.storageTargetService = svc
 }
 
 // CreateBackupJob handles POST /api/v1/backup-jobs.
@@ -132,10 +148,12 @@ func (h *Handler) CreateBackupJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	input := service.CreateManualJobInput{
-		BackupPlanID: req.BackupPlanID,
-		ResourceID:   req.ResourceID,
-		BackupType:   req.BackupType,
-		TargetSpec:   req.TargetSpec,
+		BackupPlanID:    req.BackupPlanID,
+		ResourceID:      req.ResourceID,
+		BackupType:      req.BackupType,
+		EngineType:      req.EngineType,
+		StorageTargetID: req.StorageTargetID,
+		TargetSpec:      req.TargetSpec,
 	}
 
 	job, err := h.jobService.CreateManualJob(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, tenantCtx.UserID, input)
@@ -149,6 +167,10 @@ func (h *Handler) CreateBackupJob(w http.ResponseWriter, r *http.Request) {
 			httpapi.WriteError(w, r, http.StatusNotFound, "PLAN_NOT_FOUND", "backup plan not found", nil)
 		case errors.Is(err, domain.ErrResourceNotFound):
 			httpapi.WriteError(w, r, http.StatusNotFound, "RESOURCE_NOT_FOUND", "resource not found", nil)
+		case errors.Is(err, domain.ErrStorageTargetNotFound):
+			httpapi.WriteError(w, r, http.StatusNotFound, "STORAGE_TARGET_NOT_FOUND", "storage target not found", nil)
+		case errors.Is(err, domain.ErrPlanOverrideForbidden):
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "engine_type or storage_target_id override forbidden for plan-backed job", nil)
 		case errors.Is(err, domain.ErrPlanNotActive):
 			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "backup plan is not active", nil)
 		case errors.Is(err, domain.ErrResourceDisabled), errors.Is(err, domain.ErrResourceNotActive):
@@ -157,6 +179,12 @@ func (h *Handler) CreateBackupJob(w http.ResponseWriter, r *http.Request) {
 			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unsupported resource type for backup execution", nil)
 		case errors.Is(err, domain.ErrUnsupportedBackupType):
 			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unsupported backup type", nil)
+		case errors.Is(err, domain.ErrUnsupportedEngineType):
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unsupported engine type", nil)
+		case errors.Is(err, domain.ErrStorageTargetNotActive):
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "storage target is not active", nil)
+		case errors.Is(err, domain.ErrIncompatibleEngineStorage):
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "incompatible engine and storage target", nil)
 		case errors.Is(err, domain.ErrInvalidTargetSpec):
 			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "invalid backup target specification", nil)
 		case errors.Is(err, domain.ErrBackupServiceUnavailable):
@@ -232,6 +260,8 @@ func (h *Handler) CreateBackupPlan(w http.ResponseWriter, r *http.Request) {
 		Name:              req.Name,
 		ResourceID:        req.ResourceID,
 		BackupType:        req.BackupType,
+		EngineType:        req.EngineType,
+		StorageTargetID:   req.StorageTargetID,
 		DatabaseSelection: dbSel,
 		FileSelection:     fileSel,
 		Schedule: service.ScheduleInput{
@@ -403,6 +433,8 @@ func (h *Handler) UpdateBackupPlan(w http.ResponseWriter, r *http.Request) {
 
 	input := service.UpdatePlanInput{
 		Name:              req.Name,
+		EngineType:        req.EngineType,
+		StorageTargetID:   req.StorageTargetID,
 		DatabaseSelection: dbSel,
 		FileSelection:     fileSel,
 		Schedule: service.ScheduleInput{
@@ -474,6 +506,14 @@ func (h *Handler) handlePlanError(w http.ResponseWriter, r *http.Request, reqLog
 		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unsupported resource type for backup execution", nil)
 	case errors.Is(err, domain.ErrUnsupportedBackupType):
 		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unsupported backup type", nil)
+	case errors.Is(err, domain.ErrStorageTargetNotFound):
+		httpapi.WriteError(w, r, http.StatusNotFound, "STORAGE_TARGET_NOT_FOUND", "storage target not found", nil)
+	case errors.Is(err, domain.ErrUnsupportedEngineType):
+		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unsupported engine type", nil)
+	case errors.Is(err, domain.ErrStorageTargetNotActive):
+		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "storage target is not active", nil)
+	case errors.Is(err, domain.ErrIncompatibleEngineStorage):
+		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "incompatible engine and storage target", nil)
 	case errors.Is(err, domain.ErrInvalidPlanName):
 		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "invalid backup plan name", nil)
 	case errors.Is(err, domain.ErrInvalidCronExpression):
@@ -856,4 +896,293 @@ func (h *Handler) VerifyBackupRun(w http.ResponseWriter, r *http.Request) {
 		msg = "اعتبارسنجی انجام شد اما یکپارچگی یک یا چند آرتیفکت تأیید نشد."
 	}
 	httpapi.WriteJSON(w, r, http.StatusOK, resp, msg)
+}
+
+// CreateStorageTarget handles POST /api/v1/storage-targets.
+func (h *Handler) CreateStorageTarget(w http.ResponseWriter, r *http.Request) {
+	reqLogger := logger.FromContext(r.Context(), h.logger)
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+
+	tenantCtx, ok := orgHttpapi.TenantContextFromRequest(r)
+	if !ok || tenantCtx == nil || tenantCtx.OrganizationID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "tenant context required", nil)
+		return
+	}
+
+	ct := r.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil || mediaType != "application/json" {
+		httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "Content-Type must be application/json", nil)
+		return
+	}
+
+	var req CreateStorageTargetRequest
+	if err := httpapi.DecodeJSON(w, r, &req); err != nil {
+		switch {
+		case errors.Is(err, httpapi.ErrBodyTooLarge):
+			httpapi.WriteError(w, r, http.StatusRequestEntityTooLarge, "BODY_TOO_LARGE", "request body exceeds maximum allowed size of 64 KiB", nil)
+		case errors.Is(err, httpapi.ErrEmptyBody):
+			httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "request body cannot be empty", nil)
+		default:
+			httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "malformed JSON request payload", nil)
+		}
+		return
+	}
+
+	if h.storageTargetService == nil {
+		reqLogger.Error("storage target service is not initialized")
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "storage target service is temporarily unavailable", nil)
+		return
+	}
+
+	var configJSON json.RawMessage
+	if req.Type == domain.StorageTargetTypeS3 {
+		if req.S3Config == nil {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "s3_config is required for s3 storage target", nil)
+			return
+		}
+		raw, err := json.Marshal(req.S3Config)
+		if err != nil {
+			httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "malformed s3_config", nil)
+			return
+		}
+		configJSON = raw
+	}
+
+	input := service.CreateStorageTargetInput{
+		Name:         req.Name,
+		Type:         req.Type,
+		Config:       configJSON,
+		CredentialID: req.CredentialID,
+	}
+
+	target, err := h.storageTargetService.CreateStorageTarget(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, input)
+	if err != nil {
+		h.handleStorageTargetError(w, r, reqLogger, err, "failed creating storage target")
+		return
+	}
+
+	httpapi.WriteJSON(w, r, http.StatusCreated, toStorageTargetResponse(target), "storage target created successfully")
+}
+
+// GetStorageTarget handles GET /api/v1/storage-targets/{id}.
+func (h *Handler) GetStorageTarget(w http.ResponseWriter, r *http.Request) {
+	reqLogger := logger.FromContext(r.Context(), h.logger)
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+
+	tenantCtx, ok := orgHttpapi.TenantContextFromRequest(r)
+	if !ok || tenantCtx == nil || tenantCtx.OrganizationID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "tenant context required", nil)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	targetID, err := uuid.Parse(idStr)
+	if err != nil || targetID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "invalid storage target ID format", nil)
+		return
+	}
+
+	if h.storageTargetService == nil {
+		reqLogger.Error("storage target service is not initialized")
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "storage target service is temporarily unavailable", nil)
+		return
+	}
+
+	target, err := h.storageTargetService.GetStorageTarget(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, targetID)
+	if err != nil {
+		h.handleStorageTargetError(w, r, reqLogger, err, "failed retrieving storage target")
+		return
+	}
+
+	httpapi.WriteJSON(w, r, http.StatusOK, toStorageTargetResponse(target), "storage target retrieved successfully")
+}
+
+// ListStorageTargets handles GET /api/v1/storage-targets.
+func (h *Handler) ListStorageTargets(w http.ResponseWriter, r *http.Request) {
+	reqLogger := logger.FromContext(r.Context(), h.logger)
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+
+	tenantCtx, ok := orgHttpapi.TenantContextFromRequest(r)
+	if !ok || tenantCtx == nil || tenantCtx.OrganizationID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "tenant context required", nil)
+		return
+	}
+
+	if h.storageTargetService == nil {
+		reqLogger.Error("storage target service is not initialized")
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "storage target service is temporarily unavailable", nil)
+		return
+	}
+
+	targets, err := h.storageTargetService.ListStorageTargets(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID)
+	if err != nil {
+		h.handleStorageTargetError(w, r, reqLogger, err, "failed listing storage targets")
+		return
+	}
+
+	resp := make([]*StorageTargetResponse, len(targets))
+	for i, t := range targets {
+		resp[i] = toStorageTargetResponse(t)
+	}
+
+	httpapi.WriteJSON(w, r, http.StatusOK, resp, "storage targets retrieved successfully")
+}
+
+// UpdateStorageTarget handles PUT /api/v1/storage-targets/{id}.
+func (h *Handler) UpdateStorageTarget(w http.ResponseWriter, r *http.Request) {
+	reqLogger := logger.FromContext(r.Context(), h.logger)
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+
+	tenantCtx, ok := orgHttpapi.TenantContextFromRequest(r)
+	if !ok || tenantCtx == nil || tenantCtx.OrganizationID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "tenant context required", nil)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	targetID, err := uuid.Parse(idStr)
+	if err != nil || targetID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "invalid storage target ID format", nil)
+		return
+	}
+
+	ct := r.Header.Get("Content-Type")
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil || mediaType != "application/json" {
+		httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "Content-Type must be application/json", nil)
+		return
+	}
+
+	var req UpdateStorageTargetRequest
+	if err := httpapi.DecodeJSON(w, r, &req); err != nil {
+		switch {
+		case errors.Is(err, httpapi.ErrBodyTooLarge):
+			httpapi.WriteError(w, r, http.StatusRequestEntityTooLarge, "BODY_TOO_LARGE", "request body exceeds maximum allowed size of 64 KiB", nil)
+		case errors.Is(err, httpapi.ErrEmptyBody):
+			httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "request body cannot be empty", nil)
+		default:
+			httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "malformed JSON request payload", nil)
+		}
+		return
+	}
+
+	if h.storageTargetService == nil {
+		reqLogger.Error("storage target service is not initialized")
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "storage target service is temporarily unavailable", nil)
+		return
+	}
+
+	var configJSON json.RawMessage
+	if req.S3Config != nil {
+		raw, err := json.Marshal(req.S3Config)
+		if err != nil {
+			httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "malformed s3_config", nil)
+			return
+		}
+		configJSON = raw
+	}
+
+	name := ""
+	if req.Name != nil {
+		name = *req.Name
+	}
+	var status domain.StorageTargetStatus
+	if req.Status != nil {
+		status = *req.Status
+	}
+
+	input := service.UpdateStorageTargetInput{
+		Name:         name,
+		Config:       configJSON,
+		CredentialID: req.CredentialID,
+		Status:       status,
+	}
+
+	target, err := h.storageTargetService.UpdateStorageTarget(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, targetID, input)
+	if err != nil {
+		h.handleStorageTargetError(w, r, reqLogger, err, "failed updating storage target")
+		return
+	}
+
+	httpapi.WriteJSON(w, r, http.StatusOK, toStorageTargetResponse(target), "storage target updated successfully")
+}
+
+// DeleteStorageTarget handles DELETE /api/v1/storage-targets/{id}.
+func (h *Handler) DeleteStorageTarget(w http.ResponseWriter, r *http.Request) {
+	reqLogger := logger.FromContext(r.Context(), h.logger)
+
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+
+	tenantCtx, ok := orgHttpapi.TenantContextFromRequest(r)
+	if !ok || tenantCtx == nil || tenantCtx.OrganizationID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "tenant context required", nil)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	targetID, err := uuid.Parse(idStr)
+	if err != nil || targetID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "invalid storage target ID format", nil)
+		return
+	}
+
+	if h.storageTargetService == nil {
+		reqLogger.Error("storage target service is not initialized")
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "storage target service is temporarily unavailable", nil)
+		return
+	}
+
+	if err := h.storageTargetService.DeleteStorageTarget(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, targetID); err != nil {
+		h.handleStorageTargetError(w, r, reqLogger, err, "failed deleting storage target")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) handleStorageTargetError(w http.ResponseWriter, r *http.Request, reqLogger *slog.Logger, err error, logMsg string) {
+	switch {
+	case errors.Is(err, domain.ErrUnauthorizedRole):
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "unauthorized role for storage target operation", nil)
+	case errors.Is(err, domain.ErrStorageTargetNotFound):
+		httpapi.WriteError(w, r, http.StatusNotFound, "STORAGE_TARGET_NOT_FOUND", "storage target not found", nil)
+	case errors.Is(err, domain.ErrStorageTargetLocationImmutable):
+		httpapi.WriteError(w, r, http.StatusConflict, "CONFLICT", "storage target location cannot be modified after artifacts are created", nil)
+	case errors.Is(err, domain.ErrCannotDeleteDefaultStorageTarget):
+		httpapi.WriteError(w, r, http.StatusConflict, "CONFLICT", "cannot delete or disable default storage target", nil)
+	case errors.Is(err, domain.ErrStorageTargetInUse):
+		httpapi.WriteError(w, r, http.StatusConflict, "CONFLICT", "storage target is in use and cannot be deleted", nil)
+	case errors.Is(err, domain.ErrInvalidStorageTargetName):
+		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "invalid storage target name", nil)
+	case errors.Is(err, domain.ErrStorageTargetNotSupported):
+		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unsupported storage target type", nil)
+	case errors.Is(err, domain.ErrStorageTargetCredentialRequired):
+		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "credential is required for s3 storage target", nil)
+	case errors.Is(err, domain.ErrInvalidStorageTargetConfig):
+		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", err.Error(), nil)
+	case errors.Is(err, domain.ErrBackupServiceUnavailable):
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "storage service is temporarily unavailable", nil)
+	default:
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "does not exist in organization") {
+			httpapi.WriteError(w, r, http.StatusNotFound, "CREDENTIAL_NOT_FOUND", "referenced credential does not exist in organization", nil)
+			return
+		}
+		if strings.Contains(errMsg, "must be of type s3_credentials") || strings.Contains(errMsg, "invalid storage target status") || strings.Contains(errMsg, "manual creation of local storage targets") {
+			httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", errMsg, nil)
+			return
+		}
+		reqLogger.Error(logMsg, slog.String("error", err.Error()))
+		httpapi.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "internal server error", nil)
+	}
 }

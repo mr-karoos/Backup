@@ -16,12 +16,13 @@ const (
 	TypeSSHPassword    Type = "ssh_password"
 	TypeCPanelAPIToken Type = "cpanel_api_token"
 	TypeCPanelPassword Type = "cpanel_password"
+	TypeS3Credentials  Type = "s3_credentials"
 )
 
 // IsValid checks whether the credential type is one of the supported V1 canonical types.
 func (t Type) IsValid() bool {
 	switch t {
-	case TypeSSHPrivateKey, TypeSSHPassword, TypeCPanelAPIToken, TypeCPanelPassword:
+	case TypeSSHPrivateKey, TypeSSHPassword, TypeCPanelAPIToken, TypeCPanelPassword, TypeS3Credentials:
 		return true
 	default:
 		return false

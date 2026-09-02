@@ -46,6 +46,8 @@ import (
 	resourceRepo "backup-platform/internal/resource/repository"
 	resourceService "backup-platform/internal/resource/service"
 	"backup-platform/internal/storage/local"
+	storageResolver "backup-platform/internal/storage/resolver"
+	s3Storage "backup-platform/internal/storage/s3"
 	"backup-platform/pkg/uuid"
 )
 
@@ -209,7 +211,7 @@ func run() error {
 	databaseDiscoveryService := resourceService.NewDatabaseDiscoveryService(resourceRepository, vaultService, discoveryRegistry, db, log)
 	resourceHandler := resourceHttpapi.NewHandler(resourceAppService, connectionTestService, databaseDiscoveryService, log)
 
-	// 12. Initialize Storage Subsystem (Phase 5)
+	// 12. Initialize Storage Subsystem (Phase 5 & Future Phase A Step A.1)
 	localStorageProvider, err := local.NewLocalStorageProvider(cfg.StorageRoot)
 	if err != nil {
 		log.Error("failed to initialize local storage provider")
@@ -218,6 +220,11 @@ func run() error {
 	if err := localStorageProvider.EnsureStorageRoot(context.Background()); err != nil {
 		log.Error("failed to ensure storage root directory")
 		return fmt.Errorf("storage root setup failed")
+	}
+
+	endpointPolicy := &s3Storage.EndpointSecurityPolicy{
+		AllowInsecureHTTP: cfg.S3AllowInsecureEndpoints,
+		PrivateAllowlist:  cfg.S3PrivateEndpointsAllowlist,
 	}
 
 	// 13. Initialize Backup Engine, Capability Registries & Verification Engine (Phase 5 & Phase 6A)
@@ -237,17 +244,30 @@ func run() error {
 	auditRecorder := auditService.NewAuditService(auditRepository, log)
 
 	backupRepository := backupRepo.NewPostgresBackupRepository(db)
+	storageResolverService := storageResolver.NewStorageResolver(
+		localStorageProvider,
+		backupRepository,
+		vaultService,
+		cfg.S3AllowInsecureEndpoints,
+		cfg.S3PrivateEndpointsAllowlist,
+	)
 	resFinder := &resourceFinderAdapter{repo: resourceRepository, db: db}
 	backupJobService := backupService.NewBackupJobService(backupRepository, resFinder)
 	backupPlanService := backupService.NewBackupPlanService(backupRepository, resFinder)
 	historyService := backupService.NewHistoryService(backupRepository, log)
 	artifactService := backupService.NewArtifactService(backupRepository, localStorageProvider, auditRecorder, log)
+	artifactService.SetStorageResolver(storageResolverService)
 	verificationService := backupService.NewVerificationService(backupRepository, localStorageProvider, verificationEngine, log)
+	verificationService.SetStorageResolver(storageResolverService)
+
+	storageTargetService := backupService.NewStorageTargetService(backupRepository, vaultService, endpointPolicy, log)
+
 	backupHandler := backupHttpapi.NewHandler(backupJobService, backupPlanService, historyService, artifactService, verificationService, log)
+	backupHandler.SetStorageTargetService(storageTargetService)
 
 	// 15. Run Startup Recovery for Interrupted Backup Runs (Fail-fast)
 	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	if err := backupWorker.RunStartupRecovery(recoveryCtx, backupRepository, localStorageProvider, log); err != nil {
+	if err := backupWorker.RunStartupRecoveryWithResolver(recoveryCtx, backupRepository, localStorageProvider, storageResolverService, log); err != nil {
 		recoveryCancel()
 		log.Error("startup backup recovery failed")
 		return fmt.Errorf("startup backup recovery failed")
@@ -266,6 +286,8 @@ func run() error {
 		auditRecorder,
 		log,
 	)
+	retentionProcessor.SetStorageResolver(storageResolverService)
+
 	workerPool := backupWorker.NewWorkerPool(
 		backupWorker.DefaultWorkerPoolConfig(),
 		backupRepository,
@@ -280,9 +302,11 @@ func run() error {
 		log,
 	)
 	workerPool.SetRetentionManager(retentionProcessor)
+	workerPool.SetStorageResolver(storageResolverService)
 	workerPool.Start(backgroundCtx)
 
 	staleReaper := backupWorker.NewStaleRunReaper(backupRepository, localStorageProvider, 30*time.Second, log)
+	staleReaper.SetStorageResolver(storageResolverService)
 	staleReaper.Start(backgroundCtx)
 
 	backupSched := backupScheduler.NewScheduler(backupRepository, log, 10*time.Second)
@@ -336,6 +360,13 @@ func run() error {
 	mux.Handle("DELETE /api/v1/resources/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionResourceWrite, log)(http.HandlerFunc(resourceHandler.Delete)))))
 	mux.Handle("POST /api/v1/resources/{id}/test-connection", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionResourceWrite, log)(http.HandlerFunc(resourceHandler.TestConnection)))))
 	mux.Handle("GET /api/v1/resources/{id}/databases", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionResourceWrite, log)(http.HandlerFunc(resourceHandler.DiscoverDatabases)))))
+
+	// Tenant-scoped storage target routes (Future Phase A Step A.1)
+	mux.Handle("GET /api/v1/storage-targets", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionStorageTargetRead, log)(http.HandlerFunc(backupHandler.ListStorageTargets)))))
+	mux.Handle("POST /api/v1/storage-targets", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionStorageTargetWrite, log)(http.HandlerFunc(backupHandler.CreateStorageTarget)))))
+	mux.Handle("GET /api/v1/storage-targets/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionStorageTargetRead, log)(http.HandlerFunc(backupHandler.GetStorageTarget)))))
+	mux.Handle("PUT /api/v1/storage-targets/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionStorageTargetWrite, log)(http.HandlerFunc(backupHandler.UpdateStorageTarget)))))
+	mux.Handle("DELETE /api/v1/storage-targets/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionStorageTargetWrite, log)(http.HandlerFunc(backupHandler.DeleteStorageTarget)))))
 
 	// Tenant-scoped backup plan routes (Phase 7A)
 	mux.Handle("GET /api/v1/backup-plans", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionBackupPlanRead, log)(http.HandlerFunc(backupHandler.ListBackupPlans)))))
