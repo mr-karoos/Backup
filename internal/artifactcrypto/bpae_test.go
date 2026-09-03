@@ -685,30 +685,42 @@ func TestBPAE_FinalHoldbackSemantics(t *testing.T) {
 	})
 }
 
-// hostileZeroNilReader simulates a reader that returns (0, nil) before either extra bytes or EOF.
-type hostileZeroNilReader struct {
-	data              []byte
-	pos               int
-	emptyReadsToYield int
-	infiniteEmpty     bool
+// phasedHostileReader simulates a reader that yields primaryData, then a sequence of (0, nil),
+// then optional trailingData, and finally io.EOF.
+type phasedHostileReader struct {
+	primaryData         []byte
+	primaryPos          int
+	emptyReadsRemaining int
+	trailingData        []byte
+	trailingPos         int
+	infiniteEmpty       bool
 }
 
-func (h *hostileZeroNilReader) Read(p []byte) (int, error) {
-	if h.pos < len(h.data) {
-		// Read normally until the end of the specified data
-		n := copy(p, h.data[h.pos:])
-		h.pos += n
+func (r *phasedHostileReader) Read(p []byte) (int, error) {
+	// Phase 1: Stream primaryData completely
+	if r.primaryPos < len(r.primaryData) {
+		n := copy(p, r.primaryData[r.primaryPos:])
+		r.primaryPos += n
 		return n, nil
 	}
 
-	// At or beyond the end of data:
-	if h.infiniteEmpty {
+	// Phase 2: Yield (0, nil) empty reads
+	if r.infiniteEmpty {
 		return 0, nil
 	}
-	if h.emptyReadsToYield > 0 {
-		h.emptyReadsToYield--
+	if r.emptyReadsRemaining > 0 {
+		r.emptyReadsRemaining--
 		return 0, nil
 	}
+
+	// Phase 3: Stream trailingData if any
+	if r.trailingPos < len(r.trailingData) {
+		n := copy(p, r.trailingData[r.trailingPos:])
+		r.trailingPos += n
+		return n, nil
+	}
+
+	// Phase 4: True EOF
 	return 0, io.EOF
 }
 
@@ -727,12 +739,11 @@ func TestBPAE_ProvableTrailingByteAndEOF(t *testing.T) {
 	validEncrypted := buf.Bytes()
 
 	t.Run("hostile reader yields (0, nil) before extra trailing byte - fails closed with ErrTrailingBytes", func(t *testing.T) {
-		withTrailing := append(bytes.Clone(validEncrypted), 0x99) // 1 extra trailing byte
-		// The reader will read validEncrypted, then at offset len(validEncrypted) it yields (0,nil) 3 times,
-		// then yields the trailing byte 0x99.
-		hostile := &hostileZeroNilReader{
-			data:              withTrailing,
-			emptyReadsToYield: 3,
+		// Complete valid BPAE stream in primaryData, separate trailing byte in trailingData
+		hostile := &phasedHostileReader{
+			primaryData:         validEncrypted,
+			emptyReadsRemaining: 3,
+			trailingData:        []byte{0x99}, // 1 extra trailing byte AFTER (0, nil) phase
 		}
 
 		dec, err := NewDecryptReader(hostile, keyProvider, orgID, artifactID)
@@ -748,9 +759,10 @@ func TestBPAE_ProvableTrailingByteAndEOF(t *testing.T) {
 	})
 
 	t.Run("hostile reader yields (0, nil) before real EOF - decrypts cleanly without hanging", func(t *testing.T) {
-		hostile := &hostileZeroNilReader{
-			data:              validEncrypted,
-			emptyReadsToYield: 3,
+		hostile := &phasedHostileReader{
+			primaryData:         validEncrypted,
+			emptyReadsRemaining: 3,
+			trailingData:        nil, // No trailing data, goes directly to EOF after (0, nil)
 		}
 
 		dec, err := NewDecryptReader(hostile, keyProvider, orgID, artifactID)
@@ -769,8 +781,8 @@ func TestBPAE_ProvableTrailingByteAndEOF(t *testing.T) {
 	})
 
 	t.Run("hostile reader yields infinite (0, nil) after FINAL - terminates safely with error without hanging", func(t *testing.T) {
-		hostile := &hostileZeroNilReader{
-			data:          validEncrypted,
+		hostile := &phasedHostileReader{
+			primaryData:   validEncrypted,
 			infiniteEmpty: true,
 		}
 
