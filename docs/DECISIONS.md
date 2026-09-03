@@ -525,11 +525,16 @@
   3. **استاندارد فریمینگ احراز اصالت‌شده BPAE (Authenticated Versioned Framing)**:
      * برای هر آرتیفکت یک کلید داده تصادفی مستقل ۲۵۶ بیتی (DEK) تولید می‌شود.
      * کلید DEK با الگوریتم **AES-256-GCM** توسط کلید KEK و نانس تصادفی ۱۲ بایتی (`WrapNonce`) بسته‌بندی (`Wrap`) می‌شود.
+     * **ثابت‌های نسخه ۱ فرمت BPAE (Frozen V1 Constant Values)**:
+       - فیلد `Magic`: دقیقاً رشته اسکی `"BPAE"` با بایت‌های هگزادسیمال `0x42 0x50 0x41 0x45` (۴ بایت).
+       - فیلد `FormatVersion`: مقدار `0x01` (۱ بایت).
+       - فیلد `CipherSuite`: مقدار `0x01` (۱ بایت) که منحصراً نشان‌دهنده الگوریتم **AES-256-GCM** با نانس ۱۲ بایتی و تگ احراز اصالت ۱۶ بایتی است.
+       - **قاعده Fail-Closed نسخه**: هرگونه مقدار ناشناخته یا پشتیبانی‌نشده برای `Magic`، `FormatVersion` یا `CipherSuite` در زمان دکریپشن باید بلافاصله و بدون تلاش خاموش برای سازگاری آینده Fail-Closed شده و رد گردد.
      * **تفکیک صریح متادیتای AAD، هدر کلید و پرولوگ فایل (Header & Prologue Layout)**:
        - **متادیتای AAD هدر (Header AAD Metadata - ۴۲ بایت)**: ۴۲ بایت نخست هدر مستقیماً به عنوان AAD عملیات Wrap کلید DEK استفاده می‌شود و ساختار آن دقیقاً به صورت زیر منجمد است:
-         * `Offset 0` (طول ۴ بایت): `Magic` (شناسه استاندارد BPAE)
-         * `Offset 4` (طول ۱ بایت): `FormatVersion`
-         * `Offset 5` (طول ۱ بایت): `CipherSuite`
+         * `Offset 0` (طول ۴ بایت): `Magic` (`0x42 0x50 0x41 0x45`)
+         * `Offset 4` (طول ۱ بایت): `FormatVersion` (`0x01`)
+         * `Offset 5` (طول ۱ بایت): `CipherSuite` (`0x01`)
          * `Offset 6` (طول ۴ بایت): `MasterKeyVersion` (عدد صحیح uint32 big-endian)
          * `Offset 10` (طول ۱۶ بایت): `OrganizationID` (بایت‌های خام UUID)
          * `Offset 26` (طول ۱۶ بایت): `ArtifactID` (بایت‌های خام UUID)
@@ -540,25 +545,43 @@
        - **پرولوگ ثابت کامل پیش از رکوردها (Complete Fixed Prologue - ۱۰۶ بایت)**: بلافاصله پس از WrappedDEK، پیشوند نانس تصادفی آرتیفکت در جریان بایت‌ها قرار می‌گیرد:
          * `Offset 102` (طول ۴ بایت): `ArtifactNoncePrefix` (۴ بایت تصادفی به ازای هر آرتیفکت)
          * مجموع طول پرولوگ ثابت فایل پیش از شروع اولین رکورد دقیقاً ۱۰۶ بایت است (`Fixed BPAE Prologue = 106 bytes`).
-     * **فرمت رکوردهای داده (DATA Record Format)**:
-       - هر رکورد عادی داده با ساختار زیر سریالایز و در چانک‌های حداکثر ۶۴ کیلوبایتی با الگوریتم AES-256-GCM رمزگذاری می‌شود:
-         * فیلد `Flags`: ۱ بایت (`uint8 = 0x00`)
-         * فیلد `ChunkIndex`: ۸ بایت (`uint64 big-endian`)
-         * فیلد `PlaintextLength`: ۴ بایت (`uint32 big-endian`)
-         * فیلد `Ciphertext`: متن رمزشده به طول `PlaintextLength` بایت
-         * فیلد `GCMTag`: ۱۶ بایت تگ احراز اصالت AES-256-GCM
-       - نانس هر چانک داده ۱۲ بایت است: `ArtifactNoncePrefix (4B) || ChunkIndex (8B big-endian)` که تکرارناپذیری قطعی نانس را تضمین می‌کند.
-     * **رکورد پایانی احراز اصالت‌شده و اجباری (Mandatory Authenticated FINAL Record)**:
-       - رکورد FINAL فاقد پی‌لود سایفرتکست بوده و احراز اصالت آن برای اثبات اتمام کامل و بدون بریدگی استریم الزامی است:
-         * فیلد `Flags`: ۱ بایت (`uint8 = 0x01`)
-         * فیلد `NextChunkIndex`: ۸ بایت (`uint64 big-endian`)
-         * فیلد `TotalPlaintextSize`: ۸ بایت (`uint64 big-endian`)
-         * فیلد `DataChunkCount`: ۸ بایت (`uint64 big-endian`)
-         * فیلد `GCMTag`: ۱۶ بایت تگ احراز اصالت AES-256-GCM
-       - نانس رکورد FINAL نیز از همان ساختار نانس `ArtifactNoncePrefix (4B) || NextChunkIndex (8B big-endian)` استفاده می‌کند.
-       - متادیتای داده‌های وابسته به احراز اصالت (AAD) رکورد FINAL حداقل شامل موارد زیر است:
-         `FormatVersion || OrganizationID || ArtifactID || Flags || NextChunkIndex || TotalPlaintextSize || DataChunkCount`
-       - فقدان رکورد FINAL، وجود رکورد FINAL تکراری، مغایرت در شمارنده یا اندیس چانک‌ها، یا شکست اعتبارسنجی تگ اصالت GCM صریحاً به معنای بریدگی، دستکاری یا فساد استریم BPAE بوده و پایپ‌لاین به سرعت Fail-Closed می‌شود.
+     * **فرمت رکوردهای داده و AAD دقیق آن‌ها (DATA Record Format & Exact AAD)**:
+       - **داده‌های وابسته به احراز اصالت رکورد داده (DATA Record AAD - دقیقا ۴۶ بایت)**:
+         برای هر رکورد داده، مقدار AAD دقیقاً از الحاق باینری زیر تشکیل می‌شود:
+         `FormatVersion (1B) || OrganizationID (16B raw UUID) || ArtifactID (16B raw UUID) || Flags (1B = 0x00) || ChunkIndex (8B uint64 BE) || PlaintextLength (4B uint32 BE)`
+         (مجموع طول DATA AAD دقیقاً ۴۶ بایت است).
+       - **فرایند رمزنگاری و ساختار سریالایز رکوردهای داده**:
+         * به ازای هر چانک متن خام، رمزنگاری با فراخوانی زیر انجام می‌شود:
+           `ciphertextWithTag = AES-GCM.Seal(nil, nonce, plaintextChunk, dataAAD)`
+         * خروجی تابع Seal شامل متن رمزشده به علاوه ۱۶ بایت پایانی به عنوان `GCMTag` است.
+         * رکورد سریالایزشده ذخیره‌شده در استریم شامل فیلدهای زیر است:
+           - فیلد `Flags`: ۱ بایت (`uint8 = 0x00`)
+           - فیلد `ChunkIndex`: ۸ بایت (`uint64 big-endian`)
+           - فیلد `PlaintextLength`: ۴ بایت (`uint32 big-endian`) — دامنه مجاز: بین ۱ الی ۶۵۵۳۶ بایت (`1..65536`، حداکثر ۶۴ کیلوبایت)
+           - فیلد `Ciphertext`: متن رمزشده به طول `PlaintextLength` بایت
+           - فیلد `GCMTag`: ۱۶ بایت تگ احراز اصالت AES-256-GCM
+         * مقدار `ChunkIndex` از `0` آغاز شده و دقیقاً با گام `1` افزایش می‌یابد. هرگونه `ChunkIndex` غیرمنتظره، تکراری یا جاافتاده بلافاصله موجب Fail-Closed شدن پروسه می‌گردد.
+         * نانس هر چانک داده ۱۲ بایت است: `ArtifactNoncePrefix (4B) || ChunkIndex (8B big-endian)` که تکرارناپذیری قطعی نانس را تضمین می‌کند.
+     * **رکورد پایانی احراز اصالت‌شده، اجباری و AAD دقیق آن (Mandatory Authenticated FINAL Record & Exact AAD)**:
+       - رکورد FINAL فاقد پی‌لود سایفرتکست بوده و احراز اصالت آن برای اثبات اتمام کامل، عدم دستکاری و بدون بریدگی بودن استریم الزامی است.
+       - **داده‌های وابسته به احراز اصالت رکورد پایانی (FINAL Record AAD - دقیقا ۵۸ بایت)**:
+         مقدار AAD رکورد FINAL منحصراً و دقیقاً از الحاق باینری فیلدهای زیر تشکیل می‌شود:
+         `FormatVersion (1B) || OrganizationID (16B raw UUID) || ArtifactID (16B raw UUID) || Flags (1B = 0x01) || NextChunkIndex (8B uint64 BE) || TotalPlaintextSize (8B uint64 BE) || DataChunkCount (8B uint64 BE)`
+         (مجموع طول FINAL AAD دقیقاً ۵۸ بایت است).
+       - **تولید تگ و ساختار رکورد FINAL**:
+         * تگ ۱۶ بایتی احراز اصالت رکورد FINAL از طریق فراخوانی زیر تولید می‌شود:
+           `finalTag = AES-GCM.Seal(nil, finalNonce, nil, finalAAD)`
+         * ساختار سریالایزشده رکورد FINAL در استریم:
+           - فیلد `Flags`: ۱ بایت (`uint8 = 0x01`)
+           - فیلد `NextChunkIndex`: ۸ بایت (`uint64 big-endian`)
+           - فیلد `TotalPlaintextSize`: ۸ بایت (`uint64 big-endian`)
+           - فیلد `DataChunkCount`: ۸ بایت (`uint64 big-endian`)
+           - فیلد `GCMTag`: ۱۶ بایت تگ احراز اصالت تولیدشده
+         * نانس رکورد FINAL نیز از ترکیب ۱۲ بایتی `ArtifactNoncePrefix (4B) || NextChunkIndex (8B big-endian)` استفاده می‌کند.
+         * **قیدهای قطعی**:
+           - الزام برابری: `NextChunkIndex == DataChunkCount` و این مقدار باید دقیقاً برابر با اندیس ترتیبی چانک بعدی مورد انتظار باشد.
+           - رکورد FINAL باید دقیقاً یک بار و به عنوان آخرین رکورد جریان ظاهر شود.
+           - هرگونه بایت اضافی پس از رکورد احراز اصالت‌شده FINAL، یا فقدان رکورد FINAL، وجود رکورد تکراری، یا شکست اعتبارسنجی تگ اصالت صریحاً به معنای فساد یا دستکاری استریم BPAE تلقی شده و جریان دکریپشن رد می‌گردد.
      * **تفکیک صریح اندازه و چک‌سام**:
        - فیلد `checksum_hash`: منحصراً هش SHA-256 جریان بایت‌های داده‌های فشرده خام (Plaintext Gzip Stream) پیش از رمزنگاری BPAE است.
        - فیلد `stored_size_bytes`: اندازه عدد صحیح بایت‌های فیزیکی شیء رمزگذاری‌شده نهایی BPAE ذخیره‌شده در رسانه Local/S3 است.
