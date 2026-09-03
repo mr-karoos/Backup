@@ -1376,11 +1376,15 @@ func (r *PostgresBackupRepository) CreateArtifact(ctx context.Context, artifact 
 			NULL, false, NULL, NOW(), NOW()
 		FROM backup_runs r
 		JOIN backup_jobs j ON j.id = r.job_id AND j.organization_id = r.organization_id
-		JOIN storage_targets st ON st.id = $5 AND st.organization_id = r.organization_id AND st.type = 'local' AND st.status = 'active'
+		JOIN storage_targets st ON st.id = j.storage_target_id AND st.organization_id = r.organization_id
 		WHERE r.id = $3
 		  AND r.organization_id = $2
 		  AND j.resource_id = $4
+		  AND st.id = $5
 		  AND r.status = 'running'
+		  AND j.engine_type = 'direct_stream'
+		  AND st.status = 'active'
+		  AND st.type IN ('local', 's3', 's3_compatible')
 		RETURNING id, organization_id, run_id, resource_id, storage_target_id,
 		          artifact_type, format, target_name, storage_reference, size_bytes,
 		          checksum_algorithm, checksum_hash, verification_status, verified_at,

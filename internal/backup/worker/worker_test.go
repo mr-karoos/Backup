@@ -398,6 +398,13 @@ func (r *fakeWorkerRepo) CreateArtifact(ctx context.Context, artifact *domain.Ba
 	if r.createArtifactErr != nil {
 		return nil, r.createArtifactErr
 	}
+	if run, ok := r.runs[artifact.RunID]; ok {
+		if job, ok := r.jobs[run.JobID]; ok {
+			if job.StorageTargetID != uuid.Nil && artifact.StorageTargetID != job.StorageTargetID {
+				return nil, domain.ErrArtifactChainMismatch
+			}
+		}
+	}
 	r.artifacts[artifact.ID] = artifact
 	return artifact, nil
 }
@@ -2740,6 +2747,293 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 			if !art.IsDeleted {
 				t.Errorf("artifact should be cleaned up by worker failure cleanup when finalize fails")
 			}
+		}
+	})
+}
+
+type trackingStorageProvider struct {
+	storage.StorageProvider
+	saveCalls   int
+	deleteCalls int
+	openCalls   int
+}
+
+func (m *trackingStorageProvider) SaveArtifact(ctx context.Context, orgID, resID, runID, artifactID uuid.UUID, extension string, src io.Reader) (*storage.SaveResult, error) {
+	m.saveCalls++
+	return m.StorageProvider.SaveArtifact(ctx, orgID, resID, runID, artifactID, extension, src)
+}
+
+func (m *trackingStorageProvider) DeleteArtifact(ctx context.Context, storageReference string) error {
+	m.deleteCalls++
+	return m.StorageProvider.DeleteArtifact(ctx, storageReference)
+}
+
+func (m *trackingStorageProvider) OpenArtifact(ctx context.Context, storageReference string) (io.ReadCloser, error) {
+	m.openCalls++
+	return m.StorageProvider.OpenArtifact(ctx, storageReference)
+}
+
+type staticStorageResolver struct {
+	targetID uuid.UUID
+	provider storage.StorageProvider
+}
+
+func (r *staticStorageResolver) Resolve(ctx context.Context, orgID, targetID uuid.UUID) (storage.StorageProvider, error) {
+	if targetID == r.targetID {
+		return r.provider, nil
+	}
+	return nil, domain.ErrStorageTargetNotFound
+}
+
+func TestWorkerPool_S3DirectStream_PersistsS3TargetAndNeverFallsBackToLocal(t *testing.T) {
+	t.Run("Successful S3 job persists S3 target ID and never touches local fallback", func(t *testing.T) {
+		orgID := uuid.New()
+		resID := uuid.New()
+		credID := uuid.New()
+		s3TargetID := uuid.New()
+		localTargetID := uuid.New()
+
+		s3Dir := t.TempDir()
+		baseS3Store, _ := local.NewLocalStorageProvider(s3Dir)
+		_ = baseS3Store.EnsureStorageRoot(context.Background())
+		s3Store := &trackingStorageProvider{StorageProvider: baseS3Store}
+
+		localDir := t.TempDir()
+		baseLocalStore, _ := local.NewLocalStorageProvider(localDir)
+		_ = baseLocalStore.EnsureStorageRoot(context.Background())
+		localStore := &trackingStorageProvider{StorageProvider: baseLocalStore}
+
+		s3Target := &domain.StorageTarget{
+			ID:             s3TargetID,
+			OrganizationID: orgID,
+			Name:           "Production S3",
+			Type:           domain.StorageTargetTypeS3,
+			Status:         domain.StorageTargetStatusActive,
+			Config:         []byte(`{"bucket":"prod-bucket"}`),
+		}
+		localTarget := &domain.StorageTarget{
+			ID:             localTargetID,
+			OrganizationID: orgID,
+			Name:           "Default Local",
+			Type:           domain.StorageTargetTypeLocal,
+			Status:         domain.StorageTargetStatusActive,
+			IsDefault:      true,
+		}
+
+		repo := newFakeWorkerRepo(orgID)
+		repo.targets = map[uuid.UUID]*domain.StorageTarget{
+			s3TargetID:    s3Target,
+			localTargetID: localTarget,
+		}
+		repo.target = localTarget
+
+		job := &domain.BackupJob{
+			ID:              uuid.New(),
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			TriggerType:     domain.TriggerTypeManual,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: s3TargetID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"s3db"}},
+			Status:          domain.JobStatusPending,
+			CreatedAt:       time.Now(),
+		}
+		repo.jobs[job.ID] = job
+
+		validPassJSON, _ := payload.EncodeV1("testpass", nil)
+		resWithConn := &resDomain.ResourceWithConnector{
+			Resource: &resDomain.Resource{
+				ID:             resID,
+				OrganizationID: orgID,
+				Type:           resDomain.TypeUbuntuSSH,
+				Status:         resDomain.StatusActive,
+			},
+			Connector: &resDomain.ResourceConnector{
+				ID:           uuid.New(),
+				ResourceID:   resID,
+				CredentialID: credID,
+				Host:         "127.0.0.1",
+				Port:         22,
+				AuthType:     resDomain.AuthTypeSSHPassword,
+				Config: resDomain.ConnectorConfig{
+					Username: "testuser",
+				},
+			},
+		}
+
+		reg := connector.NewBackupCapabilityRegistry()
+		reg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{
+			sqlDump: "-- MySQL dump\nCREATE DATABASE `s3db`;\n",
+		})
+
+		workerPool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			reg,
+			nil,
+			engine.NewDirectStreamBackupEngine(),
+			localStore, // Local store configured as fallback
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			slog.Default(),
+		)
+		// Inject storage resolver pointing s3TargetID to s3Store
+		workerPool.SetStorageResolver(&staticStorageResolver{
+			targetID: s3TargetID,
+			provider: s3Store,
+		})
+
+		workerPool.processNextAvailableJob(context.Background(), 1)
+
+		// Assert S3 provider was used and Local provider was NEVER touched
+		if s3Store.saveCalls != 1 {
+			t.Errorf("expected S3 provider SaveArtifact to be called exactly once, got %d", s3Store.saveCalls)
+		}
+		if localStore.saveCalls != 0 {
+			t.Errorf("expected Local provider SaveArtifact to NEVER be called, got %d", localStore.saveCalls)
+		}
+
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+
+		if repo.finalizedJob == nil || repo.finalizedJob.Status != domain.JobStatusCompleted {
+			t.Errorf("expected job to be completed, got finalized: %+v", repo.finalizedJob)
+		}
+		if len(repo.artifacts) != 1 {
+			t.Fatalf("expected 1 artifact created, got %d", len(repo.artifacts))
+		}
+		for _, art := range repo.artifacts {
+			if art.StorageTargetID != s3TargetID {
+				t.Errorf("expected artifact StorageTargetID to equal Job.StorageTargetID (%s), got: %s", s3TargetID, art.StorageTargetID)
+			}
+			if art.StorageTargetID == localTargetID {
+				t.Errorf("artifact incorrectly persisted against Local target")
+			}
+		}
+	})
+
+	t.Run("CreateArtifact failure on S3 job cleans S3 physically and never falls back to local", func(t *testing.T) {
+		orgID := uuid.New()
+		resID := uuid.New()
+		credID := uuid.New()
+		s3TargetID := uuid.New()
+		localTargetID := uuid.New()
+
+		s3Dir := t.TempDir()
+		baseS3Store, _ := local.NewLocalStorageProvider(s3Dir)
+		_ = baseS3Store.EnsureStorageRoot(context.Background())
+		s3Store := &trackingStorageProvider{StorageProvider: baseS3Store}
+
+		localDir := t.TempDir()
+		baseLocalStore, _ := local.NewLocalStorageProvider(localDir)
+		_ = baseLocalStore.EnsureStorageRoot(context.Background())
+		localStore := &trackingStorageProvider{StorageProvider: baseLocalStore}
+
+		s3Target := &domain.StorageTarget{
+			ID:             s3TargetID,
+			OrganizationID: orgID,
+			Name:           "Production S3",
+			Type:           domain.StorageTargetTypeS3,
+			Status:         domain.StorageTargetStatusActive,
+			Config:         []byte(`{"bucket":"prod-bucket"}`),
+		}
+		localTarget := &domain.StorageTarget{
+			ID:             localTargetID,
+			OrganizationID: orgID,
+			Name:           "Default Local",
+			Type:           domain.StorageTargetTypeLocal,
+			Status:         domain.StorageTargetStatusActive,
+			IsDefault:      true,
+		}
+
+		repo := newFakeWorkerRepo(orgID)
+		repo.targets = map[uuid.UUID]*domain.StorageTarget{
+			s3TargetID:    s3Target,
+			localTargetID: localTarget,
+		}
+		repo.target = localTarget
+		// Simulate CreateArtifact failure (e.g. chain mismatch)
+		repo.createArtifactErr = domain.ErrArtifactChainMismatch
+
+		job := &domain.BackupJob{
+			ID:              uuid.New(),
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			TriggerType:     domain.TriggerTypeManual,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: s3TargetID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"s3db"}},
+			Status:          domain.JobStatusPending,
+			CreatedAt:       time.Now(),
+		}
+		repo.jobs[job.ID] = job
+
+		validPassJSON, _ := payload.EncodeV1("testpass", nil)
+		resWithConn := &resDomain.ResourceWithConnector{
+			Resource: &resDomain.Resource{
+				ID:             resID,
+				OrganizationID: orgID,
+				Type:           resDomain.TypeUbuntuSSH,
+				Status:         resDomain.StatusActive,
+			},
+			Connector: &resDomain.ResourceConnector{
+				ID:           uuid.New(),
+				ResourceID:   resID,
+				CredentialID: credID,
+				Host:         "127.0.0.1",
+				Port:         22,
+				AuthType:     resDomain.AuthTypeSSHPassword,
+				Config: resDomain.ConnectorConfig{
+					Username: "testuser",
+				},
+			},
+		}
+
+		reg := connector.NewBackupCapabilityRegistry()
+		reg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{
+			sqlDump: "-- MySQL dump\nCREATE DATABASE `s3db`;\n",
+		})
+
+		workerPool := NewWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			&fakeCredentialVault{payloadBytes: validPassJSON},
+			reg,
+			nil,
+			engine.NewDirectStreamBackupEngine(),
+			localStore,
+			verification.NewVerificationEngine(),
+			NewPerResourceMutexManager(),
+			slog.Default(),
+		)
+		workerPool.SetStorageResolver(&staticStorageResolver{
+			targetID: s3TargetID,
+			provider: s3Store,
+		})
+
+		workerPool.processNextAvailableJob(context.Background(), 1)
+
+		// Assert S3 provider was called to save and then delete (cleanup), Local provider never touched
+		if s3Store.saveCalls != 1 {
+			t.Errorf("expected S3 provider SaveArtifact to be called once, got %d", s3Store.saveCalls)
+		}
+		if s3Store.deleteCalls != 1 {
+			t.Errorf("expected S3 provider DeleteArtifact to be called once for cleanup, got %d", s3Store.deleteCalls)
+		}
+		if localStore.saveCalls != 0 || localStore.deleteCalls != 0 {
+			t.Errorf("expected Local provider to NEVER be called on S3 failure, got saveCalls=%d deleteCalls=%d",
+				localStore.saveCalls, localStore.deleteCalls)
+		}
+
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+		if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusFailed {
+			t.Errorf("expected run to be marked failed, got finalized run: %+v", repo.finalizedRun)
 		}
 	})
 }
