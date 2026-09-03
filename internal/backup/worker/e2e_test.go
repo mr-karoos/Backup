@@ -21,6 +21,7 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
+	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/backup/domain"
 	backupEngine "backup-platform/internal/backup/engine"
 	backupHttpapi "backup-platform/internal/backup/httpapi"
@@ -747,7 +748,28 @@ func TestE2E_WebsiteFilesBackupWorkflow(t *testing.T) {
 	}
 	defer rc.Close()
 
-	gzr, err := gzip.NewReader(rc)
+	rawBytes, err := io.ReadAll(rc)
+	if err != nil {
+		t.Fatalf("failed reading physical bytes: %v", err)
+	}
+	if !bytes.HasPrefix(rawBytes, []byte("BPAE")) {
+		t.Fatalf("expected physical artifact to start with BPAE magic bytes")
+	}
+	if _, gzErr := gzip.NewReader(bytes.NewReader(rawBytes)); gzErr == nil {
+		t.Fatalf("expected raw encrypted bytes to fail gzip decompression")
+	}
+
+	testKp, err := artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x42}, 32), 1)
+	if err != nil {
+		t.Fatalf("failed creating key provider: %v", err)
+	}
+	decReader, err := artifactcrypto.NewDecryptReader(bytes.NewReader(rawBytes), testKp, createdArtifact.OrganizationID, createdArtifact.ID)
+	if err != nil {
+		t.Fatalf("failed creating decrypt reader: %v", err)
+	}
+	defer decReader.Close()
+
+	gzr, err := gzip.NewReader(decReader)
 	if err != nil {
 		t.Fatalf("failed creating gzip reader: %v", err)
 	}

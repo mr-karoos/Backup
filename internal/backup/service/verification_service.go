@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
@@ -169,25 +170,47 @@ func (s *VerificationService) VerifyRun(
 			return nil, domain.ErrBackupServiceUnavailable
 		}
 
-		switch art.Format {
-		case domain.ArtifactFormatSQLGzip:
-			verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
-				ctx,
-				storeProvider,
-				art.StorageReference,
-				art.SizeBytes,
-				art.ChecksumHash,
-			)
-		case domain.ArtifactFormatTarGzip:
-			verMsg, verErr = s.verifier.VerifyFilesArtifact(
-				ctx,
-				storeProvider,
-				art.StorageReference,
-				art.SizeBytes,
-				art.ChecksumHash,
-			)
-		default:
-			if art.ArtifactType == domain.ArtifactTypeDatabaseDump {
+		if art.StoredSizeBytes != nil {
+			var meta struct {
+				CiphertextSHA256 string `json:"ciphertext_sha256"`
+			}
+			if len(art.EngineMetadata) > 0 {
+				_ = json.Unmarshal(art.EngineMetadata, &meta)
+			}
+			if meta.CiphertextSHA256 == "" {
+				verErr = errors.New("missing ciphertext_sha256 in engine_metadata for encrypted artifact")
+			} else {
+				if art.Format == domain.ArtifactFormatSQLGzip || art.ArtifactType == domain.ArtifactTypeDatabaseDump {
+					verMsg, verErr = s.verifier.VerifyEncryptedDatabaseArtifact(
+						ctx,
+						storeProvider,
+						art.StorageReference,
+						art.SizeBytes,
+						art.ChecksumHash,
+						*art.StoredSizeBytes,
+						meta.CiphertextSHA256,
+						art.OrganizationID,
+						art.ID,
+					)
+				} else if art.Format == domain.ArtifactFormatTarGzip || art.ArtifactType == domain.ArtifactTypeFilesArchive {
+					verMsg, verErr = s.verifier.VerifyEncryptedFilesArtifact(
+						ctx,
+						storeProvider,
+						art.StorageReference,
+						art.SizeBytes,
+						art.ChecksumHash,
+						*art.StoredSizeBytes,
+						meta.CiphertextSHA256,
+						art.OrganizationID,
+						art.ID,
+					)
+				} else {
+					verErr = errors.New("unsupported artifact format for verification")
+				}
+			}
+		} else {
+			switch art.Format {
+			case domain.ArtifactFormatSQLGzip:
 				verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
 					ctx,
 					storeProvider,
@@ -195,7 +218,7 @@ func (s *VerificationService) VerifyRun(
 					art.SizeBytes,
 					art.ChecksumHash,
 				)
-			} else if art.ArtifactType == domain.ArtifactTypeFilesArchive {
+			case domain.ArtifactFormatTarGzip:
 				verMsg, verErr = s.verifier.VerifyFilesArtifact(
 					ctx,
 					storeProvider,
@@ -203,8 +226,26 @@ func (s *VerificationService) VerifyRun(
 					art.SizeBytes,
 					art.ChecksumHash,
 				)
-			} else {
-				verErr = errors.New("unsupported artifact format for verification")
+			default:
+				if art.ArtifactType == domain.ArtifactTypeDatabaseDump {
+					verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
+						ctx,
+						storeProvider,
+						art.StorageReference,
+						art.SizeBytes,
+						art.ChecksumHash,
+					)
+				} else if art.ArtifactType == domain.ArtifactTypeFilesArchive {
+					verMsg, verErr = s.verifier.VerifyFilesArtifact(
+						ctx,
+						storeProvider,
+						art.StorageReference,
+						art.SizeBytes,
+						art.ChecksumHash,
+					)
+				} else {
+					verErr = errors.New("unsupported artifact format for verification")
+				}
 			}
 		}
 

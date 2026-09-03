@@ -12,7 +12,9 @@ import (
 	"io"
 	"strings"
 
+	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/storage"
+	"backup-platform/pkg/uuid"
 )
 
 const (
@@ -38,14 +40,50 @@ type Verifier interface {
 		expectedSizeBytes int64,
 		expectedChecksumSHA256 string,
 	) (string, error)
+
+	VerifyEncryptedDatabaseArtifact(
+		ctx context.Context,
+		storageProvider storage.StorageProvider,
+		storageReference string,
+		expectedPlaintextSize int64,
+		expectedPlaintextChecksum string,
+		storedSizeBytes int64,
+		ciphertextSHA256 string,
+		orgID, artifactID uuid.UUID,
+	) (string, error)
+
+	VerifyEncryptedFilesArtifact(
+		ctx context.Context,
+		storageProvider storage.StorageProvider,
+		storageReference string,
+		expectedPlaintextSize int64,
+		expectedPlaintextChecksum string,
+		storedSizeBytes int64,
+		ciphertextSHA256 string,
+		orgID, artifactID uuid.UUID,
+	) (string, error)
 }
 
 // VerificationEngine performs multi-point integrity checks on database and file backup artifacts.
-type VerificationEngine struct{}
+type VerificationEngine struct {
+	keyProvider artifactcrypto.KeyProvider
+}
 
 // NewVerificationEngine constructs a new VerificationEngine.
 func NewVerificationEngine() *VerificationEngine {
 	return &VerificationEngine{}
+}
+
+// NewVerificationEngineWithKeyProvider constructs a new VerificationEngine with key provider injected.
+func NewVerificationEngineWithKeyProvider(keyProvider artifactcrypto.KeyProvider) *VerificationEngine {
+	return &VerificationEngine{
+		keyProvider: keyProvider,
+	}
+}
+
+// SetKeyProvider sets or updates the artifact key provider.
+func (v *VerificationEngine) SetKeyProvider(keyProvider artifactcrypto.KeyProvider) {
+	v.keyProvider = keyProvider
 }
 
 type countingReader struct {
@@ -336,4 +374,350 @@ func hasValidMySQLDumpMarker(prefix []byte) bool {
 		}
 	}
 	return false
+}
+
+// VerifyEncryptedDatabaseArtifact verifies:
+// 1. Physical Layer: Stored physical object exists, matches storedSizeBytes and ciphertextSHA256.
+// 2. Decryption Layer: Stream decrypts using BPAE with orgID/artifactID binding and valid FINAL record.
+// 3. Plaintext Layer: Decrypted stream matches expectedPlaintextSize, expectedPlaintextChecksum, valid gzip, and valid SQL dump marker.
+func (v *VerificationEngine) VerifyEncryptedDatabaseArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedPlaintextSize int64,
+	expectedPlaintextChecksum string,
+	storedSizeBytes int64,
+	ciphertextSHA256 string,
+	orgID, artifactID uuid.UUID,
+) (string, error) {
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if storageProvider == nil {
+		return "", errors.New("storage provider cannot be nil")
+	}
+	if v.keyProvider == nil {
+		return "", errors.New("artifact key provider cannot be nil")
+	}
+	if expectedPlaintextSize <= 0 {
+		return "", errors.New("expected plaintext size must be greater than zero")
+	}
+	if storedSizeBytes <= 0 {
+		return "", errors.New("stored size must be greater than zero")
+	}
+	if strings.TrimSpace(expectedPlaintextChecksum) == "" {
+		return "", errors.New("expected plaintext checksum cannot be empty")
+	}
+	if strings.TrimSpace(ciphertextSHA256) == "" {
+		return "", errors.New("ciphertext checksum cannot be empty")
+	}
+	if orgID == uuid.Nil || artifactID == uuid.Nil {
+		return "", errors.New("valid organization ID and artifact ID are required")
+	}
+
+	rc, err := storageProvider.OpenArtifact(ctx, storageReference)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed opening artifact for verification: %w", err)
+	}
+	defer rc.Close()
+
+	stopWait := context.AfterFunc(ctx, func() {
+		_ = rc.Close()
+	})
+	defer stopWait()
+
+	// Physical layer: compute ciphertext SHA-256 and count physical stored bytes
+	cipherHasher := sha256.New()
+	cipherCounter := &countingReader{r: io.TeeReader(rc, cipherHasher)}
+
+	// Decryption layer: stream through BPAE DecryptReader
+	decReader, err := artifactcrypto.NewDecryptReader(cipherCounter, v.keyProvider, orgID, artifactID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed initializing BPAE decryption: %w", err)
+	}
+	defer decReader.Close()
+
+	// Plaintext layer: compute plaintext SHA-256 and count plaintext bytes
+	plainHasher := sha256.New()
+	plainCounter := &countingReader{r: io.TeeReader(decReader, plainHasher)}
+
+	// Gzip decompression layer
+	gzReader, err := gzip.NewReader(plainCounter)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("decrypted artifact is not a valid gzip stream: %w", err)
+	}
+	defer gzReader.Close()
+
+	// Read initial sanity chunk
+	sanityBuf := make([]byte, maxSanityHeaderBytes)
+	n, readErr := io.ReadFull(gzReader, sanityBuf)
+	if readErr != nil && !errors.Is(readErr, io.EOF) && !errors.Is(readErr, io.ErrUnexpectedEOF) {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed reading decompressed stream: %w", readErr)
+	}
+
+	decompressedPrefix := sanityBuf[:n]
+	var totalDecompressedBytes int64 = int64(n)
+
+	remainderBytes, drainErr := io.Copy(io.Discard, gzReader)
+	if drainErr != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("gzip stream integrity check failed: %w", drainErr)
+	}
+	totalDecompressedBytes += remainderBytes
+
+	if err := gzReader.Close(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("gzip stream closure error: %w", err)
+	}
+
+	// Drain any remaining decrypted bytes to finish plainHasher and plainCounter
+	if _, err := io.Copy(io.Discard, plainCounter); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed draining decrypted stream: %w", err)
+	}
+
+	// Close decrypt reader to enforce EOF validation and check for trailing bytes
+	if err := decReader.Close(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("BPAE decryption finalization failed: %w", err)
+	}
+
+	// Drain any remaining ciphertext bytes from physical counter
+	if _, err := io.Copy(io.Discard, cipherCounter); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed reading physical stream: %w", err)
+	}
+
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+
+	// Layer 1: Physical verification
+	if cipherCounter.totalBytes != storedSizeBytes {
+		return "", fmt.Errorf("physical artifact size mismatch: expected %d bytes, got %d bytes", storedSizeBytes, cipherCounter.totalBytes)
+	}
+	calculatedCiphertextSHA256 := hex.EncodeToString(cipherHasher.Sum(nil))
+	if !strings.EqualFold(calculatedCiphertextSHA256, ciphertextSHA256) {
+		return "", fmt.Errorf("ciphertext checksum mismatch: expected %s, got %s", ciphertextSHA256, calculatedCiphertextSHA256)
+	}
+
+	// Layer 2 & 3: Plaintext verification
+	if plainCounter.totalBytes != expectedPlaintextSize {
+		return "", fmt.Errorf("decrypted plaintext size mismatch: expected %d bytes, got %d bytes", expectedPlaintextSize, plainCounter.totalBytes)
+	}
+	calculatedPlaintextSHA256 := hex.EncodeToString(plainHasher.Sum(nil))
+	if !strings.EqualFold(calculatedPlaintextSHA256, expectedPlaintextChecksum) {
+		return "", fmt.Errorf("plaintext checksum mismatch: expected %s, got %s", expectedPlaintextChecksum, calculatedPlaintextSHA256)
+	}
+
+	if totalDecompressedBytes <= 0 {
+		return "", errors.New("decompressed database dump is empty")
+	}
+
+	if !hasValidMySQLDumpMarker(decompressedPrefix) {
+		return "", errors.New("decompressed stream failed basic SQL dump format sanity check")
+	}
+
+	return canonicalVerifiedMsg, nil
+}
+
+// VerifyEncryptedFilesArtifact verifies:
+// 1. Physical Layer: Stored physical object exists, matches storedSizeBytes and ciphertextSHA256.
+// 2. Decryption Layer: Stream decrypts using BPAE with orgID/artifactID binding and valid FINAL record.
+// 3. Plaintext Layer: Decrypted stream matches expectedPlaintextSize, expectedPlaintextChecksum, valid gzip, and valid non-empty safe tar archive.
+func (v *VerificationEngine) VerifyEncryptedFilesArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedPlaintextSize int64,
+	expectedPlaintextChecksum string,
+	storedSizeBytes int64,
+	ciphertextSHA256 string,
+	orgID, artifactID uuid.UUID,
+) (string, error) {
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if storageProvider == nil {
+		return "", errors.New("storage provider cannot be nil")
+	}
+	if v.keyProvider == nil {
+		return "", errors.New("artifact key provider cannot be nil")
+	}
+	if expectedPlaintextSize <= 0 {
+		return "", errors.New("expected plaintext size must be greater than zero")
+	}
+	if storedSizeBytes <= 0 {
+		return "", errors.New("stored size must be greater than zero")
+	}
+	if strings.TrimSpace(expectedPlaintextChecksum) == "" {
+		return "", errors.New("expected plaintext checksum cannot be empty")
+	}
+	if strings.TrimSpace(ciphertextSHA256) == "" {
+		return "", errors.New("ciphertext checksum cannot be empty")
+	}
+	if orgID == uuid.Nil || artifactID == uuid.Nil {
+		return "", errors.New("valid organization ID and artifact ID are required")
+	}
+
+	rc, err := storageProvider.OpenArtifact(ctx, storageReference)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed opening artifact for verification: %w", err)
+	}
+	defer rc.Close()
+
+	stopWait := context.AfterFunc(ctx, func() {
+		_ = rc.Close()
+	})
+	defer stopWait()
+
+	// Physical layer: compute ciphertext SHA-256 and count physical stored bytes
+	cipherHasher := sha256.New()
+	cipherCounter := &countingReader{r: io.TeeReader(rc, cipherHasher)}
+
+	// Decryption layer: stream through BPAE DecryptReader
+	decReader, err := artifactcrypto.NewDecryptReader(cipherCounter, v.keyProvider, orgID, artifactID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed initializing BPAE decryption: %w", err)
+	}
+	defer decReader.Close()
+
+	// Plaintext layer: compute plaintext SHA-256 and count plaintext bytes
+	plainHasher := sha256.New()
+	plainCounter := &countingReader{r: io.TeeReader(decReader, plainHasher)}
+
+	// Gzip decompression layer
+	gzReader, err := gzip.NewReader(plainCounter)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("decrypted artifact is not a valid gzip stream: %w", err)
+	}
+	defer gzReader.Close()
+
+	tarReader := tar.NewReader(gzReader)
+	var entriesCount int
+
+	for {
+		header, err := tarReader.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return "", fmt.Errorf("tar structural integrity check failed: %w", err)
+		}
+
+		entriesCount++
+
+		name := header.Name
+		if strings.HasPrefix(name, "/") {
+			return "", errors.New("tar archive contains an unsafe absolute member path")
+		}
+
+		segments := strings.Split(name, "/")
+		for _, seg := range segments {
+			if seg == ".." {
+				return "", errors.New("tar archive contains an unsafe parent traversal member path")
+			}
+		}
+	}
+
+	if entriesCount == 0 {
+		return "", errors.New("tar archive is empty (zero entries)")
+	}
+
+	// Drain remaining bytes in gzip stream to ensure gzip footer/CRC is verified
+	if _, err := io.Copy(io.Discard, gzReader); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("gzip stream integrity check failed: %w", err)
+	}
+
+	if err := gzReader.Close(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("gzip stream closure error: %w", err)
+	}
+
+	// Drain any remaining decrypted bytes to finish plainHasher and plainCounter
+	if _, err := io.Copy(io.Discard, plainCounter); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed draining decrypted stream: %w", err)
+	}
+
+	// Close decrypt reader to enforce EOF validation and check for trailing bytes
+	if err := decReader.Close(); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("BPAE decryption finalization failed: %w", err)
+	}
+
+	// Drain any remaining ciphertext bytes from physical counter
+	if _, err := io.Copy(io.Discard, cipherCounter); err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("failed reading physical stream: %w", err)
+	}
+
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+
+	// Layer 1: Physical verification
+	if cipherCounter.totalBytes != storedSizeBytes {
+		return "", fmt.Errorf("physical artifact size mismatch: expected %d bytes, got %d bytes", storedSizeBytes, cipherCounter.totalBytes)
+	}
+	calculatedCiphertextSHA256 := hex.EncodeToString(cipherHasher.Sum(nil))
+	if !strings.EqualFold(calculatedCiphertextSHA256, ciphertextSHA256) {
+		return "", fmt.Errorf("ciphertext checksum mismatch: expected %s, got %s", ciphertextSHA256, calculatedCiphertextSHA256)
+	}
+
+	// Layer 2 & 3: Plaintext verification
+	if plainCounter.totalBytes != expectedPlaintextSize {
+		return "", fmt.Errorf("decrypted plaintext size mismatch: expected %d bytes, got %d bytes", expectedPlaintextSize, plainCounter.totalBytes)
+	}
+	calculatedPlaintextSHA256 := hex.EncodeToString(plainHasher.Sum(nil))
+	if !strings.EqualFold(calculatedPlaintextSHA256, expectedPlaintextChecksum) {
+		return "", fmt.Errorf("plaintext checksum mismatch: expected %s, got %s", expectedPlaintextChecksum, calculatedPlaintextSHA256)
+	}
+
+	return canonicalFilesVerifiedMsg, nil
 }

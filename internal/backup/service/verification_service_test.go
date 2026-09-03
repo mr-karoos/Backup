@@ -220,6 +220,40 @@ func (m *mockVerifier) VerifyFilesArtifact(
 	return m.fileVerifyMsg, nil
 }
 
+func (m *mockVerifier) VerifyEncryptedDatabaseArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedPlaintextSize int64,
+	expectedPlaintextChecksum string,
+	storedSizeBytes int64,
+	ciphertextSHA256 string,
+	orgID, artifactID uuid.UUID,
+) (string, error) {
+	m.callsCount++
+	if m.dbVerifyErr != nil {
+		return "", m.dbVerifyErr
+	}
+	return m.dbVerifyMsg, nil
+}
+
+func (m *mockVerifier) VerifyEncryptedFilesArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedPlaintextSize int64,
+	expectedPlaintextChecksum string,
+	storedSizeBytes int64,
+	ciphertextSHA256 string,
+	orgID, artifactID uuid.UUID,
+) (string, error) {
+	m.callsCount++
+	if m.fileVerifyErr != nil {
+		return "", m.fileVerifyErr
+	}
+	return m.fileVerifyMsg, nil
+}
+
 func TestVerificationService_RBAC(t *testing.T) {
 	orgID := uuid.New()
 	runID := uuid.New()

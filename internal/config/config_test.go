@@ -11,8 +11,10 @@ import (
 const validTestJWTKey = "test-jwt-secret-key-must-be-at-least-32-bytes!"
 
 var (
-	validTestMasterKeyBytes  = bytes.Repeat([]byte{0x42}, 32)
-	validTestMasterKeyBase64 = base64.StdEncoding.EncodeToString(validTestMasterKeyBytes)
+	validTestMasterKeyBytes    = bytes.Repeat([]byte{0x42}, 32)
+	validTestMasterKeyBase64   = base64.StdEncoding.EncodeToString(validTestMasterKeyBytes)
+	validTestArtifactKeyBytes  = bytes.Repeat([]byte{0x55}, 32)
+	validTestArtifactKeyBase64 = base64.StdEncoding.EncodeToString(validTestArtifactKeyBytes)
 )
 
 // setValidRequiredSecrets sets all unconditionally required secrets using t.Setenv.
@@ -20,6 +22,7 @@ func setValidRequiredSecrets(t *testing.T) {
 	t.Helper()
 	t.Setenv("JWT_SIGNING_KEY", validTestJWTKey)
 	t.Setenv("ENCRYPTION_MASTER_KEY", validTestMasterKeyBase64)
+	t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY", validTestArtifactKeyBase64)
 }
 
 func TestConfig_LoadDefaults(t *testing.T) {
@@ -32,6 +35,7 @@ func TestConfig_LoadDefaults(t *testing.T) {
 	t.Setenv("BOOTSTRAP_ADMIN_PASSWORD", "")
 	t.Setenv("AUTH_COOKIE_SECURE", "")
 	t.Setenv("ENCRYPTION_MASTER_KEY_VERSION", "")
+	t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION", "")
 	setValidRequiredSecrets(t)
 
 	cfg, err := Load()
@@ -59,6 +63,12 @@ func TestConfig_LoadDefaults(t *testing.T) {
 	}
 	if cfg.EncryptionMasterKeyVersion != 1 {
 		t.Errorf("expected default EncryptionMasterKeyVersion 1, got %d", cfg.EncryptionMasterKeyVersion)
+	}
+	if !bytes.Equal(cfg.ArtifactEncryptionMasterKey, validTestArtifactKeyBytes) {
+		t.Errorf("expected ArtifactEncryptionMasterKey match")
+	}
+	if cfg.ArtifactEncryptionMasterKeyVersion != 1 {
+		t.Errorf("expected default ArtifactEncryptionMasterKeyVersion 1, got %d", cfg.ArtifactEncryptionMasterKeyVersion)
 	}
 	if cfg.AuthCookieSecure != false {
 		t.Errorf("expected AuthCookieSecure = false in development default")
@@ -220,11 +230,170 @@ func TestConfig_EncryptionMasterKeyVersionValidation(t *testing.T) {
 	})
 }
 
+func TestConfig_ArtifactEncryptionMasterKeyValidation(t *testing.T) {
+	t.Run("missing in all environments rejected without default fallback", func(t *testing.T) {
+		envs := []string{EnvDevelopment, EnvTest, EnvStaging, EnvProduction}
+		for _, env := range envs {
+			t.Run(env, func(t *testing.T) {
+				t.Setenv("APP_ENV", env)
+				t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
+				t.Setenv("JWT_SIGNING_KEY", validTestJWTKey)
+				t.Setenv("ENCRYPTION_MASTER_KEY", validTestMasterKeyBase64)
+				t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY", "")
+
+				_, err := Load()
+				if err == nil {
+					t.Fatalf("expected failure for missing ARTIFACT_ENCRYPTION_MASTER_KEY in %s", env)
+				}
+				if !strings.Contains(err.Error(), "ARTIFACT_ENCRYPTION_MASTER_KEY is required") {
+					t.Errorf("unexpected error message: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("invalid base64 encoding rejected safely", func(t *testing.T) {
+		t.Setenv("APP_ENV", "development")
+		t.Setenv("JWT_SIGNING_KEY", validTestJWTKey)
+		t.Setenv("ENCRYPTION_MASTER_KEY", validTestMasterKeyBase64)
+		t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY", "not-valid-base64-@@@")
+
+		_, err := Load()
+		if err == nil {
+			t.Fatal("expected failure for invalid base64 ARTIFACT_ENCRYPTION_MASTER_KEY, got nil")
+		}
+		if !strings.Contains(err.Error(), "invalid ARTIFACT_ENCRYPTION_MASTER_KEY: must be valid base64") {
+			t.Errorf("unexpected error message: %v", err)
+		}
+		if strings.Contains(err.Error(), "not-valid-base64") {
+			t.Errorf("SECURITY FLAW: raw invalid master key leaked in error: %v", err)
+		}
+	})
+
+	t.Run("invalid decoded key lengths rejected", func(t *testing.T) {
+		invalidLengths := []int{0, 16, 24, 31, 33, 64}
+		for _, l := range invalidLengths {
+			raw := bytes.Repeat([]byte{0x01}, l)
+			encoded := base64.StdEncoding.EncodeToString(raw)
+
+			t.Run(string(rune(l)), func(t *testing.T) {
+				t.Setenv("APP_ENV", "development")
+				t.Setenv("JWT_SIGNING_KEY", validTestJWTKey)
+				t.Setenv("ENCRYPTION_MASTER_KEY", validTestMasterKeyBase64)
+				t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY", encoded)
+
+				_, err := Load()
+				if err == nil {
+					t.Fatalf("expected failure for key length %d, got nil", l)
+				}
+				if l == 0 {
+					if !strings.Contains(err.Error(), "ARTIFACT_ENCRYPTION_MASTER_KEY is required") &&
+						!strings.Contains(err.Error(), "invalid ARTIFACT_ENCRYPTION_MASTER_KEY: must decode to exactly 32 bytes") {
+						t.Errorf("unexpected error for length 0: %v", err)
+					}
+				} else {
+					if !strings.Contains(err.Error(), "invalid ARTIFACT_ENCRYPTION_MASTER_KEY: must decode to exactly 32 bytes") {
+						t.Errorf("unexpected error for length %d: %v", l, err)
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("valid 32-byte artifact master key accepted", func(t *testing.T) {
+		t.Setenv("APP_ENV", "development")
+		setValidRequiredSecrets(t)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("expected valid 32-byte key to succeed, got: %v", err)
+		}
+		if len(cfg.ArtifactEncryptionMasterKey) != 32 {
+			t.Fatalf("expected 32 bytes length, got %d", len(cfg.ArtifactEncryptionMasterKey))
+		}
+		if !bytes.Equal(cfg.ArtifactEncryptionMasterKey, validTestArtifactKeyBytes) {
+			t.Errorf("decoded bytes do not match expected")
+		}
+	})
+}
+
+func TestConfig_ArtifactEncryptionMasterKeyVersionValidation(t *testing.T) {
+	t.Run("missing version defaults to 1", func(t *testing.T) {
+		t.Setenv("APP_ENV", "development")
+		t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION", "")
+		setValidRequiredSecrets(t)
+
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("expected load to succeed, got: %v", err)
+		}
+		if cfg.ArtifactEncryptionMasterKeyVersion != 1 {
+			t.Fatalf("expected default version 1, got %d", cfg.ArtifactEncryptionMasterKeyVersion)
+		}
+	})
+
+	t.Run("valid versions accepted", func(t *testing.T) {
+		validVersions := []struct {
+			input    string
+			expected int
+		}{
+			{"1", 1},
+			{"2", 2},
+			{"10", 10},
+			{"2147483647", math.MaxInt32},
+		}
+
+		for _, tc := range validVersions {
+			t.Run(tc.input, func(t *testing.T) {
+				t.Setenv("APP_ENV", "development")
+				t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION", tc.input)
+				setValidRequiredSecrets(t)
+
+				cfg, err := Load()
+				if err != nil {
+					t.Fatalf("expected version %s to be accepted, got error: %v", tc.input, err)
+				}
+				if cfg.ArtifactEncryptionMasterKeyVersion != tc.expected {
+					t.Errorf("expected version %d, got %d", tc.expected, cfg.ArtifactEncryptionMasterKeyVersion)
+				}
+			})
+		}
+	})
+
+	t.Run("invalid versions rejected", func(t *testing.T) {
+		invalidVersions := []string{
+			"0",
+			"-1",
+			"-100",
+			"abc",
+			"1.5",
+			"2147483648",
+		}
+
+		for _, iv := range invalidVersions {
+			t.Run(iv, func(t *testing.T) {
+				t.Setenv("APP_ENV", "development")
+				t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION", iv)
+				setValidRequiredSecrets(t)
+
+				_, err := Load()
+				if err == nil {
+					t.Fatalf("expected version %s to be rejected, got nil", iv)
+				}
+				if !strings.Contains(err.Error(), "invalid ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION: must be an integer between 1 and 2147483647") {
+					t.Errorf("unexpected error for version %s: %v", iv, err)
+				}
+			})
+		}
+	})
+}
+
 func TestConfig_JWTSigningKeyValidation(t *testing.T) {
 	t.Run("missing JWT key", func(t *testing.T) {
 		t.Setenv("APP_ENV", "development")
 		t.Setenv("JWT_SIGNING_KEY", "")
 		t.Setenv("ENCRYPTION_MASTER_KEY", validTestMasterKeyBase64)
+		t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY", validTestArtifactKeyBase64)
 
 		_, err := Load()
 		if err == nil {
@@ -239,6 +408,7 @@ func TestConfig_JWTSigningKeyValidation(t *testing.T) {
 		t.Setenv("APP_ENV", "development")
 		t.Setenv("JWT_SIGNING_KEY", "short-key-under-32-bytes")
 		t.Setenv("ENCRYPTION_MASTER_KEY", validTestMasterKeyBase64)
+		t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY", validTestArtifactKeyBase64)
 
 		_, err := Load()
 		if err == nil {
@@ -250,6 +420,7 @@ func TestConfig_JWTSigningKeyValidation(t *testing.T) {
 		t.Setenv("APP_ENV", "development")
 		t.Setenv("JWT_SIGNING_KEY", "12345678901234567890123456789012")
 		t.Setenv("ENCRYPTION_MASTER_KEY", validTestMasterKeyBase64)
+		t.Setenv("ARTIFACT_ENCRYPTION_MASTER_KEY", validTestArtifactKeyBase64)
 
 		cfg, err := Load()
 		if err != nil {
@@ -430,15 +601,17 @@ func TestConfig_StorageRootValidation(t *testing.T) {
 
 func TestConfig_ValidateDirect(t *testing.T) {
 	validCfg := Config{
-		AppEnv:                     EnvDevelopment,
-		HTTPAddr:                   ":8080",
-		DatabaseURL:                "postgres://localhost:5432/db",
-		LogLevel:                   "info",
-		StorageRoot:                "/srv/backup-platform",
-		JWTSigningKey:              validTestJWTKey,
-		AuthCookieSecure:           false,
-		EncryptionMasterKey:        validTestMasterKeyBytes,
-		EncryptionMasterKeyVersion: 1,
+		AppEnv:                             EnvDevelopment,
+		HTTPAddr:                           ":8080",
+		DatabaseURL:                        "postgres://localhost:5432/db",
+		LogLevel:                           "info",
+		StorageRoot:                        "/srv/backup-platform",
+		JWTSigningKey:                      validTestJWTKey,
+		AuthCookieSecure:                   false,
+		EncryptionMasterKey:                validTestMasterKeyBytes,
+		EncryptionMasterKeyVersion:         1,
+		ArtifactEncryptionMasterKey:        validTestArtifactKeyBytes,
+		ArtifactEncryptionMasterKeyVersion: 1,
 	}
 
 	t.Run("valid config succeeds", func(t *testing.T) {
@@ -461,6 +634,22 @@ func TestConfig_ValidateDirect(t *testing.T) {
 		c.EncryptionMasterKeyVersion = 0
 		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "ENCRYPTION_MASTER_KEY_VERSION must be an integer between 1 and 2147483647") {
 			t.Errorf("expected version validation error, got: %v", err)
+		}
+	})
+
+	t.Run("invalid artifact master key length in Validate", func(t *testing.T) {
+		c := validCfg
+		c.ArtifactEncryptionMasterKey = make([]byte, 16)
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "ARTIFACT_ENCRYPTION_MASTER_KEY is required and must decode to exactly 32 bytes") {
+			t.Errorf("expected 32-byte artifact key validation error, got: %v", err)
+		}
+	})
+
+	t.Run("invalid artifact master key version in Validate", func(t *testing.T) {
+		c := validCfg
+		c.ArtifactEncryptionMasterKeyVersion = 0
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION must be an integer between 1 and 2147483647") {
+			t.Errorf("expected artifact version validation error, got: %v", err)
 		}
 	})
 

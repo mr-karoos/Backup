@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"backup-platform/internal/artifactcrypto"
 	auditRepo "backup-platform/internal/audit/repository"
 	auditService "backup-platform/internal/audit/service"
 	backupEngine "backup-platform/internal/backup/engine"
@@ -236,8 +237,15 @@ func run() error {
 	fileCapRegistry := connector.NewFileBackupCapabilityRegistry()
 	fileCapRegistry.Register(resDomain.TypeUbuntuSSH, sshFileCap)
 
-	directStreamEngine := backupEngine.NewDirectStreamBackupEngine()
-	verificationEngine := backupVerification.NewVerificationEngine()
+	artifactKeyProvider, err := artifactcrypto.NewStaticKeyProvider(cfg.ArtifactEncryptionMasterKey, cfg.ArtifactEncryptionMasterKeyVersion)
+	if err != nil {
+		log.Error("failed initializing artifact encryption key provider", slog.String("error", err.Error()))
+		return fmt.Errorf("artifact key provider initialization failed")
+	}
+	secretcrypto.ZeroBytes(cfg.ArtifactEncryptionMasterKey)
+
+	directStreamEngine := backupEngine.NewDirectStreamBackupEngineWithKeyProvider(artifactKeyProvider)
+	verificationEngine := backupVerification.NewVerificationEngineWithKeyProvider(artifactKeyProvider)
 
 	// 14. Initialize Audit and Backup Repositories, Services, and HTTP Handlers (Phase 5, 6A, 7A & Phase 8)
 	auditRepository := auditRepo.NewPostgresAuditRepository(db)
@@ -257,6 +265,7 @@ func run() error {
 	historyService := backupService.NewHistoryService(backupRepository, log)
 	artifactService := backupService.NewArtifactService(backupRepository, localStorageProvider, auditRecorder, log)
 	artifactService.SetStorageResolver(storageResolverService)
+	artifactService.SetKeyProvider(artifactKeyProvider)
 	verificationService := backupService.NewVerificationService(backupRepository, localStorageProvider, verificationEngine, log)
 	verificationService.SetStorageResolver(storageResolverService)
 
@@ -303,6 +312,7 @@ func run() error {
 	)
 	workerPool.SetRetentionManager(retentionProcessor)
 	workerPool.SetStorageResolver(storageResolverService)
+	workerPool.SetKeyProvider(artifactKeyProvider)
 	workerPool.Start(backgroundCtx)
 
 	staleReaper := backupWorker.NewStaleRunReaper(backupRepository, localStorageProvider, 30*time.Second, log)

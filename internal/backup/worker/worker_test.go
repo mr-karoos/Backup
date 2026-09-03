@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/engine"
 	"backup-platform/internal/backup/retention"
@@ -26,6 +27,14 @@ import (
 	"backup-platform/internal/storage/local"
 	"backup-platform/pkg/uuid"
 )
+
+func init() {
+	var err error
+	defaultTestKeyProvider, err = artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x42}, 32), 1)
+	if err != nil {
+		panic(err)
+	}
+}
 
 func TestPerResourceMutexManager(t *testing.T) {
 	mgr := NewPerResourceMutexManager()
@@ -1046,7 +1055,7 @@ func (p *panickingEngine) ExecuteDatabaseBackup(
 	databaseName string,
 	storageProvider storage.StorageProvider,
 	orgID, resID, runID, artifactID uuid.UUID,
-) (*storage.SaveResult, error) {
+) (*engine.ExecutionResult, error) {
 	panic("unexpected internal engine panic")
 }
 
@@ -1058,7 +1067,7 @@ func (p *panickingEngine) ExecuteFilesBackup(
 	config connector.FileBackupConfig,
 	storageProvider storage.StorageProvider,
 	orgID, resID, runID, artifactID uuid.UUID,
-) (*storage.SaveResult, error) {
+) (*engine.ExecutionResult, error) {
 	panic("unexpected internal engine panic")
 }
 
@@ -1319,6 +1328,32 @@ func (f *failingVerificationEngine) VerifyFilesArtifact(
 	storageReference string,
 	expectedSizeBytes int64,
 	expectedChecksumSHA256 string,
+) (string, error) {
+	return "", domain.ErrVerificationFailed
+}
+
+func (f *failingVerificationEngine) VerifyEncryptedDatabaseArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedPlaintextSize int64,
+	expectedPlaintextChecksum string,
+	storedSizeBytes int64,
+	ciphertextSHA256 string,
+	orgID, artifactID uuid.UUID,
+) (string, error) {
+	return "", domain.ErrVerificationFailed
+}
+
+func (f *failingVerificationEngine) VerifyEncryptedFilesArtifact(
+	ctx context.Context,
+	storageProvider storage.StorageProvider,
+	storageReference string,
+	expectedPlaintextSize int64,
+	expectedPlaintextChecksum string,
+	storedSizeBytes int64,
+	ciphertextSHA256 string,
+	orgID, artifactID uuid.UUID,
 ) (string, error) {
 	return "", domain.ErrVerificationFailed
 }

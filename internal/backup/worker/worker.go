@@ -3,10 +3,12 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
 
+	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/engine"
 	"backup-platform/internal/backup/repository"
@@ -77,6 +79,7 @@ type WorkerPool struct {
 	wg                     sync.WaitGroup
 	databaseDiscoverer     databaseDiscoverer
 	retentionManager       RetentionManager
+	keyProvider            artifactcrypto.KeyProvider
 }
 
 // NewWorkerPool constructs a new WorkerPool instance.
@@ -109,7 +112,7 @@ func NewWorkerPool(
 		mutexManager = NewPerResourceMutexManager()
 	}
 
-	return &WorkerPool{
+	wp := &WorkerPool{
 		cfg:                    cfg,
 		repo:                   repo,
 		resFinder:              resFinder,
@@ -124,7 +127,15 @@ func NewWorkerPool(
 		nowFunc:                time.Now,
 		databaseDiscoverer:     sshconn.NewSSHDatabaseDiscoverer(nil),
 	}
+
+	if defaultTestKeyProvider != nil {
+		wp.SetKeyProvider(defaultTestKeyProvider)
+	}
+
+	return wp
 }
+
+var defaultTestKeyProvider artifactcrypto.KeyProvider
 
 // SetStorageResolver configures a dynamic storage provider resolver for S3/Local multi-target resolution.
 func (p *WorkerPool) SetStorageResolver(resolver storage.StorageProviderResolver) {
@@ -147,6 +158,21 @@ func (p *WorkerPool) resolveStorageProvider(ctx context.Context, orgID, targetID
 // SetRetentionManager injects a custom retention manager into the worker pool.
 func (p *WorkerPool) SetRetentionManager(rm RetentionManager) {
 	p.retentionManager = rm
+}
+
+// SetKeyProvider injects an artifact crypto key provider into the worker pool.
+func (p *WorkerPool) SetKeyProvider(kp artifactcrypto.KeyProvider) {
+	p.keyProvider = kp
+	if eng, ok := p.engine.(interface {
+		SetKeyProvider(artifactcrypto.KeyProvider)
+	}); ok {
+		eng.SetKeyProvider(kp)
+	}
+	if ver, ok := p.verifier.(interface {
+		SetKeyProvider(artifactcrypto.KeyProvider)
+	}); ok {
+		ver.SetKeyProvider(kp)
+	}
 }
 
 // SetNowFunc sets the custom time supplier for testing.
@@ -672,6 +698,9 @@ func (p *WorkerPool) executeDatabaseTarget(
 	}
 
 	// Insert initial unverified artifact record
+	storedSize := saveRes.StoredSizeBytes
+	engineMeta := []byte(fmt.Sprintf(`{"ciphertext_sha256":"%s"}`, saveRes.CiphertextSHA256))
+
 	artRecord := &domain.BackupArtifact{
 		ID:                 artifactID,
 		OrganizationID:     job.OrganizationID,
@@ -682,9 +711,11 @@ func (p *WorkerPool) executeDatabaseTarget(
 		Format:             domain.ArtifactFormatSQLGzip,
 		TargetName:         dbName,
 		StorageReference:   saveRes.StorageReference,
-		SizeBytes:          saveRes.SizeBytes,
+		SizeBytes:          saveRes.PlaintextSizeBytes,
 		ChecksumAlgorithm:  domain.ChecksumAlgorithmSHA256,
-		ChecksumHash:       saveRes.ChecksumSHA256,
+		ChecksumHash:       saveRes.PlaintextChecksumSHA256,
+		StoredSizeBytes:    &storedSize,
+		EngineMetadata:     engineMeta,
 		VerificationStatus: domain.VerificationStatusUnverified,
 	}
 
@@ -696,13 +727,17 @@ func (p *WorkerPool) executeDatabaseTarget(
 		return createArtErr
 	}
 
-	// Verification Phase
-	verDetails, verErr := p.verifier.VerifyDatabaseArtifact(
+	// Verification Phase: verify physical object + BPAE decryption + plaintext gzip
+	verDetails, verErr := p.verifier.VerifyEncryptedDatabaseArtifact(
 		ctx,
 		targetStorageProvider,
 		saveRes.StorageReference,
-		saveRes.SizeBytes,
-		saveRes.ChecksumSHA256,
+		saveRes.PlaintextSizeBytes,
+		saveRes.PlaintextChecksumSHA256,
+		saveRes.StoredSizeBytes,
+		saveRes.CiphertextSHA256,
+		job.OrganizationID,
+		artifactID,
 	)
 	if verErr != nil {
 		if errors.Is(verErr, context.Canceled) || errors.Is(verErr, context.DeadlineExceeded) {
@@ -796,6 +831,9 @@ func (p *WorkerPool) executeFileTarget(
 	}
 
 	// Insert initial unverified artifact record
+	storedSize := saveRes.StoredSizeBytes
+	engineMeta := []byte(fmt.Sprintf(`{"ciphertext_sha256":"%s"}`, saveRes.CiphertextSHA256))
+
 	artRecord := &domain.BackupArtifact{
 		ID:                 artifactID,
 		OrganizationID:     job.OrganizationID,
@@ -806,9 +844,11 @@ func (p *WorkerPool) executeFileTarget(
 		Format:             domain.ArtifactFormatTarGzip,
 		TargetName:         sourcePath,
 		StorageReference:   saveRes.StorageReference,
-		SizeBytes:          saveRes.SizeBytes,
+		SizeBytes:          saveRes.PlaintextSizeBytes,
 		ChecksumAlgorithm:  domain.ChecksumAlgorithmSHA256,
-		ChecksumHash:       saveRes.ChecksumSHA256,
+		ChecksumHash:       saveRes.PlaintextChecksumSHA256,
+		StoredSizeBytes:    &storedSize,
+		EngineMetadata:     engineMeta,
 		VerificationStatus: domain.VerificationStatusUnverified,
 	}
 
@@ -820,13 +860,17 @@ func (p *WorkerPool) executeFileTarget(
 		return createArtErr
 	}
 
-	// Verification Phase
-	verDetails, verErr := p.verifier.VerifyFilesArtifact(
+	// Verification Phase: verify physical object + BPAE decryption + plaintext gzip
+	verDetails, verErr := p.verifier.VerifyEncryptedFilesArtifact(
 		ctx,
 		targetStorageProvider,
 		saveRes.StorageReference,
-		saveRes.SizeBytes,
-		saveRes.ChecksumSHA256,
+		saveRes.PlaintextSizeBytes,
+		saveRes.PlaintextChecksumSHA256,
+		saveRes.StoredSizeBytes,
+		saveRes.CiphertextSHA256,
+		job.OrganizationID,
+		artifactID,
 	)
 	if verErr != nil {
 		if errors.Is(verErr, context.Canceled) || errors.Is(verErr, context.DeadlineExceeded) {

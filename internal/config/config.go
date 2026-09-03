@@ -31,19 +31,21 @@ const (
 
 // Config represents the application startup configuration loaded from environment variables.
 type Config struct {
-	AppEnv                      string
-	HTTPAddr                    string
-	DatabaseURL                 string
-	LogLevel                    string
-	StorageRoot                 string
-	BootstrapAdminEmail         string
-	BootstrapAdminPassword      string
-	JWTSigningKey               string
-	AuthCookieSecure            bool
-	EncryptionMasterKey         []byte
-	EncryptionMasterKeyVersion  int
-	S3PrivateEndpointsAllowlist []string
-	S3AllowInsecureEndpoints    bool
+	AppEnv                             string
+	HTTPAddr                           string
+	DatabaseURL                        string
+	LogLevel                           string
+	StorageRoot                        string
+	BootstrapAdminEmail                string
+	BootstrapAdminPassword             string
+	JWTSigningKey                      string
+	AuthCookieSecure                   bool
+	EncryptionMasterKey                []byte
+	EncryptionMasterKeyVersion         int
+	ArtifactEncryptionMasterKey        []byte
+	ArtifactEncryptionMasterKeyVersion int
+	S3PrivateEndpointsAllowlist        []string
+	S3AllowInsecureEndpoints           bool
 }
 
 // Load reads configuration from environment variables and validates all constraints.
@@ -80,6 +82,31 @@ func Load() (*Config, error) {
 			return nil, errors.New("invalid ENCRYPTION_MASTER_KEY_VERSION: must be an integer between 1 and 2147483647")
 		}
 		masterKeyVersion = v
+	}
+
+	// 3. Parse and decode ARTIFACT_ENCRYPTION_MASTER_KEY (Required in all environments)
+	rawArtifactKey := strings.TrimSpace(os.Getenv("ARTIFACT_ENCRYPTION_MASTER_KEY"))
+	if rawArtifactKey == "" {
+		return nil, errors.New("ARTIFACT_ENCRYPTION_MASTER_KEY is required")
+	}
+
+	decodedArtifactKey, err := base64.StdEncoding.DecodeString(rawArtifactKey)
+	if err != nil {
+		return nil, errors.New("invalid ARTIFACT_ENCRYPTION_MASTER_KEY: must be valid base64")
+	}
+
+	if len(decodedArtifactKey) != 32 {
+		return nil, errors.New("invalid ARTIFACT_ENCRYPTION_MASTER_KEY: must decode to exactly 32 bytes")
+	}
+
+	// 4. Parse ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION (Defaults to 1)
+	artifactKeyVersion := DefaultMasterKeyV
+	if rawArtifactKeyVersion := strings.TrimSpace(os.Getenv("ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION")); rawArtifactKeyVersion != "" {
+		v, err := strconv.Atoi(rawArtifactKeyVersion)
+		if err != nil || v < 1 || v > math.MaxInt32 {
+			return nil, errors.New("invalid ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION: must be an integer between 1 and 2147483647")
+		}
+		artifactKeyVersion = v
 	}
 
 	// Determine AuthCookieSecure default based on environment
@@ -124,19 +151,21 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
-		AppEnv:                      appEnv,
-		HTTPAddr:                    httpAddr,
-		DatabaseURL:                 databaseURL,
-		LogLevel:                    logLevel,
-		StorageRoot:                 storageRoot,
-		BootstrapAdminEmail:         bootstrapAdminEmail,
-		BootstrapAdminPassword:      bootstrapAdminPassword,
-		JWTSigningKey:               jwtSigningKey,
-		AuthCookieSecure:            authCookieSecure,
-		EncryptionMasterKey:         decodedMasterKey,
-		EncryptionMasterKeyVersion:  masterKeyVersion,
-		S3PrivateEndpointsAllowlist: s3Allowlist,
-		S3AllowInsecureEndpoints:    s3AllowInsecure,
+		AppEnv:                             appEnv,
+		HTTPAddr:                           httpAddr,
+		DatabaseURL:                        databaseURL,
+		LogLevel:                           logLevel,
+		StorageRoot:                        storageRoot,
+		BootstrapAdminEmail:                bootstrapAdminEmail,
+		BootstrapAdminPassword:             bootstrapAdminPassword,
+		JWTSigningKey:                      jwtSigningKey,
+		AuthCookieSecure:                   authCookieSecure,
+		EncryptionMasterKey:                decodedMasterKey,
+		EncryptionMasterKeyVersion:         masterKeyVersion,
+		ArtifactEncryptionMasterKey:        decodedArtifactKey,
+		ArtifactEncryptionMasterKeyVersion: artifactKeyVersion,
+		S3PrivateEndpointsAllowlist:        s3Allowlist,
+		S3AllowInsecureEndpoints:           s3AllowInsecure,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -206,6 +235,16 @@ func (c *Config) Validate() error {
 	// Encryption master key version validation (must be between 1 and MaxInt32)
 	if c.EncryptionMasterKeyVersion < 1 || c.EncryptionMasterKeyVersion > math.MaxInt32 {
 		return errors.New("ENCRYPTION_MASTER_KEY_VERSION must be an integer between 1 and 2147483647")
+	}
+
+	// Artifact encryption master key validation (must be exactly 32 bytes for AES-256)
+	if len(c.ArtifactEncryptionMasterKey) != 32 {
+		return errors.New("ARTIFACT_ENCRYPTION_MASTER_KEY is required and must decode to exactly 32 bytes")
+	}
+
+	// Artifact encryption master key version validation (must be between 1 and MaxInt32)
+	if c.ArtifactEncryptionMasterKeyVersion < 1 || c.ArtifactEncryptionMasterKeyVersion > math.MaxInt32 {
+		return errors.New("ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION must be an integer between 1 and 2147483647")
 	}
 
 	// Cookie security policy validation: Staging and Production MUST have Secure=true

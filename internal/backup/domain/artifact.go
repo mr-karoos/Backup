@@ -55,6 +55,8 @@ type BackupArtifact struct {
 	VerificationStatus  VerificationStatus
 	VerifiedAt          *time.Time
 	VerificationDetails *string
+	StoredSizeBytes     *int64
+	EngineMetadata      []byte
 	IsDeleted           bool
 	DeletedAt           *time.Time
 	CreatedAt           time.Time

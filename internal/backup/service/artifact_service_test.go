@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"backup-platform/internal/artifactcrypto"
 	auditDomain "backup-platform/internal/audit/domain"
 	"backup-platform/internal/backup/domain"
 	orgDomain "backup-platform/internal/organization/domain"
@@ -286,6 +287,99 @@ func TestArtifactService_OpenArtifactDownload(t *testing.T) {
 		}
 		if storageCalled {
 			t.Fatalf("storage provider should not be called on deleted artifact")
+		}
+	})
+
+	t.Run("encrypted artifact download streams decrypted plaintext", func(t *testing.T) {
+		kp, err := artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x88}, 32), 1)
+		if err != nil {
+			t.Fatalf("failed creating key provider: %v", err)
+		}
+
+		plainContent := []byte("plain SQL database content for download verification")
+		var bpaeBuf bytes.Buffer
+		encWriter, err := artifactcrypto.NewEncryptWriter(&bpaeBuf, kp, orgID, artID)
+		if err != nil {
+			t.Fatalf("failed creating encrypt writer: %v", err)
+		}
+		if _, err := encWriter.Write(plainContent); err != nil {
+			t.Fatalf("failed writing plaintext: %v", err)
+		}
+		if err := encWriter.Close(); err != nil {
+			t.Fatalf("failed closing encWriter: %v", err)
+		}
+
+		ciphertext := bpaeBuf.Bytes()
+		storedSize := int64(len(ciphertext))
+
+		repo := &mockArtifactRepo{
+			getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+				return &domain.BackupArtifact{
+					ID:               aID,
+					OrganizationID:   oID,
+					StorageReference: "local://org/db.sql.gz",
+					TargetName:       "ecommerce",
+					SizeBytes:        int64(len(plainContent)),
+					StoredSizeBytes:  &storedSize,
+					IsDeleted:        false,
+				}, nil
+			},
+		}
+
+		stor := &mockStorageProvider{
+			openArtifactFunc: func(ctx context.Context, storageRef string) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(ciphertext)), nil
+			},
+		}
+
+		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil)
+		svc.SetKeyProvider(kp)
+
+		art, reader, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		if err != nil {
+			t.Fatalf("expected successful download open, got: %v", err)
+		}
+		defer reader.Close()
+
+		if art.ID != artID {
+			t.Errorf("expected artifact ID %s, got %s", artID, art.ID)
+		}
+
+		decrypted, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatalf("failed reading decrypted stream: %v", err)
+		}
+
+		if !bytes.Equal(decrypted, plainContent) {
+			t.Errorf("decrypted content mismatch: expected %q, got %q", string(plainContent), string(decrypted))
+		}
+	})
+
+	t.Run("encrypted artifact download fails if key provider missing", func(t *testing.T) {
+		storedSize := int64(100)
+		repo := &mockArtifactRepo{
+			getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+				return &domain.BackupArtifact{
+					ID:               aID,
+					OrganizationID:   oID,
+					StorageReference: "local://org/db.sql.gz",
+					StoredSizeBytes:  &storedSize,
+					IsDeleted:        false,
+				}, nil
+			},
+		}
+
+		stor := &mockStorageProvider{
+			openArtifactFunc: func(ctx context.Context, storageRef string) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader([]byte("ciphertext"))), nil
+			},
+		}
+
+		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil) // no key provider
+
+		_, _, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		if err == nil {
+			t.Fatal("expected error on missing key provider, got nil")
 		}
 	})
 }

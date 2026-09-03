@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 
+	"backup-platform/internal/artifactcrypto"
 	auditDomain "backup-platform/internal/audit/domain"
 	auditService "backup-platform/internal/audit/service"
 	"backup-platform/internal/backup/domain"
@@ -21,6 +23,7 @@ type ArtifactService struct {
 	repo            repository.BackupRepository
 	storage         storage.StorageProvider
 	storageResolver storage.StorageProviderResolver
+	keyProvider     artifactcrypto.KeyProvider
 	auditRecorder   auditService.AuditRecorder
 	logger          *slog.Logger
 }
@@ -41,6 +44,11 @@ func NewArtifactService(
 		auditRecorder: auditRecorder,
 		logger:        logger,
 	}
+}
+
+// SetKeyProvider sets or updates the artifact key provider for decrypting downloads.
+func (s *ArtifactService) SetKeyProvider(keyProvider artifactcrypto.KeyProvider) {
+	s.keyProvider = keyProvider
 }
 
 // SetStorageResolver configures a dynamic storage provider resolver.
@@ -146,6 +154,20 @@ func (s *ArtifactService) OpenArtifactDownload(
 			return nil, nil, domain.ErrArtifactNotFound
 		}
 		return nil, nil, domain.ErrBackupServiceUnavailable
+	}
+
+	if artifact.StoredSizeBytes != nil {
+		if s.keyProvider == nil {
+			_ = reader.Close()
+			return nil, nil, errors.New("artifact key provider cannot be nil: decryption required")
+		}
+		decReader, err := artifactcrypto.NewDecryptReader(reader, s.keyProvider, artifact.OrganizationID, artifact.ID)
+		if err != nil {
+			_ = reader.Close()
+			s.logger.Error("failed initializing decrypt reader for download", slog.String("error", err.Error()))
+			return nil, nil, fmt.Errorf("failed initializing decrypt reader: %w", err)
+		}
+		return artifact, decReader, nil
 	}
 
 	return artifact, reader, nil

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/storage"
 	"backup-platform/internal/storage/local"
 	"backup-platform/pkg/uuid"
@@ -487,5 +488,324 @@ func TestVerificationEngine_VerifyFilesArtifact_MidStreamCancellation(t *testing
 		}
 	case <-time.After(1 * time.Second):
 		t.Fatalf("verification did not cancel promptly mid-stream")
+	}
+}
+
+type memoryArtifactStorage struct {
+	data []byte
+}
+
+func (m *memoryArtifactStorage) SaveArtifact(ctx context.Context, orgID, resID, runID, artifactID uuid.UUID, ext string, r io.Reader) (*storage.SaveResult, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *memoryArtifactStorage) OpenArtifact(ctx context.Context, storageRef string) (io.ReadCloser, error) {
+	return io.NopCloser(bytes.NewReader(m.data)), nil
+}
+
+func (m *memoryArtifactStorage) DeleteArtifact(ctx context.Context, storageRef string) error {
+	return nil
+}
+
+func (m *memoryArtifactStorage) EnsureStorageRoot(ctx context.Context) error {
+	return nil
+}
+
+type countingWriterTarget struct {
+	w io.Writer
+	h io.Writer
+}
+
+func (c *countingWriterTarget) Write(p []byte) (int, error) {
+	_, _ = c.h.Write(p)
+	return c.w.Write(p)
+}
+
+func createEncryptedBPAEData(t *testing.T, plaintext []byte, kp artifactcrypto.KeyProvider, orgID, artID uuid.UUID) ([]byte, string, int64, string) {
+	t.Helper()
+	var bpaeBuf bytes.Buffer
+	encWriter, err := artifactcrypto.NewEncryptWriter(&bpaeBuf, kp, orgID, artID)
+	if err != nil {
+		t.Fatalf("failed creating encrypt writer: %v", err)
+	}
+
+	plainHasher := sha256.New()
+	plainCounter := &countingWriterTarget{w: encWriter, h: plainHasher}
+
+	_, err = plainCounter.Write(plaintext)
+	if err != nil {
+		t.Fatalf("failed writing plaintext: %v", err)
+	}
+	if err := encWriter.Close(); err != nil {
+		t.Fatalf("failed closing encWriter: %v", err)
+	}
+
+	ciphertext := bpaeBuf.Bytes()
+	cipherHasher := sha256.New()
+	cipherHasher.Write(ciphertext)
+
+	return ciphertext, hex.EncodeToString(cipherHasher.Sum(nil)), int64(len(plaintext)), hex.EncodeToString(plainHasher.Sum(nil))
+}
+
+func testArtifactKeyProvider(t *testing.T) artifactcrypto.KeyProvider {
+	t.Helper()
+	kp, err := artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x77}, 32), 1)
+	if err != nil {
+		t.Fatalf("failed creating test key provider: %v", err)
+	}
+	return kp
+}
+
+func TestVerificationEngine_VerifyEncryptedDatabaseArtifact_Success(t *testing.T) {
+	kp := testArtifactKeyProvider(t)
+	rawSQL := "-- MySQL dump 10.13\n" + strings.Repeat("INSERT INTO users VALUES (1, 'alice');\n", 500)
+	gzipData, _ := createGzipData(t, []byte(rawSQL))
+
+	orgID := uuid.New()
+	artID := uuid.New()
+	cipherBytes, cipherHash, plainSize, plainHash := createEncryptedBPAEData(t, gzipData, kp, orgID, artID)
+
+	fakeStorage := &memoryArtifactStorage{data: cipherBytes}
+	verifier := NewVerificationEngineWithKeyProvider(kp)
+
+	msg, err := verifier.VerifyEncryptedDatabaseArtifact(
+		context.Background(),
+		fakeStorage,
+		"ref",
+		plainSize,
+		plainHash,
+		int64(len(cipherBytes)),
+		cipherHash,
+		orgID,
+		artID,
+	)
+	if err != nil {
+		t.Fatalf("expected verification success, got error: %v", err)
+	}
+	if msg != canonicalVerifiedMsg {
+		t.Errorf("expected '%s', got '%s'", canonicalVerifiedMsg, msg)
+	}
+}
+
+func TestVerificationEngine_VerifyEncryptedDatabaseArtifact_PhysicalSizeMismatch(t *testing.T) {
+	kp := testArtifactKeyProvider(t)
+	rawSQL := "-- MySQL dump 10.13\n" + strings.Repeat("INSERT INTO users VALUES (1, 'alice');\n", 500)
+	gzipData, _ := createGzipData(t, []byte(rawSQL))
+
+	orgID := uuid.New()
+	artID := uuid.New()
+	cipherBytes, cipherHash, plainSize, plainHash := createEncryptedBPAEData(t, gzipData, kp, orgID, artID)
+
+	fakeStorage := &memoryArtifactStorage{data: cipherBytes}
+	verifier := NewVerificationEngineWithKeyProvider(kp)
+
+	_, err := verifier.VerifyEncryptedDatabaseArtifact(
+		context.Background(),
+		fakeStorage,
+		"ref",
+		plainSize,
+		plainHash,
+		int64(len(cipherBytes))+10, // wrong stored size
+		cipherHash,
+		orgID,
+		artID,
+	)
+	if err == nil {
+		t.Fatal("expected failure on physical size mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "physical artifact size mismatch") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestVerificationEngine_VerifyEncryptedDatabaseArtifact_CiphertextChecksumMismatch(t *testing.T) {
+	kp := testArtifactKeyProvider(t)
+	rawSQL := "-- MySQL dump 10.13\n" + strings.Repeat("INSERT INTO users VALUES (1, 'alice');\n", 500)
+	gzipData, _ := createGzipData(t, []byte(rawSQL))
+
+	orgID := uuid.New()
+	artID := uuid.New()
+	cipherBytes, _, plainSize, plainHash := createEncryptedBPAEData(t, gzipData, kp, orgID, artID)
+
+	wrongCipherHash := strings.Repeat("0", 64)
+	fakeStorage := &memoryArtifactStorage{data: cipherBytes}
+	verifier := NewVerificationEngineWithKeyProvider(kp)
+
+	_, err := verifier.VerifyEncryptedDatabaseArtifact(
+		context.Background(),
+		fakeStorage,
+		"ref",
+		plainSize,
+		plainHash,
+		int64(len(cipherBytes)),
+		wrongCipherHash,
+		orgID,
+		artID,
+	)
+	if err == nil {
+		t.Fatal("expected failure on ciphertext hash mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "ciphertext checksum mismatch") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestVerificationEngine_VerifyEncryptedDatabaseArtifact_PlaintextChecksumMismatch(t *testing.T) {
+	kp := testArtifactKeyProvider(t)
+	rawSQL := "-- MySQL dump 10.13\n" + strings.Repeat("INSERT INTO users VALUES (1, 'alice');\n", 500)
+	gzipData, _ := createGzipData(t, []byte(rawSQL))
+
+	orgID := uuid.New()
+	artID := uuid.New()
+	cipherBytes, cipherHash, plainSize, _ := createEncryptedBPAEData(t, gzipData, kp, orgID, artID)
+
+	wrongPlainHash := strings.Repeat("f", 64)
+	fakeStorage := &memoryArtifactStorage{data: cipherBytes}
+	verifier := NewVerificationEngineWithKeyProvider(kp)
+
+	_, err := verifier.VerifyEncryptedDatabaseArtifact(
+		context.Background(),
+		fakeStorage,
+		"ref",
+		plainSize,
+		wrongPlainHash,
+		int64(len(cipherBytes)),
+		cipherHash,
+		orgID,
+		artID,
+	)
+	if err == nil {
+		t.Fatal("expected failure on plaintext hash mismatch, got nil")
+	}
+	if !strings.Contains(err.Error(), "plaintext checksum mismatch") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestVerificationEngine_VerifyEncryptedDatabaseArtifact_CorruptedBPAEData(t *testing.T) {
+	kp := testArtifactKeyProvider(t)
+	rawSQL := "-- MySQL dump 10.13\n" + strings.Repeat("INSERT INTO users VALUES (1, 'alice');\n", 500)
+	gzipData, _ := createGzipData(t, []byte(rawSQL))
+
+	orgID := uuid.New()
+	artID := uuid.New()
+	cipherBytes, _, plainSize, plainHash := createEncryptedBPAEData(t, gzipData, kp, orgID, artID)
+
+	// Tamper with ciphertext in the DATA chunk (byte 115)
+	corruptedCipher := make([]byte, len(cipherBytes))
+	copy(corruptedCipher, cipherBytes)
+	corruptedCipher[115] ^= 0xff
+
+	corruptHash := sha256.Sum256(corruptedCipher)
+	fakeStorage := &memoryArtifactStorage{data: corruptedCipher}
+	verifier := NewVerificationEngineWithKeyProvider(kp)
+
+	_, err := verifier.VerifyEncryptedDatabaseArtifact(
+		context.Background(),
+		fakeStorage,
+		"ref",
+		plainSize,
+		plainHash,
+		int64(len(corruptedCipher)),
+		hex.EncodeToString(corruptHash[:]),
+		orgID,
+		artID,
+	)
+	if err == nil {
+		t.Fatal("expected failure on tampered BPAE ciphertext, got nil")
+	}
+}
+
+func TestVerificationEngine_VerifyEncryptedDatabaseArtifact_MissingFINAL(t *testing.T) {
+	kp := testArtifactKeyProvider(t)
+	rawSQL := "-- MySQL dump 10.13\n" + strings.Repeat("INSERT INTO users VALUES (1, 'alice');\n", 500)
+	gzipData, _ := createGzipData(t, []byte(rawSQL))
+
+	orgID := uuid.New()
+	artID := uuid.New()
+	cipherBytes, _, plainSize, plainHash := createEncryptedBPAEData(t, gzipData, kp, orgID, artID)
+
+	// Truncate the 41-byte FINAL record
+	truncatedCipher := cipherBytes[:len(cipherBytes)-41]
+	truncHash := sha256.Sum256(truncatedCipher)
+	fakeStorage := &memoryArtifactStorage{data: truncatedCipher}
+	verifier := NewVerificationEngineWithKeyProvider(kp)
+
+	_, err := verifier.VerifyEncryptedDatabaseArtifact(
+		context.Background(),
+		fakeStorage,
+		"ref",
+		plainSize,
+		plainHash,
+		int64(len(truncatedCipher)),
+		hex.EncodeToString(truncHash[:]),
+		orgID,
+		artID,
+	)
+	if err == nil {
+		t.Fatal("expected failure on missing FINAL record, got nil")
+	}
+}
+
+func TestVerificationEngine_VerifyEncryptedDatabaseArtifact_IdentityMismatch(t *testing.T) {
+	kp := testArtifactKeyProvider(t)
+	rawSQL := "-- MySQL dump 10.13\n" + strings.Repeat("INSERT INTO users VALUES (1, 'alice');\n", 500)
+	gzipData, _ := createGzipData(t, []byte(rawSQL))
+
+	orgID := uuid.New()
+	artID := uuid.New()
+	cipherBytes, cipherHash, plainSize, plainHash := createEncryptedBPAEData(t, gzipData, kp, orgID, artID)
+
+	fakeStorage := &memoryArtifactStorage{data: cipherBytes}
+	verifier := NewVerificationEngineWithKeyProvider(kp)
+
+	// Pass a different orgID to simulate identity binding mismatch
+	wrongOrgID := uuid.New()
+	_, err := verifier.VerifyEncryptedDatabaseArtifact(
+		context.Background(),
+		fakeStorage,
+		"ref",
+		plainSize,
+		plainHash,
+		int64(len(cipherBytes)),
+		cipherHash,
+		wrongOrgID,
+		artID,
+	)
+	if err == nil {
+		t.Fatal("expected failure on orgID identity mismatch, got nil")
+	}
+}
+
+func TestVerificationEngine_VerifyEncryptedFilesArtifact_Success(t *testing.T) {
+	kp := testArtifactKeyProvider(t)
+	tarGzData, _ := createTarGzipData(t, map[string][]byte{
+		"app/index.html": []byte("<h1>Welcome</h1>"),
+		"app/style.css":  []byte("body { color: red; }"),
+	})
+
+	orgID := uuid.New()
+	artID := uuid.New()
+	cipherBytes, cipherHash, plainSize, plainHash := createEncryptedBPAEData(t, tarGzData, kp, orgID, artID)
+
+	fakeStorage := &memoryArtifactStorage{data: cipherBytes}
+	verifier := NewVerificationEngineWithKeyProvider(kp)
+
+	msg, err := verifier.VerifyEncryptedFilesArtifact(
+		context.Background(),
+		fakeStorage,
+		"ref",
+		plainSize,
+		plainHash,
+		int64(len(cipherBytes)),
+		cipherHash,
+		orgID,
+		artID,
+	)
+	if err != nil {
+		t.Fatalf("expected verification success, got error: %v", err)
+	}
+	if msg != canonicalFilesVerifiedMsg {
+		t.Errorf("expected '%s', got '%s'", canonicalFilesVerifiedMsg, msg)
 	}
 }
