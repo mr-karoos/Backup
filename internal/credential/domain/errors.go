@@ -35,4 +35,7 @@ var (
 
 	// ErrCredentialInUse indicates the credential cannot be deleted because it is referenced by one or more resource connectors.
 	ErrCredentialInUse = errors.New("credential: in use by one or more resource connectors")
+
+	// ErrSystemCredentialRestricted indicates an attempt by a user to create, modify, or delete a system-managed credential.
+	ErrSystemCredentialRestricted = errors.New("credential: system-managed credentials cannot be managed directly")
 )

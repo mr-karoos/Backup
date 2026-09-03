@@ -160,6 +160,15 @@ func (m *mockVerificationRepo) CountPlansByStorageTarget(ctx context.Context, or
 func (m *mockVerificationRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
 	return 0, nil
 }
+func (m *mockVerificationRepo) CreateRepository(ctx context.Context, repo *domain.BackupRepository) (*domain.BackupRepository, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) GetRepositoryByResourceID(ctx context.Context, orgID, resourceID uuid.UUID) (*domain.BackupRepository, error) {
+	return nil, nil
+}
+func (m *mockVerificationRepo) GetRepositoryByID(ctx context.Context, orgID, repoID uuid.UUID) (*domain.BackupRepository, error) {
+	return nil, nil
+}
 
 var _ repository.BackupRepository = (*mockVerificationRepo)(nil)
 

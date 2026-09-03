@@ -42,6 +42,7 @@ func NewVaultService(
 
 // CreateCredential encrypts the plaintext payload using AES-256-GCM bound to the organization and credential ID,
 // persists the record to the database, and returns safe metadata without secret material.
+// Only user-managed credential types are accepted through this method.
 func (s *VaultService) CreateCredential(
 	ctx context.Context,
 	orgID uuid.UUID,
@@ -61,6 +62,10 @@ func (s *VaultService) CreateCredential(
 
 	if err := domain.ValidateType(credType); err != nil {
 		return nil, err
+	}
+
+	if !credType.IsUserManaged() {
+		return nil, domain.ErrSystemCredentialRestricted
 	}
 
 	if len(plaintextPayload) == 0 {
@@ -95,6 +100,7 @@ func (s *VaultService) CreateCredential(
 		OrganizationID:  orgID,
 		Name:            validName,
 		Type:            credType,
+		ManagedBy:       domain.ManagedByUser,
 		EncryptedSecret: encrypted.Ciphertext,
 		Nonce:           encrypted.Nonce,
 		AuthTag:         encrypted.AuthTag,
@@ -115,6 +121,85 @@ func (s *VaultService) CreateCredential(
 		OrganizationID: cred.OrganizationID,
 		Name:           cred.Name,
 		Type:           cred.Type,
+		ManagedBy:      cred.ManagedBy,
+		Fingerprint:    cred.Fingerprint,
+		KeyVersion:     cred.KeyVersion,
+		CreatedAt:      cred.CreatedAt,
+		UpdatedAt:      cred.UpdatedAt,
+	}, nil
+}
+
+// CreateSystemCredential allows trusted platform subsystems to create system-managed credentials
+// (such as Restic repository keys). Encrypted strictly using ENCRYPTION_MASTER_KEY.
+func (s *VaultService) CreateSystemCredential(
+	ctx context.Context,
+	orgID uuid.UUID,
+	name string,
+	credType domain.Type,
+	plaintextPayload []byte,
+) (*domain.CredentialMetadata, error) {
+	if orgID == uuid.Nil {
+		return nil, domain.ErrInvalidOrganizationID
+	}
+
+	validName, err := domain.ValidateName(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := domain.ValidateType(credType); err != nil {
+		return nil, err
+	}
+
+	if len(plaintextPayload) == 0 {
+		return nil, domain.ErrEmptyPlaintextSecret
+	}
+
+	credID := uuid.New()
+
+	encCtx := secretcrypto.EncryptionContext{
+		OrganizationID: orgID,
+		CredentialID:   credID,
+	}
+
+	localCopy := make([]byte, len(plaintextPayload))
+	copy(localCopy, plaintextPayload)
+	defer secretcrypto.ZeroBytes(localCopy)
+
+	encrypted, err := s.cryptoEngine.Encrypt(localCopy, encCtx)
+	secretcrypto.ZeroBytes(localCopy)
+	if err != nil {
+		logger.FromContext(ctx, s.logger).Warn("system credential encryption failed")
+		return nil, domain.ErrCredentialEncryptionFailed
+	}
+
+	now := time.Now().UTC()
+	cred := &domain.Credential{
+		ID:              credID,
+		OrganizationID:  orgID,
+		Name:            validName,
+		Type:            credType,
+		ManagedBy:       domain.ManagedBySystem,
+		EncryptedSecret: encrypted.Ciphertext,
+		Nonce:           encrypted.Nonce,
+		AuthTag:         encrypted.AuthTag,
+		KeyVersion:      encrypted.KeyVersion,
+		Fingerprint:     nil,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	if err := s.repo.Create(ctx, s.txManager.Querier(), cred); err != nil {
+		logger.FromContext(ctx, s.logger).Error("system credential persistence failed")
+		return nil, domain.ErrCredentialServiceUnavailable
+	}
+
+	return &domain.CredentialMetadata{
+		ID:             cred.ID,
+		OrganizationID: cred.OrganizationID,
+		Name:           cred.Name,
+		Type:           cred.Type,
+		ManagedBy:      cred.ManagedBy,
 		Fingerprint:    cred.Fingerprint,
 		KeyVersion:     cred.KeyVersion,
 		CreatedAt:      cred.CreatedAt,
@@ -123,6 +208,7 @@ func (s *VaultService) CreateCredential(
 }
 
 // GetCredentialMetadata retrieves safe metadata for a single credential in an organization.
+// System-managed credentials return domain.ErrCredentialNotFound to strictly hide their existence.
 func (s *VaultService) GetCredentialMetadata(
 	ctx context.Context,
 	orgID uuid.UUID,
@@ -144,11 +230,40 @@ func (s *VaultService) GetCredentialMetadata(
 		return nil, domain.ErrCredentialServiceUnavailable
 	}
 
+	if meta.ManagedBy == domain.ManagedBySystem {
+		return nil, domain.ErrCredentialNotFound
+	}
+
+	return meta, nil
+}
+
+// GetSystemCredentialMetadata allows internal subsystems to retrieve metadata for any credential (including system-managed).
+func (s *VaultService) GetSystemCredentialMetadata(
+	ctx context.Context,
+	orgID uuid.UUID,
+	credID uuid.UUID,
+) (*domain.CredentialMetadata, error) {
+	if orgID == uuid.Nil {
+		return nil, domain.ErrInvalidOrganizationID
+	}
+	if credID == uuid.Nil {
+		return nil, domain.ErrInvalidCredentialID
+	}
+
+	meta, err := s.repo.FindMetadataForOrganization(ctx, s.txManager.Querier(), orgID, credID)
+	if err != nil {
+		if errors.Is(err, domain.ErrCredentialNotFound) {
+			return nil, domain.ErrCredentialNotFound
+		}
+		logger.FromContext(ctx, s.logger).Error("system credential metadata lookup failed")
+		return nil, domain.ErrCredentialServiceUnavailable
+	}
+
 	return meta, nil
 }
 
 // ListCredentialMetadata retrieves all safe credential metadata for the given organization.
-// No secret material or cryptographic ciphertext is retrieved.
+// System-managed credentials are automatically filtered out.
 func (s *VaultService) ListCredentialMetadata(
 	ctx context.Context,
 	orgID uuid.UUID,
@@ -166,7 +281,8 @@ func (s *VaultService) ListCredentialMetadata(
 	return items, nil
 }
 
-// UpdateCredentialName updates only the name of an existing credential without invoking crypto operations.
+// UpdateCredentialName updates only the name of an existing user-managed credential.
+// Mutating system-managed credentials returns domain.ErrSystemCredentialRestricted.
 func (s *VaultService) UpdateCredentialName(
 	ctx context.Context,
 	orgID uuid.UUID,
@@ -185,6 +301,19 @@ func (s *VaultService) UpdateCredentialName(
 		return nil, err
 	}
 
+	current, err := s.repo.FindMetadataForOrganization(ctx, s.txManager.Querier(), orgID, credID)
+	if err != nil {
+		if errors.Is(err, domain.ErrCredentialNotFound) {
+			return nil, domain.ErrCredentialNotFound
+		}
+		logger.FromContext(ctx, s.logger).Error("credential lookup failed for name update")
+		return nil, domain.ErrCredentialServiceUnavailable
+	}
+
+	if current.ManagedBy == domain.ManagedBySystem {
+		return nil, domain.ErrSystemCredentialRestricted
+	}
+
 	meta, err := s.repo.UpdateNameForOrganization(ctx, s.txManager.Querier(), orgID, credID, validName)
 	if err != nil {
 		if errors.Is(err, domain.ErrCredentialNotFound) {
@@ -197,8 +326,8 @@ func (s *VaultService) UpdateCredentialName(
 	return meta, nil
 }
 
-// ReplaceCredentialSecret re-encrypts and replaces the secret payload of an existing credential.
-// AAD strictly binds to the existing Credential ID and Organization ID.
+// ReplaceCredentialSecret re-encrypts and replaces the secret payload of an existing user credential.
+// Mutating system-managed credentials returns domain.ErrSystemCredentialRestricted.
 func (s *VaultService) ReplaceCredentialSecret(
 	ctx context.Context,
 	orgID uuid.UUID,
@@ -217,7 +346,7 @@ func (s *VaultService) ReplaceCredentialSecret(
 		return nil, domain.ErrEmptyPlaintextSecret
 	}
 
-	// 1. Fetch current metadata to verify existence and obtain existing type and name
+	// 1. Fetch current metadata to verify existence, managed_by, type, and name
 	current, err := s.repo.FindMetadataForOrganization(ctx, s.txManager.Querier(), orgID, credID)
 	if err != nil {
 		if errors.Is(err, domain.ErrCredentialNotFound) {
@@ -225,6 +354,10 @@ func (s *VaultService) ReplaceCredentialSecret(
 		}
 		logger.FromContext(ctx, s.logger).Error("credential lookup failed for secret replacement")
 		return nil, domain.ErrCredentialServiceUnavailable
+	}
+
+	if current.ManagedBy == domain.ManagedBySystem {
+		return nil, domain.ErrSystemCredentialRestricted
 	}
 
 	targetName := current.Name
@@ -260,6 +393,7 @@ func (s *VaultService) ReplaceCredentialSecret(
 		OrganizationID:  orgID,
 		Name:            targetName,
 		Type:            current.Type,
+		ManagedBy:       current.ManagedBy,
 		EncryptedSecret: encrypted.Ciphertext,
 		Nonce:           encrypted.Nonce,
 		AuthTag:         encrypted.AuthTag,
@@ -280,8 +414,8 @@ func (s *VaultService) ReplaceCredentialSecret(
 	return meta, nil
 }
 
-// DeleteCredential permanently deletes an unreferenced credential from an organization.
-// If the credential is in use by a resource connector, returns domain.ErrCredentialInUse.
+// DeleteCredential permanently deletes an unreferenced user credential from an organization.
+// Deleting system-managed credentials returns domain.ErrSystemCredentialRestricted.
 func (s *VaultService) DeleteCredential(
 	ctx context.Context,
 	orgID uuid.UUID,
@@ -299,6 +433,9 @@ func (s *VaultService) DeleteCredential(
 		if errors.Is(err, domain.ErrCredentialNotFound) {
 			return domain.ErrCredentialNotFound
 		}
+		if errors.Is(err, domain.ErrSystemCredentialRestricted) {
+			return domain.ErrSystemCredentialRestricted
+		}
 		if errors.Is(err, domain.ErrCredentialInUse) {
 			return domain.ErrCredentialInUse
 		}
@@ -307,6 +444,23 @@ func (s *VaultService) DeleteCredential(
 	}
 
 	return nil
+}
+
+// DeleteSystemCredential allows internal platform subsystems to clean up system-managed credentials
+// (e.g. upon repository provisioning failure atomicity rollback).
+func (s *VaultService) DeleteSystemCredential(
+	ctx context.Context,
+	orgID uuid.UUID,
+	credID uuid.UUID,
+) error {
+	if orgID == uuid.Nil {
+		return domain.ErrInvalidOrganizationID
+	}
+	if credID == uuid.Nil {
+		return domain.ErrInvalidCredentialID
+	}
+
+	return s.repo.DeleteForOrganization(ctx, s.txManager.Querier(), orgID, credID)
 }
 
 // LoadCredentialForUse retrieves and decrypts the credential for operational connector use.

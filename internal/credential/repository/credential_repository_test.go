@@ -218,8 +218,8 @@ func TestPostgresCredentialRepository_Create(t *testing.T) {
 			t.Errorf("unexpected query SQL: %s", spy.capturedSQL)
 		}
 
-		if len(spy.capturedArgs) != 11 {
-			t.Fatalf("expected 11 query arguments, got %d", len(spy.capturedArgs))
+		if len(spy.capturedArgs) != 12 {
+			t.Fatalf("expected 12 query arguments, got %d", len(spy.capturedArgs))
 		}
 
 		// Validate argument mapping
@@ -235,20 +235,23 @@ func TestPostgresCredentialRepository_Create(t *testing.T) {
 		if spy.capturedArgs[3] != string(domain.TypeSSHPrivateKey) {
 			t.Errorf("expected arg 3 (Type) to be %s, got %v", domain.TypeSSHPrivateKey, spy.capturedArgs[3])
 		}
-		if !bytes.Equal(spy.capturedArgs[4].([]byte), []byte("encrypted-ciphertext-bytes")) {
-			t.Errorf("expected arg 4 (EncryptedSecret) to match")
+		if spy.capturedArgs[4] != string(domain.ManagedByUser) {
+			t.Errorf("expected arg 4 (ManagedBy) to be %s, got %v", domain.ManagedByUser, spy.capturedArgs[4])
 		}
-		if !bytes.Equal(spy.capturedArgs[5].([]byte), []byte("nonce-12-byte")) {
-			t.Errorf("expected arg 5 (Nonce) to match")
+		if !bytes.Equal(spy.capturedArgs[5].([]byte), []byte("encrypted-ciphertext-bytes")) {
+			t.Errorf("expected arg 5 (EncryptedSecret) to match")
 		}
-		if !bytes.Equal(spy.capturedArgs[6].([]byte), []byte("tag-16-bytes-len")) {
-			t.Errorf("expected arg 6 (AuthTag) to match")
+		if !bytes.Equal(spy.capturedArgs[6].([]byte), []byte("nonce-12-byte")) {
+			t.Errorf("expected arg 6 (Nonce) to match")
 		}
-		if spy.capturedArgs[7] != 1 {
-			t.Errorf("expected arg 7 (KeyVersion) to be 1, got %v", spy.capturedArgs[7])
+		if !bytes.Equal(spy.capturedArgs[7].([]byte), []byte("tag-16-bytes-len")) {
+			t.Errorf("expected arg 7 (AuthTag) to match")
 		}
-		if *spy.capturedArgs[8].(*string) != fp {
-			t.Errorf("expected arg 8 (Fingerprint) to be %s, got %v", fp, spy.capturedArgs[8])
+		if spy.capturedArgs[8] != 1 {
+			t.Errorf("expected arg 8 (KeyVersion) to be 1, got %v", spy.capturedArgs[8])
+		}
+		if *spy.capturedArgs[9].(*string) != fp {
+			t.Errorf("expected arg 9 (Fingerprint) to be %s, got %v", fp, spy.capturedArgs[9])
 		}
 	})
 
@@ -280,6 +283,7 @@ func TestPostgresCredentialRepository_FindEncryptedByIDForOrganization(t *testin
 					orgID,
 					"Database Key",
 					string(domain.TypeSSHPassword),
+					string(domain.ManagedByUser),
 					[]byte("encrypted-secret"),
 					[]byte("nonce-bytes"),
 					[]byte("auth-tag-bytes"),
@@ -348,8 +352,8 @@ func TestPostgresCredentialRepository_ListMetadataForOrganization(t *testing.T) 
 		spy := &spyQueryQuerier{
 			rows: &fakeRows{
 				data: [][]any{
-					{credID1, orgID, "Key 1", string(domain.TypeSSHPrivateKey), fp, 1, now, now},
-					{credID2, orgID, "Password 1", string(domain.TypeSSHPassword), nil, 1, now.Add(-time.Hour), now.Add(-time.Hour)},
+					{credID1, orgID, "Key 1", string(domain.TypeSSHPrivateKey), string(domain.ManagedByUser), fp, 1, now, now},
+					{credID2, orgID, "Password 1", string(domain.TypeSSHPassword), string(domain.ManagedByUser), nil, 1, now.Add(-time.Hour), now.Add(-time.Hour)},
 				},
 			},
 		}
@@ -428,6 +432,7 @@ func TestPostgresCredentialRepository_FindMetadataForOrganization(t *testing.T) 
 					orgID,
 					"My Key",
 					"ssh_private_key",
+					string(domain.ManagedByUser),
 					fp,
 					1,
 					now,
@@ -476,6 +481,7 @@ func TestPostgresCredentialRepository_UpdateNameForOrganization(t *testing.T) {
 					orgID,
 					"Updated Name",
 					"ssh_private_key",
+					string(domain.ManagedByUser),
 					fp,
 					1,
 					now,
@@ -543,6 +549,7 @@ func TestPostgresCredentialRepository_UpdateEncryptedForOrganization(t *testing.
 					orgID,
 					"Rotated Secret Credential",
 					"ssh_private_key",
+					string(domain.ManagedByUser),
 					fp,
 					2,
 					now,

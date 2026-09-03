@@ -127,6 +127,15 @@ func (m *mockArtifactRepo) CountPlansByStorageTarget(ctx context.Context, orgID,
 func (m *mockArtifactRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
 	return 0, nil
 }
+func (m *mockArtifactRepo) CreateRepository(ctx context.Context, repo *domain.BackupRepository) (*domain.BackupRepository, error) {
+	return nil, nil
+}
+func (m *mockArtifactRepo) GetRepositoryByResourceID(ctx context.Context, orgID, resourceID uuid.UUID) (*domain.BackupRepository, error) {
+	return nil, nil
+}
+func (m *mockArtifactRepo) GetRepositoryByID(ctx context.Context, orgID, repoID uuid.UUID) (*domain.BackupRepository, error) {
+	return nil, nil
+}
 
 type mockStorageProvider struct {
 	openArtifactFunc   func(ctx context.Context, storageRef string) (io.ReadCloser, error)

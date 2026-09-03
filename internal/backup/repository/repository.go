@@ -64,4 +64,9 @@ type BackupRepository interface {
 	// Lifecycle Recovery & Reaper
 	RecoverInterruptedRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error)
 	ReapStaleRuns(ctx context.Context) ([]domain.RecoveredRunInfo, error)
+
+	// Backup Repositories (Restic Step A.3)
+	CreateRepository(ctx context.Context, repo *domain.BackupRepository) (*domain.BackupRepository, error)
+	GetRepositoryByResourceID(ctx context.Context, orgID, resourceID uuid.UUID) (*domain.BackupRepository, error)
+	GetRepositoryByID(ctx context.Context, orgID, repoID uuid.UUID) (*domain.BackupRepository, error)
 }

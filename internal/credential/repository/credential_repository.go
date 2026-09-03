@@ -33,11 +33,16 @@ func NewPostgresCredentialRepository() *PostgresCredentialRepository {
 
 // Create persists a new encrypted credential entity.
 func (r *PostgresCredentialRepository) Create(ctx context.Context, q database.Querier, cred *domain.Credential) error {
+	managedBy := cred.ManagedBy
+	if managedBy == "" {
+		managedBy = domain.ManagedByUser
+	}
+
 	const query = `
 		INSERT INTO credentials (
-			id, organization_id, name, type, encrypted_secret, nonce, auth_tag, key_version, fingerprint, created_at, updated_at
+			id, organization_id, name, type, managed_by, encrypted_secret, nonce, auth_tag, key_version, fingerprint, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 		)
 	`
 
@@ -48,6 +53,7 @@ func (r *PostgresCredentialRepository) Create(ctx context.Context, q database.Qu
 		cred.OrganizationID,
 		cred.Name,
 		string(cred.Type),
+		string(managedBy),
 		cred.EncryptedSecret,
 		cred.Nonce,
 		cred.AuthTag,
@@ -67,19 +73,21 @@ func (r *PostgresCredentialRepository) Create(ctx context.Context, q database.Qu
 // If the credential does not exist or belongs to another organization, returns domain.ErrCredentialNotFound.
 func (r *PostgresCredentialRepository) FindEncryptedByIDForOrganization(ctx context.Context, q database.Querier, orgID uuid.UUID, credID uuid.UUID) (*domain.Credential, error) {
 	const query = `
-		SELECT id, organization_id, name, type, encrypted_secret, nonce, auth_tag, key_version, fingerprint, created_at, updated_at
+		SELECT id, organization_id, name, type, managed_by, encrypted_secret, nonce, auth_tag, key_version, fingerprint, created_at, updated_at
 		FROM credentials
 		WHERE id = $1 AND organization_id = $2
 	`
 
 	var c domain.Credential
 	var typeStr string
+	var managedByStr string
 
 	err := q.QueryRow(ctx, query, credID, orgID).Scan(
 		&c.ID,
 		&c.OrganizationID,
 		&c.Name,
 		&typeStr,
+		&managedByStr,
 		&c.EncryptedSecret,
 		&c.Nonce,
 		&c.AuthTag,
@@ -96,25 +104,28 @@ func (r *PostgresCredentialRepository) FindEncryptedByIDForOrganization(ctx cont
 	}
 
 	c.Type = domain.Type(typeStr)
+	c.ManagedBy = domain.ManagedBy(managedByStr)
 	return &c, nil
 }
 
 // FindMetadataForOrganization retrieves safe metadata for a specific credential in the organization.
 func (r *PostgresCredentialRepository) FindMetadataForOrganization(ctx context.Context, q database.Querier, orgID uuid.UUID, credID uuid.UUID) (*domain.CredentialMetadata, error) {
 	const query = `
-		SELECT id, organization_id, name, type, fingerprint, key_version, created_at, updated_at
+		SELECT id, organization_id, name, type, managed_by, fingerprint, key_version, created_at, updated_at
 		FROM credentials
 		WHERE id = $1 AND organization_id = $2
 	`
 
 	var m domain.CredentialMetadata
 	var typeStr string
+	var managedByStr string
 
 	err := q.QueryRow(ctx, query, credID, orgID).Scan(
 		&m.ID,
 		&m.OrganizationID,
 		&m.Name,
 		&typeStr,
+		&managedByStr,
 		&m.Fingerprint,
 		&m.KeyVersion,
 		&m.CreatedAt,
@@ -128,16 +139,17 @@ func (r *PostgresCredentialRepository) FindMetadataForOrganization(ctx context.C
 	}
 
 	m.Type = domain.Type(typeStr)
+	m.ManagedBy = domain.ManagedBy(managedByStr)
 	return &m, nil
 }
 
 // ListMetadataForOrganization retrieves all safe credential metadata for an organization.
-// Sensitive ciphertext and auth tags (encrypted_secret, nonce, auth_tag) are strictly excluded from the query.
+// System credentials (managed_by = 'system') are strictly excluded from the query.
 func (r *PostgresCredentialRepository) ListMetadataForOrganization(ctx context.Context, q database.Querier, orgID uuid.UUID) ([]*domain.CredentialMetadata, error) {
 	const query = `
-		SELECT id, organization_id, name, type, fingerprint, key_version, created_at, updated_at
+		SELECT id, organization_id, name, type, managed_by, fingerprint, key_version, created_at, updated_at
 		FROM credentials
-		WHERE organization_id = $1
+		WHERE organization_id = $1 AND managed_by = 'user'
 		ORDER BY created_at DESC, id DESC
 	`
 
@@ -151,11 +163,13 @@ func (r *PostgresCredentialRepository) ListMetadataForOrganization(ctx context.C
 	for rows.Next() {
 		var m domain.CredentialMetadata
 		var typeStr string
+		var managedByStr string
 		if err := rows.Scan(
 			&m.ID,
 			&m.OrganizationID,
 			&m.Name,
 			&typeStr,
+			&managedByStr,
 			&m.Fingerprint,
 			&m.KeyVersion,
 			&m.CreatedAt,
@@ -164,6 +178,7 @@ func (r *PostgresCredentialRepository) ListMetadataForOrganization(ctx context.C
 			return nil, err
 		}
 		m.Type = domain.Type(typeStr)
+		m.ManagedBy = domain.ManagedBy(managedByStr)
 		result = append(result, &m)
 	}
 
@@ -185,17 +200,19 @@ func (r *PostgresCredentialRepository) UpdateNameForOrganization(ctx context.Con
 		UPDATE credentials
 		SET name = $3, updated_at = NOW()
 		WHERE id = $1 AND organization_id = $2
-		RETURNING id, organization_id, name, type, fingerprint, key_version, created_at, updated_at
+		RETURNING id, organization_id, name, type, managed_by, fingerprint, key_version, created_at, updated_at
 	`
 
 	var m domain.CredentialMetadata
 	var typeStr string
+	var managedByStr string
 
 	err := q.QueryRow(ctx, query, credID, orgID, name).Scan(
 		&m.ID,
 		&m.OrganizationID,
 		&m.Name,
 		&typeStr,
+		&managedByStr,
 		&m.Fingerprint,
 		&m.KeyVersion,
 		&m.CreatedAt,
@@ -209,6 +226,7 @@ func (r *PostgresCredentialRepository) UpdateNameForOrganization(ctx context.Con
 	}
 
 	m.Type = domain.Type(typeStr)
+	m.ManagedBy = domain.ManagedBy(managedByStr)
 	return &m, nil
 }
 
@@ -224,11 +242,12 @@ func (r *PostgresCredentialRepository) UpdateEncryptedForOrganization(ctx contex
 		    fingerprint = $8,
 		    updated_at = $9
 		WHERE id = $1 AND organization_id = $2
-		RETURNING id, organization_id, name, type, fingerprint, key_version, created_at, updated_at
+		RETURNING id, organization_id, name, type, managed_by, fingerprint, key_version, created_at, updated_at
 	`
 
 	var m domain.CredentialMetadata
 	var typeStr string
+	var managedByStr string
 
 	err := q.QueryRow(
 		ctx,
@@ -247,6 +266,7 @@ func (r *PostgresCredentialRepository) UpdateEncryptedForOrganization(ctx contex
 		&m.OrganizationID,
 		&m.Name,
 		&typeStr,
+		&managedByStr,
 		&m.Fingerprint,
 		&m.KeyVersion,
 		&m.CreatedAt,
@@ -260,27 +280,41 @@ func (r *PostgresCredentialRepository) UpdateEncryptedForOrganization(ctx contex
 	}
 
 	m.Type = domain.Type(typeStr)
+	m.ManagedBy = domain.ManagedBy(managedByStr)
 	return &m, nil
 }
 
 // DeleteForOrganization permanently deletes a credential belonging to the organization.
-// If the credential is in use by a resource connector (foreign key restrict violation), returns domain.ErrCredentialInUse.
+// If the credential is in use by a resource connector or restic repository, returns domain.ErrCredentialInUse.
+// If the credential is system-managed, returns domain.ErrSystemCredentialRestricted.
 func (r *PostgresCredentialRepository) DeleteForOrganization(ctx context.Context, q database.Querier, orgID, credID uuid.UUID) error {
 	const query = `
 		DELETE FROM credentials
-		WHERE id = $1 AND organization_id = $2
+		WHERE id = $1 AND organization_id = $2 AND managed_by = 'user'
 	`
 
 	cmdTag, err := q.Exec(ctx, query, credID, orgID)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23503" && pgErr.ConstraintName == "fk_resource_connectors_org_credential" {
-			return domain.ErrCredentialInUse
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			if pgErr.ConstraintName == "fk_resource_connectors_org_credential" ||
+				pgErr.ConstraintName == "fk_backup_repositories_credential" ||
+				pgErr.ConstraintName == "fk_storage_targets_org_credential" {
+				return domain.ErrCredentialInUse
+			}
 		}
 		return err
 	}
 
 	if cmdTag.RowsAffected() == 0 {
+		var managedBy string
+		row := q.QueryRow(ctx, "SELECT managed_by FROM credentials WHERE id = $1 AND organization_id = $2", credID, orgID)
+		if row != nil {
+			chkErr := row.Scan(&managedBy)
+			if chkErr == nil && managedBy == string(domain.ManagedBySystem) {
+				return domain.ErrSystemCredentialRestricted
+			}
+		}
 		return domain.ErrCredentialNotFound
 	}
 

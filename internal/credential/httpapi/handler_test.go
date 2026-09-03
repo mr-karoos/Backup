@@ -162,6 +162,14 @@ func (f *fakeCredentialService) GetCredentialMetadata(
 	return nil, domain.ErrCredentialNotFound
 }
 
+func (f *fakeCredentialService) GetSystemCredentialMetadata(
+	ctx context.Context,
+	orgID uuid.UUID,
+	credID uuid.UUID,
+) (*domain.CredentialMetadata, error) {
+	return f.GetCredentialMetadata(ctx, orgID, credID)
+}
+
 func (f *fakeCredentialService) UpdateCredentialName(
 	ctx context.Context,
 	orgID uuid.UUID,

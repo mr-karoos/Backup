@@ -137,4 +137,22 @@ var (
 
 	// ErrIncompatibleEngineStorage indicates that the selected engine cannot store artifacts to the selected target type.
 	ErrIncompatibleEngineStorage = errors.New("incompatible engine and storage target type")
+
+	// ErrRepositoryNotFound indicates that no Restic repository exists for the resource in the organization.
+	ErrRepositoryNotFound = errors.New("backup repository not found")
+
+	// ErrRepositoryAlreadyExists indicates that a canonical repository already exists for the resource.
+	ErrRepositoryAlreadyExists = errors.New("a backup repository already exists for this resource")
+
+	// ErrRepositoryTargetMismatch indicates an attempt to switch the storage target of an existing repository.
+	ErrRepositoryTargetMismatch = errors.New("cannot change storage target of existing backup repository")
+
+	// ErrRepositoryCorrupted indicates that the repository record exists in DB but is physically missing or corrupted.
+	ErrRepositoryCorrupted = errors.New("backup repository physically missing or corrupted")
+
+	// ErrRepositoryReconciliationRequired indicates a failure during provisioning requiring administrative reconciliation.
+	ErrRepositoryReconciliationRequired = errors.New("backup repository provisioning requires reconciliation")
+
+	// ErrInvalidRepositoryBinding indicates that a repository reference (resource, target, or credential) is invalid or cross-tenant.
+	ErrInvalidRepositoryBinding = errors.New("invalid repository binding or tenant mismatch")
 )

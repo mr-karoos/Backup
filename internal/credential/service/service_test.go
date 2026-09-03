@@ -86,6 +86,7 @@ func (f *fakeRepo) FindMetadataForOrganization(ctx context.Context, q database.Q
 			OrganizationID: f.savedCred.OrganizationID,
 			Name:           f.savedCred.Name,
 			Type:           f.savedCred.Type,
+			ManagedBy:      f.savedCred.ManagedBy,
 			Fingerprint:    f.savedCred.Fingerprint,
 			KeyVersion:     f.savedCred.KeyVersion,
 			CreatedAt:      f.savedCred.CreatedAt,

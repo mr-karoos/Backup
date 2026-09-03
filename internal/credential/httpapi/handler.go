@@ -38,6 +38,12 @@ type CredentialService interface {
 		credID uuid.UUID,
 	) (*domain.CredentialMetadata, error)
 
+	GetSystemCredentialMetadata(
+		ctx context.Context,
+		orgID uuid.UUID,
+		credID uuid.UUID,
+	) (*domain.CredentialMetadata, error)
+
 	UpdateCredentialName(
 		ctx context.Context,
 		orgID uuid.UUID,
@@ -163,6 +169,48 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, r, http.StatusOK, respData, "اعتبارنامه‌ها با موفقیت دریافت شدند.")
 }
 
+// GetByID handles GET /api/v1/credentials/{id} - retrieves safe metadata for a single credential.
+func (h *Handler) GetByID(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+
+	tenantCtx, ok := orgHttpapi.TenantContextFromRequest(r)
+	if !ok || tenantCtx == nil || tenantCtx.OrganizationID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "access denied", nil)
+		return
+	}
+
+	idStr := r.PathValue("id")
+	credID, err := uuid.Parse(idStr)
+	if err != nil || credID == uuid.Nil {
+		httpapi.WriteError(w, r, http.StatusBadRequest, "BAD_REQUEST", "invalid credential identifier", nil)
+		return
+	}
+
+	meta, err := h.service.GetCredentialMetadata(r.Context(), tenantCtx.OrganizationID, credID)
+	if err != nil {
+		if errors.Is(err, domain.ErrCredentialNotFound) {
+			httpapi.WriteError(w, r, http.StatusNotFound, "CREDENTIAL_NOT_FOUND", "credential not found", nil)
+			return
+		}
+		reqLogger := logger.FromContext(r.Context(), h.logger)
+		reqLogger.Error("failed to load credential metadata")
+		httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "service temporarily unavailable", nil)
+		return
+	}
+
+	res := CredentialListItemResponse{
+		ID:          meta.ID.String(),
+		Name:        meta.Name,
+		Type:        string(meta.Type),
+		Fingerprint: meta.Fingerprint,
+		KeyVersion:  meta.KeyVersion,
+		CreatedAt:   meta.CreatedAt,
+	}
+
+	httpapi.WriteJSON(w, r, http.StatusOK, res, "اعتبارنامه با موفقیت دریافت شد.")
+}
+
 // Create handles POST /api/v1/credentials - creates a new encrypted credential in the active organization.
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
@@ -199,6 +247,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	credType := domain.Type(req.Type)
 	if err := domain.ValidateType(credType); err != nil {
 		httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "unsupported or invalid credential type", nil)
+		return
+	}
+	if !credType.IsUserManaged() {
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "system-managed credentials cannot be created directly", nil)
 		return
 	}
 
@@ -355,6 +407,10 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 				httpapi.WriteError(w, r, http.StatusNotFound, "CREDENTIAL_NOT_FOUND", "credential not found", nil)
 				return
 			}
+			if errors.Is(err, domain.ErrSystemCredentialRestricted) {
+				httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "system-managed credentials cannot be modified", nil)
+				return
+			}
 			if errors.Is(err, domain.ErrInvalidCredentialName) {
 				httpapi.WriteError(w, r, http.StatusUnprocessableEntity, "VALIDATION_FAILED", "credential name must be between 1 and 100 characters", nil)
 				return
@@ -380,7 +436,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 
 	// Case 2: Secret update (with or without name)
 	// Load current metadata to verify existence and inspect credential type
-	currentMeta, err := h.service.GetCredentialMetadata(r.Context(), tenantCtx.OrganizationID, credID)
+	currentMeta, err := h.service.GetSystemCredentialMetadata(r.Context(), tenantCtx.OrganizationID, credID)
 	if err != nil {
 		if errors.Is(err, domain.ErrCredentialNotFound) {
 			httpapi.WriteError(w, r, http.StatusNotFound, "CREDENTIAL_NOT_FOUND", "credential not found", nil)
@@ -389,6 +445,10 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		reqLogger := logger.FromContext(r.Context(), h.logger)
 		reqLogger.Error("failed to load credential metadata for update")
 		httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "service temporarily unavailable", nil)
+		return
+	}
+	if currentMeta.ManagedBy == domain.ManagedBySystem {
+		httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "system-managed credentials cannot be modified", nil)
 		return
 	}
 
@@ -453,6 +513,10 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 			httpapi.WriteError(w, r, http.StatusNotFound, "CREDENTIAL_NOT_FOUND", "credential not found", nil)
 			return
 		}
+		if errors.Is(err, domain.ErrSystemCredentialRestricted) {
+			httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "system-managed credentials cannot be modified", nil)
+			return
+		}
 		if errors.Is(err, domain.ErrInvalidCredentialName) ||
 			errors.Is(err, domain.ErrEmptyPlaintextSecret) ||
 			errors.Is(err, domain.ErrInvalidSSHKey) {
@@ -507,6 +571,10 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, domain.ErrCredentialNotFound) {
 			httpapi.WriteError(w, r, http.StatusNotFound, "CREDENTIAL_NOT_FOUND", "credential not found", nil)
+			return
+		}
+		if errors.Is(err, domain.ErrSystemCredentialRestricted) {
+			httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "system-managed credentials cannot be deleted", nil)
 			return
 		}
 		if errors.Is(err, domain.ErrCredentialInUse) {

@@ -1929,3 +1929,151 @@ func scanBackupRunWithStats(s scannable) (*domain.BackupRunWithStats, error) {
 		ArtifactsCount:         artifactsCount,
 	}, nil
 }
+
+func scanBackupRepository(s interface{ Scan(dest ...any) error }) (*domain.BackupRepository, error) {
+	var repo domain.BackupRepository
+	var statusStr string
+	err := s.Scan(
+		&repo.ID,
+		&repo.OrganizationID,
+		&repo.ResourceID,
+		&repo.StorageTargetID,
+		&repo.CredentialID,
+		&repo.RepositoryLocator,
+		&statusStr,
+		&repo.Metadata,
+		&repo.CreatedAt,
+		&repo.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	repo.Status = domain.BackupRepositoryStatus(statusStr)
+	return &repo, nil
+}
+
+// CreateRepository persists a new dedicated per-resource Restic repository entity.
+// It verifies tenant integrity, ensuring the resource, storage target, and credential belong to the same organization,
+// the storage target is active and supported, and the credential is a system-managed restic_repository_key.
+func (r *PostgresBackupRepository) CreateRepository(ctx context.Context, repo *domain.BackupRepository) (*domain.BackupRepository, error) {
+	if repo == nil || repo.ID == uuid.Nil || repo.OrganizationID == uuid.Nil || repo.ResourceID == uuid.Nil ||
+		repo.StorageTargetID == uuid.Nil || repo.CredentialID == uuid.Nil || repo.RepositoryLocator == "" {
+		return nil, domain.ErrInvalidRepositoryBinding
+	}
+
+	q := r.txManager.Querier()
+
+	const query = `
+		INSERT INTO backup_repositories (
+			id, organization_id, resource_id, storage_target_id, credential_id,
+			repository_locator, status, metadata, created_at, updated_at
+		)
+		SELECT
+			$1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW()
+		FROM credentials c
+		JOIN storage_targets st ON st.id = $4 AND st.organization_id = $2
+		JOIN resources res ON res.id = $3 AND res.organization_id = $2
+		WHERE c.id = $5
+		  AND c.organization_id = $2
+		  AND c.type = 'restic_repository_key'
+		  AND c.managed_by = 'system'
+		  AND st.status = 'active'
+		  AND st.type IN ('local', 's3', 's3_compatible')
+		  AND res.status != 'archived'
+		RETURNING id, organization_id, resource_id, storage_target_id, credential_id, repository_locator, status, metadata, created_at, updated_at;
+	`
+
+	status := string(repo.Status)
+	if status == "" {
+		status = string(domain.BackupRepositoryStatusActive)
+	}
+	meta := repo.Metadata
+	if len(meta) == 0 {
+		meta = []byte("{}")
+	}
+
+	row := q.QueryRow(ctx, query,
+		repo.ID,
+		repo.OrganizationID,
+		repo.ResourceID,
+		repo.StorageTargetID,
+		repo.CredentialID,
+		repo.RepositoryLocator,
+		status,
+		meta,
+	)
+
+	saved, err := scanBackupRepository(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Either foreign key binding failed, credential is not system restic_repository_key, or target/resource inactive
+			return nil, domain.ErrInvalidRepositoryBinding
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			if pgErr.Code == "23505" { // unique_violation (uq_backup_repositories_resource_id)
+				return nil, domain.ErrRepositoryAlreadyExists
+			}
+			if pgErr.Code == "23503" { // foreign_key_violation
+				return nil, domain.ErrInvalidRepositoryBinding
+			}
+		}
+		return nil, fmt.Errorf("failed creating backup repository: %w", err)
+	}
+
+	return saved, nil
+}
+
+// GetRepositoryByResourceID retrieves the dedicated repository for a given resource in the organization.
+func (r *PostgresBackupRepository) GetRepositoryByResourceID(ctx context.Context, orgID, resourceID uuid.UUID) (*domain.BackupRepository, error) {
+	if orgID == uuid.Nil || resourceID == uuid.Nil {
+		return nil, domain.ErrRepositoryNotFound
+	}
+
+	q := r.txManager.Querier()
+	const query = `
+		SELECT id, organization_id, resource_id, storage_target_id, credential_id,
+		       repository_locator, status, metadata, created_at, updated_at
+		FROM backup_repositories
+		WHERE organization_id = $1 AND resource_id = $2
+		LIMIT 1;
+	`
+
+	row := q.QueryRow(ctx, query, orgID, resourceID)
+	repo, err := scanBackupRepository(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrRepositoryNotFound
+		}
+		return nil, fmt.Errorf("failed querying backup repository by resource: %w", err)
+	}
+
+	return repo, nil
+}
+
+// GetRepositoryByID retrieves a repository by its repository ID and organization ID.
+func (r *PostgresBackupRepository) GetRepositoryByID(ctx context.Context, orgID, repoID uuid.UUID) (*domain.BackupRepository, error) {
+	if orgID == uuid.Nil || repoID == uuid.Nil {
+		return nil, domain.ErrRepositoryNotFound
+	}
+
+	q := r.txManager.Querier()
+	const query = `
+		SELECT id, organization_id, resource_id, storage_target_id, credential_id,
+		       repository_locator, status, metadata, created_at, updated_at
+		FROM backup_repositories
+		WHERE organization_id = $1 AND id = $2
+		LIMIT 1;
+	`
+
+	row := q.QueryRow(ctx, query, orgID, repoID)
+	repo, err := scanBackupRepository(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrRepositoryNotFound
+		}
+		return nil, fmt.Errorf("failed querying backup repository by id: %w", err)
+	}
+
+	return repo, nil
+}

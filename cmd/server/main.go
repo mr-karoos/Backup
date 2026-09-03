@@ -16,6 +16,7 @@ import (
 	backupEngine "backup-platform/internal/backup/engine"
 	backupHttpapi "backup-platform/internal/backup/httpapi"
 	backupRepo "backup-platform/internal/backup/repository"
+	"backup-platform/internal/backup/restic"
 	backupRetention "backup-platform/internal/backup/retention"
 	backupScheduler "backup-platform/internal/backup/scheduler"
 	backupService "backup-platform/internal/backup/service"
@@ -271,6 +272,25 @@ func run() error {
 
 	storageTargetService := backupService.NewStorageTargetService(backupRepository, vaultService, endpointPolicy, log)
 
+	// 14b. Initialize Restic Repository Subsystem (Future Phase A Step A.3)
+	resticRunner := restic.NewResticRunner("", log)
+	resticTargetResolver := restic.NewTargetResolver(
+		backupRepository,
+		vaultService,
+		cfg.StorageRoot,
+		cfg.S3AllowInsecureEndpoints,
+		cfg.S3PrivateEndpointsAllowlist,
+	)
+	_ = backupService.NewRepositoryService(
+		backupRepository,
+		backupRepository,
+		resFinder,
+		vaultService,
+		resticTargetResolver,
+		resticRunner,
+		log,
+	)
+
 	backupHandler := backupHttpapi.NewHandler(backupJobService, backupPlanService, historyService, artifactService, verificationService, log)
 	backupHandler.SetStorageTargetService(storageTargetService)
 
@@ -358,6 +378,7 @@ func run() error {
 
 	// Tenant-scoped credential routes (Phase 3B-3A & Phase 3B-3B)
 	mux.Handle("GET /api/v1/credentials", authMiddleware(orgContextMiddleware(orgHttpapi.RequireOrganizationAdmin(log)(http.HandlerFunc(credHandler.List)))))
+	mux.Handle("GET /api/v1/credentials/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequireOrganizationAdmin(log)(http.HandlerFunc(credHandler.GetByID)))))
 	mux.Handle("POST /api/v1/credentials", authMiddleware(orgContextMiddleware(orgHttpapi.RequireOrganizationAdmin(log)(http.HandlerFunc(credHandler.Create)))))
 	mux.Handle("PUT /api/v1/credentials/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequireOrganizationAdmin(log)(http.HandlerFunc(credHandler.Update)))))
 	mux.Handle("DELETE /api/v1/credentials/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequireOrganizationAdmin(log)(http.HandlerFunc(credHandler.Delete)))))
