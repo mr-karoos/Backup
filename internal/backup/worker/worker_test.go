@@ -17,6 +17,7 @@ import (
 	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/engine"
+	"backup-platform/internal/backup/repository"
 	"backup-platform/internal/backup/retention"
 	"backup-platform/internal/backup/verification"
 	"backup-platform/internal/connector"
@@ -28,12 +29,35 @@ import (
 	"backup-platform/pkg/uuid"
 )
 
-func init() {
-	var err error
-	defaultTestKeyProvider, err = artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x42}, 32), 1)
-	if err != nil {
-		panic(err)
-	}
+var testSyntheticKeyProvider, _ = artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x42}, 32), 1)
+
+func newTestWorkerPool(
+	cfg WorkerPoolConfig,
+	repo repository.BackupRepository,
+	resFinder ResourceConnectorFinder,
+	vault CredentialVault,
+	capabilityRegistry *connector.BackupCapabilityRegistry,
+	fileCapabilityRegistry *connector.FileBackupCapabilityRegistry,
+	engine engine.BackupEngine,
+	storageProvider storage.StorageProvider,
+	verifier verification.Verifier,
+	mutexManager *PerResourceMutexManager,
+	log *slog.Logger,
+) *WorkerPool {
+	return NewWorkerPoolWithKeyProvider(
+		cfg,
+		repo,
+		resFinder,
+		vault,
+		capabilityRegistry,
+		fileCapabilityRegistry,
+		engine,
+		storageProvider,
+		verifier,
+		mutexManager,
+		log,
+		testSyntheticKeyProvider,
+	)
 }
 
 func TestPerResourceMutexManager(t *testing.T) {
@@ -644,7 +668,7 @@ func TestWorkerPool_EndToEndSuccessfulBackup(t *testing.T) {
 		sqlDump: "-- MySQL dump 10.13\nCREATE DATABASE `ecommerce_prod`;\nINSERT INTO t VALUES (1);\n",
 	})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -779,7 +803,7 @@ func TestWorkerPool_FailureCleansArtifactsAndFailsJob(t *testing.T) {
 	reg := connector.NewBackupCapabilityRegistry()
 	reg.Register(resDomain.TypeUbuntuSSH, &failingCapability{})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -898,7 +922,7 @@ func TestWorkerPool_QueueStarvation_600Jobs(t *testing.T) {
 		sqlDump: "-- MySQL dump 10.13\nCREATE TABLE t1 (id int);\n",
 	})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -933,7 +957,7 @@ func TestWorkerPool_QueueStarvation_600Jobs(t *testing.T) {
 
 func TestWorkerPool_BoundedShutdown(t *testing.T) {
 	repo := newFakeWorkerRepo(uuid.New())
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 2, PollInterval: 50 * time.Millisecond},
 		repo,
 		nil,
@@ -1015,7 +1039,7 @@ func TestWorkerPool_FinalizeRunAndJob_OwnershipLost(t *testing.T) {
 		sqlDump: "-- MySQL dump 10.13\nCREATE TABLE t1 (id int);\n",
 	})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -1124,7 +1148,7 @@ func TestWorkerPool_PanicRecoveryAndCleanup(t *testing.T) {
 		sqlDump: "-- MySQL dump 10.13\nCREATE TABLE t1 (id int);\n",
 	})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -1285,7 +1309,7 @@ func TestWorkerPool_CreateArtifact_DBFailure_CleansPhysicalOnly(t *testing.T) {
 		sqlDump: "-- MySQL dump 10.13\nCREATE TABLE t1 (id int);\n",
 	})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -1411,7 +1435,7 @@ func TestWorkerPool_VerificationFailure_UpdatesAndCleans(t *testing.T) {
 		sqlDump: "-- MySQL dump 10.13\nCREATE TABLE t1 (id int);\n",
 	})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -1444,6 +1468,112 @@ func TestWorkerPool_VerificationFailure_UpdatesAndCleans(t *testing.T) {
 	}
 	if repo.finalizedJob == nil || repo.finalizedJob.Status != domain.JobStatusFailed {
 		t.Fatalf("expected job failed on verification failure, got: %+v", repo.finalizedJob)
+	}
+}
+
+type keyUnavailableVerificationEngine struct{}
+
+func (k *keyUnavailableVerificationEngine) VerifyDatabaseArtifact(ctx context.Context, storageProvider storage.StorageProvider, storageReference string, expectedSizeBytes int64, expectedChecksumSHA256 string) (string, error) {
+	return "", artifactcrypto.ErrUnknownKeyVersion
+}
+func (k *keyUnavailableVerificationEngine) VerifyFilesArtifact(ctx context.Context, storageProvider storage.StorageProvider, storageReference string, expectedSizeBytes int64, expectedChecksumSHA256 string) (string, error) {
+	return "", artifactcrypto.ErrUnknownKeyVersion
+}
+func (k *keyUnavailableVerificationEngine) VerifyEncryptedDatabaseArtifact(ctx context.Context, storageProvider storage.StorageProvider, storageReference string, expectedPlaintextSize int64, expectedPlaintextChecksum string, storedSizeBytes int64, ciphertextSHA256 string, orgID, artifactID uuid.UUID) (string, error) {
+	return "", artifactcrypto.ErrUnknownKeyVersion
+}
+func (k *keyUnavailableVerificationEngine) VerifyEncryptedFilesArtifact(ctx context.Context, storageProvider storage.StorageProvider, storageReference string, expectedPlaintextSize int64, expectedPlaintextChecksum string, storedSizeBytes int64, ciphertextSHA256 string, orgID, artifactID uuid.UUID) (string, error) {
+	return "", artifactcrypto.ErrUnknownKeyVersion
+}
+
+func TestWorkerPool_VerificationKeyInfrastructureFailure_PreservesUnverifiedStatus(t *testing.T) {
+	tempDir := t.TempDir()
+	storageProvider, _ := local.NewLocalStorageProvider(tempDir)
+	_ = storageProvider.EnsureStorageRoot(context.Background())
+
+	orgID := uuid.New()
+	resID := uuid.New()
+	credID := uuid.New()
+
+	validPassJSON, _ := payload.EncodeV1("testpass", nil)
+	fingerprint := "SHA256:mock"
+	timeout := 10
+	port := 22
+	resWithConn := &resDomain.ResourceWithConnector{
+		Resource: &resDomain.Resource{
+			ID:             resID,
+			OrganizationID: orgID,
+			Type:           resDomain.TypeUbuntuSSH,
+			Status:         resDomain.StatusActive,
+		},
+		Connector: &resDomain.ResourceConnector{
+			ID:                 uuid.New(),
+			ResourceID:         resID,
+			CredentialID:       credID,
+			Host:               "127.0.0.1",
+			Port:               port,
+			AuthType:           resDomain.AuthTypeSSHPassword,
+			HostKeyFingerprint: &fingerprint,
+			Config: resDomain.ConnectorConfig{
+				Username:                 "testuser",
+				ConnectionTimeoutSeconds: &timeout,
+			},
+		},
+	}
+
+	repo := newFakeWorkerRepo(orgID)
+	job := &domain.BackupJob{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		ResourceID:     resID,
+		TriggerType:    domain.TriggerTypeManual,
+		BackupType:     domain.BackupTypeMySQLDatabase,
+		TargetSpec:     domain.TargetSpec{Databases: []string{"test_db"}},
+		Status:         domain.JobStatusPending,
+		CreatedAt:      time.Now(),
+	}
+	repo.jobs[job.ID] = job
+
+	reg := connector.NewBackupCapabilityRegistry()
+	reg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{
+		sqlDump: "-- MySQL dump 10.13\nCREATE TABLE t1 (id int);\n",
+	})
+
+	workerPool := newTestWorkerPool(
+		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+		repo,
+		&fakeResourceFinder{resWithConn: resWithConn},
+		&fakeCredentialVault{payloadBytes: validPassJSON},
+		reg,
+		nil,
+		engine.NewDirectStreamBackupEngine(),
+		storageProvider,
+		&keyUnavailableVerificationEngine{},
+		NewPerResourceMutexManager(),
+		nil,
+	)
+
+	workerPool.processNextAvailableJob(context.Background(), 1)
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+
+	// Execution fails safely as an infrastructure error
+	if repo.finalizedJob == nil || (repo.finalizedJob.Status != domain.JobStatusFailed && repo.finalizedJob.Status != domain.JobStatusPending) {
+		t.Fatalf("expected job to fail or be retried on infrastructure error, got: %+v", repo.finalizedJob)
+	}
+
+	// The artifact must exist and MUST NOT have verification_status marked as failed
+	if len(repo.artifacts) == 0 {
+		t.Fatalf("expected artifact to be created")
+	}
+	for artID, art := range repo.artifacts {
+		if art.VerificationStatus == domain.VerificationStatusFailed {
+			t.Errorf("CRITICAL SECURITY VIOLATION: artifact verification_status must NOT be marked failed on ErrUnknownKeyVersion! got: %s", art.VerificationStatus)
+		}
+		if repo.tombstones[artID] {
+			t.Errorf("artifact must NOT be tombstoned on key infrastructure error")
+		}
 	}
 }
 
@@ -1503,7 +1633,7 @@ func TestWorkerPool_VerificationMetadataFailure_RetriesPlatformDependency(t *tes
 		sqlDump: "-- MySQL dump 10.13\nCREATE TABLE t1 (id int);\n",
 	})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -1587,7 +1717,7 @@ func TestWorkerPool_WebsiteFiles_Success(t *testing.T) {
 	fileReg := connector.NewFileBackupCapabilityRegistry()
 	fileReg.Register(resDomain.TypeUbuntuSSH, &fakeFileCapability{tarData: tarBytes})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -1690,7 +1820,7 @@ func TestWorkerPool_WebsiteFiles_MultiPath(t *testing.T) {
 	fileReg := connector.NewFileBackupCapabilityRegistry()
 	fileReg.Register(resDomain.TypeUbuntuSSH, &fakeFileCapability{tarData: tarBytes})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -1790,7 +1920,7 @@ func TestWorkerPool_WebsiteFiles_PartialFailure_CleansAll(t *testing.T) {
 	fileReg := connector.NewFileBackupCapabilityRegistry()
 	fileReg.Register(resDomain.TypeUbuntuSSH, condCap)
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -1881,7 +2011,7 @@ func TestWorkerPool_GetLatestRun_DBError_NoClaim(t *testing.T) {
 
 	mutexMgr := NewPerResourceMutexManager()
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -1986,7 +2116,7 @@ func TestWorkerPool_HeartbeatFailure_CancelsExecution(t *testing.T) {
 
 	mutexMgr := NewPerResourceMutexManager()
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond, HeartbeatInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -2083,7 +2213,7 @@ func TestWorkerPool_WebsiteBackup_PanicContained_CleansAndReleasesMutex(t *testi
 
 	mutexMgr := NewPerResourceMutexManager()
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -2297,7 +2427,7 @@ func TestWorkerPool_PostCommitPanic_DoesNotCorruptSuccess(t *testing.T) {
 	// Logger that panics strictly when "backup run completed successfully" is logged post-commit
 	panickingLogger := slog.New(&panicOnSuccessLogHandler{panicMsg: "backup run completed successfully"})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -2412,7 +2542,7 @@ func TestWorkerPool_MySQLDatabase_ModeAll_DiscoversAndDumpsAllDatabases(t *testi
 	capReg := connector.NewBackupCapabilityRegistry()
 	capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{sqlDump: validSQLDump})
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},
@@ -2543,7 +2673,7 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{sqlDump: "-- MySQL dump\nCREATE DATABASE testdb;\n"})
 
 		retManager := &fakeRetentionManager{}
-		workerPool := NewWorkerPool(
+		workerPool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -2606,7 +2736,7 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{sqlDump: "-- MySQL dump\nCREATE DATABASE testdb;\n"})
 
 		retManager := &fakeRetentionManager{}
-		workerPool := NewWorkerPool(
+		workerPool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -2650,7 +2780,7 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{sqlDump: "-- MySQL dump\nCREATE DATABASE testdb;\n"})
 
 		retManager := &fakeRetentionManager{errToReturn: errors.New("retention processing failed")}
-		workerPool := NewWorkerPool(
+		workerPool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -2710,7 +2840,7 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{errToReturn: errors.New("mysqldump failed: table locked")})
 
 		retManager := &fakeRetentionManager{}
-		workerPool := NewWorkerPool(
+		workerPool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -2755,7 +2885,7 @@ func TestWorkerPool_RetentionIntegration_PostSuccessInvocation(t *testing.T) {
 		capReg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{sqlDump: "-- MySQL dump\nCREATE DATABASE testdb;\n"})
 
 		retManager := &fakeRetentionManager{}
-		workerPool := NewWorkerPool(
+		workerPool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -2902,7 +3032,7 @@ func TestWorkerPool_S3DirectStream_PersistsS3TargetAndNeverFallsBackToLocal(t *t
 			sqlDump: "-- MySQL dump\nCREATE DATABASE `s3db`;\n",
 		})
 
-		workerPool := NewWorkerPool(
+		workerPool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -3033,7 +3163,7 @@ func TestWorkerPool_S3DirectStream_PersistsS3TargetAndNeverFallsBackToLocal(t *t
 			sqlDump: "-- MySQL dump\nCREATE DATABASE `s3db`;\n",
 		})
 
-		workerPool := NewWorkerPool(
+		workerPool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},

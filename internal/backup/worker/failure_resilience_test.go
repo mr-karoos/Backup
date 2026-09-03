@@ -117,7 +117,7 @@ func setupTestWorker(t *testing.T, cap connector.DatabaseBackupCapability, store
 		reg.Register(resDomain.TypeUbuntuSSH, cap)
 	}
 
-	workerPool := NewWorkerPool(
+	workerPool := newTestWorkerPool(
 		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		&fakeResourceFinder{resWithConn: resWithConn},

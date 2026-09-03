@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/service"
 	orgDomain "backup-platform/internal/organization/domain"
@@ -1333,6 +1334,88 @@ func TestHandler_DownloadBackupArtifact(t *testing.T) {
 
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("expected 404 Not Found, got %d", rec.Code)
+		}
+	})
+
+	t.Run("GET /api/v1/backup-artifacts/{id}/download sets Content-Length to SizeBytes not StoredSizeBytes", func(t *testing.T) {
+		plainSize := int64(12345)
+		storedSize := int64(67890)
+		mockArt := &mockArtifactManager{
+			openArtifactDownloadFunc: func(ctx context.Context, role orgDomain.Role, oID, aID uuid.UUID) (*domain.BackupArtifact, io.ReadCloser, error) {
+				art := &domain.BackupArtifact{
+					ID:              aID,
+					Format:          domain.ArtifactFormatSQLGzip,
+					TargetName:      "prod_db",
+					SizeBytes:       plainSize,
+					StoredSizeBytes: &storedSize,
+				}
+				dummyContent := bytes.Repeat([]byte("x"), int(plainSize))
+				return art, io.NopCloser(bytes.NewReader(dummyContent)), nil
+			},
+			recordDownloadAuditFunc: func(ctx context.Context, oID, uID, aID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error {
+				return nil
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
+		req.SetPathValue("id", artID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleMember,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.DownloadBackupArtifact(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", rec.Code, rec.Body.String())
+		}
+
+		// Verify Content-Length is SizeBytes (plainSize), NOT StoredSizeBytes
+		contentLen := rec.Header().Get("Content-Length")
+		if contentLen != "12345" {
+			t.Fatalf("Content-Length mismatch: expected SizeBytes (12345), got %q (StoredSizeBytes is %d)", contentLen, storedSize)
+		}
+	})
+
+	t.Run("GET /api/v1/backup-artifacts/{id}/download returns 503 and does not audit when key version unknown", func(t *testing.T) {
+		var auditAttempted bool
+		mockArt := &mockArtifactManager{
+			openArtifactDownloadFunc: func(ctx context.Context, role orgDomain.Role, oID, aID uuid.UUID) (*domain.BackupArtifact, io.ReadCloser, error) {
+				return nil, nil, artifactcrypto.ErrUnknownKeyVersion
+			},
+			recordDownloadAuditFunc: func(ctx context.Context, oID, uID, aID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error {
+				auditAttempted = true
+				return nil
+			},
+		}
+
+		handler := NewHandler(nil, nil, nil, mockArt, nil, nil)
+
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/backup-artifacts/"+artID.String()+"/download", nil)
+		req.SetPathValue("id", artID.String())
+		tenantCtx := &orgHttpapi.TenantContext{
+			UserID:           userID,
+			OrganizationID:   orgID,
+			Role:             orgDomain.RoleMember,
+			MembershipStatus: orgDomain.MemberStatusActive,
+		}
+		req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+		rec := httptest.NewRecorder()
+
+		handler.DownloadBackupArtifact(rec, req)
+
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("expected 503 Service Unavailable, got %d", rec.Code)
+		}
+
+		if auditAttempted {
+			t.Fatalf("download audit must NOT be recorded on key infrastructure failure")
 		}
 	})
 }

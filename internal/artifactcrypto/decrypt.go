@@ -1,6 +1,7 @@
 package artifactcrypto
 
 import (
+	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/subtle"
@@ -14,7 +15,7 @@ import (
 
 // DecryptReader implements an authenticated streaming BPAE V1 reader with 1-chunk holdback.
 type DecryptReader struct {
-	src                io.Reader
+	bufReader          *bufio.Reader
 	closer             io.Closer
 	keyProvider        KeyProvider
 	expectedOrgID      uuid.UUID
@@ -57,14 +58,20 @@ func NewDecryptReader(
 	if c, ok := src.(io.Closer); ok {
 		closer = c
 	}
+	bufReader := bufio.NewReaderSize(src, 32*1024)
 
 	return &DecryptReader{
-		src:                src,
+		bufReader:          bufReader,
 		closer:             closer,
 		keyProvider:        keyProvider,
 		expectedOrgID:      expectedOrgID,
 		expectedArtifactID: expectedArtifactID,
 	}, nil
+}
+
+// ParsePrologue reads and validates the exact 106-byte fixed prologue immediately if not already parsed.
+func (r *DecryptReader) ParsePrologue() error {
+	return r.parsePrologue()
 }
 
 // parsePrologue reads and validates the exact 106-byte fixed prologue.
@@ -74,7 +81,7 @@ func (r *DecryptReader) parsePrologue() error {
 	}
 
 	var prologue [PrologueSize]byte
-	if _, err := io.ReadFull(r.src, prologue[:]); err != nil {
+	if _, err := io.ReadFull(r.bufReader, prologue[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return ErrMalformedBPAE
 		}
@@ -171,7 +178,7 @@ func (r *DecryptReader) parsePrologue() error {
 // Returns (isFinal bool, plaintext []byte, err error).
 func (r *DecryptReader) fetchNextRecord() (bool, []byte, error) {
 	var flagBuf [1]byte
-	if _, err := io.ReadFull(r.src, flagBuf[:]); err != nil {
+	if _, err := io.ReadFull(r.bufReader, flagBuf[:]); err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return false, nil, ErrMissingFinal
 		}
@@ -187,7 +194,7 @@ func (r *DecryptReader) fetchNextRecord() (bool, []byte, error) {
 
 		// Read remainder of DATA header: ChunkIndex (8B) + PlaintextLength (4B)
 		var dataHeader [12]byte
-		if _, err := io.ReadFull(r.src, dataHeader[:]); err != nil {
+		if _, err := io.ReadFull(r.bufReader, dataHeader[:]); err != nil {
 			return false, nil, ErrMalformedBPAE
 		}
 
@@ -207,7 +214,7 @@ func (r *DecryptReader) fetchNextRecord() (bool, []byte, error) {
 		// Read ciphertext + GCM tag
 		ciphertextLen := int(plainLength) + GCMTagSize
 		buf := make([]byte, ciphertextLen)
-		if _, err := io.ReadFull(r.src, buf); err != nil {
+		if _, err := io.ReadFull(r.bufReader, buf); err != nil {
 			return false, nil, ErrMalformedBPAE
 		}
 
@@ -232,7 +239,7 @@ func (r *DecryptReader) fetchNextRecord() (bool, []byte, error) {
 		// Read remainder of FINAL record:
 		// NextChunkIndex (8B) + TotalPlaintextSize (8B) + DataChunkCount (8B) + GCMTag (16B) = 40 bytes
 		var finalBuf [40]byte
-		if _, err := io.ReadFull(r.src, finalBuf[:]); err != nil {
+		if _, err := io.ReadFull(r.bufReader, finalBuf[:]); err != nil {
 			return true, nil, ErrMalformedBPAE
 		}
 
@@ -257,14 +264,17 @@ func (r *DecryptReader) fetchNextRecord() (bool, []byte, error) {
 			return true, nil, ErrAuthFailed
 		}
 
-		// Assert NO trailing bytes exist in the underlying stream
-		var trailBuf [1]byte
-		n, trailErr := r.src.Read(trailBuf[:])
-		if n > 0 {
+		// Assert NO trailing bytes exist in the underlying stream using Peek(1).
+		// Peek returns data (err == nil): ErrTrailingBytes
+		// Peek returns io.EOF: stream ended cleanly, FINAL accepted
+		// Any other error: propagate safe I/O error
+		// (0, nil) is never accepted as proof of EOF.
+		_, peekErr := r.bufReader.Peek(1)
+		if peekErr == nil {
 			return true, nil, ErrTrailingBytes
 		}
-		if trailErr != nil && !errors.Is(trailErr, io.EOF) {
-			return true, nil, fmt.Errorf("bpae: error checking trailing stream: %w", trailErr)
+		if !errors.Is(peekErr, io.EOF) {
+			return true, nil, fmt.Errorf("bpae: error checking trailing stream: %w", peekErr)
 		}
 
 		r.finalValidated = true

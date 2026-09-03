@@ -109,6 +109,9 @@ func (e *DirectStreamBackupEngine) ExecuteDatabaseBackup(
 	if e.keyProvider == nil {
 		return nil, errors.New("artifact key provider cannot be nil: direct stream requires BPAE encryption at rest")
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 
 	pipeReader, pipeWriter := io.Pipe()
 
@@ -223,6 +226,9 @@ func (e *DirectStreamBackupEngine) ExecuteFilesBackup(
 	}
 	if e.keyProvider == nil {
 		return nil, errors.New("artifact key provider cannot be nil: direct stream requires BPAE encryption at rest")
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 
 	pipeReader, pipeWriter := io.Pipe()

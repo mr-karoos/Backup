@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -128,14 +129,42 @@ func NewWorkerPool(
 		databaseDiscoverer:     sshconn.NewSSHDatabaseDiscoverer(nil),
 	}
 
-	if defaultTestKeyProvider != nil {
-		wp.SetKeyProvider(defaultTestKeyProvider)
-	}
-
 	return wp
 }
 
-var defaultTestKeyProvider artifactcrypto.KeyProvider
+// NewWorkerPoolWithKeyProvider constructs a new WorkerPool instance with an explicit KeyProvider.
+func NewWorkerPoolWithKeyProvider(
+	cfg WorkerPoolConfig,
+	repo repository.BackupRepository,
+	resFinder ResourceConnectorFinder,
+	vault CredentialVault,
+	capabilityRegistry *connector.BackupCapabilityRegistry,
+	fileCapabilityRegistry *connector.FileBackupCapabilityRegistry,
+	engine engine.BackupEngine,
+	storageProvider storage.StorageProvider,
+	verifier verification.Verifier,
+	mutexManager *PerResourceMutexManager,
+	log *slog.Logger,
+	keyProvider artifactcrypto.KeyProvider,
+) *WorkerPool {
+	wp := NewWorkerPool(
+		cfg,
+		repo,
+		resFinder,
+		vault,
+		capabilityRegistry,
+		fileCapabilityRegistry,
+		engine,
+		storageProvider,
+		verifier,
+		mutexManager,
+		log,
+	)
+	if keyProvider != nil {
+		wp.SetKeyProvider(keyProvider)
+	}
+	return wp
+}
 
 // SetStorageResolver configures a dynamic storage provider resolver for S3/Local multi-target resolution.
 func (p *WorkerPool) SetStorageResolver(resolver storage.StorageProviderResolver) {
@@ -466,8 +495,10 @@ func (p *WorkerPool) executeJobSafely(
 		)
 	}
 
-	// Clean up artifacts if failure occurred
-	p.cleanupRunArtifacts(run.OrganizationID, run.ID)
+	// Clean up artifacts if failure occurred (do NOT delete/tombstone if failure is key infrastructure unavailability)
+	if !errors.Is(execErr, artifactcrypto.ErrUnknownKeyVersion) && !errors.Is(execErr, artifactcrypto.ErrInvalidKeyVersion) {
+		p.cleanupRunArtifacts(run.OrganizationID, run.ID)
+	}
 }
 
 func (p *WorkerPool) cleanupArtifact(ctx context.Context, orgID, artID, targetID uuid.UUID, storageRef string) error {
@@ -699,7 +730,12 @@ func (p *WorkerPool) executeDatabaseTarget(
 
 	// Insert initial unverified artifact record
 	storedSize := saveRes.StoredSizeBytes
-	engineMeta := []byte(fmt.Sprintf(`{"ciphertext_sha256":"%s"}`, saveRes.CiphertextSHA256))
+	engineMeta, metaErr := json.Marshal(map[string]string{
+		"ciphertext_sha256": saveRes.CiphertextSHA256,
+	})
+	if metaErr != nil {
+		return fmt.Errorf("failed marshaling engine metadata: %w", metaErr)
+	}
 
 	artRecord := &domain.BackupArtifact{
 		ID:                 artifactID,
@@ -742,6 +778,16 @@ func (p *WorkerPool) executeDatabaseTarget(
 	if verErr != nil {
 		if errors.Is(verErr, context.Canceled) || errors.Is(verErr, context.DeadlineExceeded) {
 			return verErr
+		}
+		// Artifact key availability is infrastructure error, NOT evidence of corruption.
+		if errors.Is(verErr, artifactcrypto.ErrUnknownKeyVersion) || errors.Is(verErr, artifactcrypto.ErrInvalidKeyVersion) {
+			p.logger.Error("artifact key infrastructure error during post-backup verification",
+				slog.String("run_id", run.ID.String()),
+				slog.String("artifact_id", artifactID.String()),
+				slog.String("error", verErr.Error()),
+			)
+			// Do NOT persist verification_status=failed. Fail the execution safely.
+			return fmt.Errorf("artifact encryption key infrastructure error: %w", verErr)
 		}
 		failMsg := "backup verification failed"
 		if updateErr := p.repo.UpdateArtifactVerification(ctx, job.OrganizationID, artifactID, domain.VerificationStatusFailed, &failMsg); updateErr != nil {
@@ -832,7 +878,12 @@ func (p *WorkerPool) executeFileTarget(
 
 	// Insert initial unverified artifact record
 	storedSize := saveRes.StoredSizeBytes
-	engineMeta := []byte(fmt.Sprintf(`{"ciphertext_sha256":"%s"}`, saveRes.CiphertextSHA256))
+	engineMeta, metaErr := json.Marshal(map[string]string{
+		"ciphertext_sha256": saveRes.CiphertextSHA256,
+	})
+	if metaErr != nil {
+		return fmt.Errorf("failed marshaling engine metadata: %w", metaErr)
+	}
 
 	artRecord := &domain.BackupArtifact{
 		ID:                 artifactID,
@@ -875,6 +926,16 @@ func (p *WorkerPool) executeFileTarget(
 	if verErr != nil {
 		if errors.Is(verErr, context.Canceled) || errors.Is(verErr, context.DeadlineExceeded) {
 			return verErr
+		}
+		// Artifact key availability is infrastructure error, NOT evidence of corruption.
+		if errors.Is(verErr, artifactcrypto.ErrUnknownKeyVersion) || errors.Is(verErr, artifactcrypto.ErrInvalidKeyVersion) {
+			p.logger.Error("artifact key infrastructure error during post-backup verification",
+				slog.String("run_id", run.ID.String()),
+				slog.String("artifact_id", artifactID.String()),
+				slog.String("error", verErr.Error()),
+			)
+			// Do NOT persist verification_status=failed. Fail the execution safely.
+			return fmt.Errorf("artifact encryption key infrastructure error: %w", verErr)
 		}
 		failMsg := "backup verification failed"
 		if updateErr := p.repo.UpdateArtifactVerification(ctx, job.OrganizationID, artifactID, domain.VerificationStatusFailed, &failMsg); updateErr != nil {

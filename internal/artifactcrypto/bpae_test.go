@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"testing"
+	"time"
 
 	"backup-platform/pkg/uuid"
 )
@@ -137,10 +138,38 @@ func TestBPAE_DeterministicGoldenVector(t *testing.T) {
 		t.Errorf("FINAL DataChunkCount mismatch")
 	}
 
-	// Golden hex snapshot check (proves exact deterministic reproducibility)
-	goldenHex := hex.EncodeToString(encoded)
-	if len(goldenHex) == 0 {
-		t.Fatal("empty golden hex")
+	// Explicit specification framing assertions:
+	const expectedHeaderAADLen = 42
+	const expectedWrappedKeyHeaderLen = 102
+	const expectedPrologueLen = 106
+	const expectedDataAADLen = 46
+	const expectedFinalAADLen = 58
+
+	headerAAD := BuildHeaderAAD(1, orgID, artifactID)
+	if len(headerAAD) != expectedHeaderAADLen {
+		t.Fatalf("Header AAD length mismatch: expected %d, got %d", expectedHeaderAADLen, len(headerAAD))
+	}
+	if len(headerAAD)+12+48 != expectedWrappedKeyHeaderLen {
+		t.Fatalf("Wrapped-Key Header length mismatch: expected %d, got %d", expectedWrappedKeyHeaderLen, len(headerAAD)+12+48)
+	}
+	if len(headerAAD)+12+48+4 != expectedPrologueLen {
+		t.Fatalf("Prologue length mismatch: expected %d, got %d", expectedPrologueLen, len(headerAAD)+12+48+4)
+	}
+	dataAAD := BuildDataAAD(orgID, artifactID, 0, uint32(len(plaintext)))
+	if len(dataAAD) != expectedDataAADLen {
+		t.Fatalf("DATA AAD length mismatch: expected %d, got %d", expectedDataAADLen, len(dataAAD))
+	}
+	finalAAD := BuildFinalAAD(orgID, artifactID, 1, uint64(len(plaintext)), 1)
+	if len(finalAAD) != expectedFinalAADLen {
+		t.Fatalf("FINAL AAD length mismatch: expected %d, got %d", expectedFinalAADLen, len(finalAAD))
+	}
+
+	// True Known-Answer Test (KAT): hard-coded expected BPAE V1 hex string
+	const expectedHex = "425041450101000000011111111111111111111111111111111122222222222222222222222222222222030303030303030303030303fa631698fd86356baffee465ce1b26aaba31a34f85cdc0b0ae12bf44a8488471619a388ecfb611fbf4c862465f0413c6040506070000000000000000000000002128e6f2b9ef52e74b7cde7edf41b9ec196b505a121f2b98c76cad9363e1778c279090846d563237bde44bfa8494d1d295cd0100000000000000010000000000000021000000000000000195789aeff8ca9ea85c268547495d4739"
+
+	actualHex := hex.EncodeToString(encoded)
+	if actualHex != expectedHex {
+		t.Fatalf("BPAE V1 deterministic golden vector mismatch:\nexpected: %s\ngot:      %s", expectedHex, actualHex)
 	}
 
 	// Verify round-trip decryption using the same key provider and identities
@@ -300,6 +329,27 @@ func TestBPAE_TamperAndFailureModes(t *testing.T) {
 		}
 	})
 
+	t.Run("corrupted WrapNonce fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		valid[45] ^= 0xFF // Flip bit in WrapNonce (offset 42..54)
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrAuthFailed) {
+			t.Fatalf("expected ErrAuthFailed, got %v", err)
+		}
+	})
+
+	t.Run("wrong artifact KEK key fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		wrongKek := bytes.Repeat([]byte{0x99}, 32)
+		wrongKP, _ := NewStaticKeyProvider(wrongKek, 1)
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), wrongKP, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrAuthFailed) {
+			t.Fatalf("expected ErrAuthFailed, got %v", err)
+		}
+	})
+
 	t.Run("corrupted WrappedDEK fails closed", func(t *testing.T) {
 		valid := makeValidEncrypted()
 		valid[60] ^= 0xFF // Flip bit in WrappedDEK
@@ -320,6 +370,126 @@ func TestBPAE_TamperAndFailureModes(t *testing.T) {
 		}
 	})
 
+	t.Run("corrupted DATA tag fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		// Tag is the last 16 bytes of the DATA record (immediately before the 41-byte FINAL record)
+		tagByteOffset := len(valid) - 41 - 5
+		valid[tagByteOffset] ^= 0xAA
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrAuthFailed) {
+			t.Fatalf("expected ErrAuthFailed, got %v", err)
+		}
+	})
+
+	t.Run("corrupted DATA flags fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		valid[106] = 0x02 // DATA flag is at offset 106, must be 0x00
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrMalformedBPAE) {
+			t.Fatalf("expected ErrMalformedBPAE, got %v", err)
+		}
+	})
+
+	t.Run("DATA PlaintextLength = 0 fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		binary.BigEndian.PutUint32(valid[115:119], 0) // PlaintextLength is at offset 115..119
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrInvalidPlaintextLength) {
+			t.Fatalf("expected ErrInvalidPlaintextLength, got %v", err)
+		}
+	})
+
+	t.Run("DATA PlaintextLength > 65536 fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		binary.BigEndian.PutUint32(valid[115:119], 65537) // Greater than MaxPlaintextChunkSize
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrInvalidPlaintextLength) {
+			t.Fatalf("expected ErrInvalidPlaintextLength, got %v", err)
+		}
+	})
+
+	makeMultiChunk := func(numChunks int) []byte {
+		var buf bytes.Buffer
+		enc, _ := NewEncryptWriter(&buf, keyProvider, orgID, artifactID)
+		for i := 0; i < numChunks; i++ {
+			chunk := bytes.Repeat([]byte{byte(i + 1)}, MaxPlaintextChunkSize)
+			_, _ = enc.Write(chunk)
+		}
+		_ = enc.Close()
+		return buf.Bytes()
+	}
+
+	t.Run("duplicate ChunkIndex fails closed", func(t *testing.T) {
+		multi := makeMultiChunk(2)
+		// Chunk 0: offset 106..75671 (106 prologue + 13 header + 65536 pt + 16 tag = 65671)
+		// Chunk 1 starts at 65671. ChunkIndex is at 65671+1..65671+9
+		chunk1IdxOffset := 106 + 13 + MaxPlaintextChunkSize + 16 + 1
+		binary.BigEndian.PutUint64(multi[chunk1IdxOffset:chunk1IdxOffset+8], 0) // Duplicate index 0
+		dec, _ := NewDecryptReader(bytes.NewReader(multi), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrOutOfOrderChunk) {
+			t.Fatalf("expected ErrOutOfOrderChunk, got %v", err)
+		}
+	})
+
+	t.Run("skipped ChunkIndex fails closed", func(t *testing.T) {
+		multi := makeMultiChunk(2)
+		chunk1IdxOffset := 106 + 13 + MaxPlaintextChunkSize + 16 + 1
+		binary.BigEndian.PutUint64(multi[chunk1IdxOffset:chunk1IdxOffset+8], 5) // Skip 1 -> 5
+		dec, _ := NewDecryptReader(bytes.NewReader(multi), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrOutOfOrderChunk) {
+			t.Fatalf("expected ErrOutOfOrderChunk, got %v", err)
+		}
+	})
+
+	t.Run("backward ChunkIndex where distinct fails closed", func(t *testing.T) {
+		multi := makeMultiChunk(3)
+		chunkLen := 13 + MaxPlaintextChunkSize + 16
+		chunk2IdxOffset := 106 + (2 * chunkLen) + 1
+		binary.BigEndian.PutUint64(multi[chunk2IdxOffset:chunk2IdxOffset+8], 1) // Backward 2 -> 1
+		dec, _ := NewDecryptReader(bytes.NewReader(multi), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrOutOfOrderChunk) {
+			t.Fatalf("expected ErrOutOfOrderChunk, got %v", err)
+		}
+	})
+
+	t.Run("truncated DATA header fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		truncated := valid[:112] // 106 prologue + 6 bytes of DATA header (needs 13)
+		dec, _ := NewDecryptReader(bytes.NewReader(truncated), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrMalformedBPAE) {
+			t.Fatalf("expected ErrMalformedBPAE, got %v", err)
+		}
+	})
+
+	t.Run("truncated DATA ciphertext fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		truncated := valid[:106+13+10] // Cut off mid-ciphertext
+		dec, _ := NewDecryptReader(bytes.NewReader(truncated), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrMalformedBPAE) {
+			t.Fatalf("expected ErrMalformedBPAE, got %v", err)
+		}
+	})
+
+	t.Run("truncated DATA GCM tag fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		// Cut off 5 bytes before the end of the DATA record (mid-tag)
+		truncated := valid[:len(valid)-41-5]
+		dec, _ := NewDecryptReader(bytes.NewReader(truncated), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrMalformedBPAE) {
+			t.Fatalf("expected ErrMalformedBPAE, got %v", err)
+		}
+	})
+
 	t.Run("missing FINAL record fails closed", func(t *testing.T) {
 		valid := makeValidEncrypted()
 		truncated := valid[:len(valid)-41] // Strip FINAL record
@@ -327,6 +497,62 @@ func TestBPAE_TamperAndFailureModes(t *testing.T) {
 		_, err := io.ReadAll(dec)
 		if !errors.Is(err, ErrMissingFinal) {
 			t.Fatalf("expected ErrMissingFinal, got %v", err)
+		}
+	})
+
+	t.Run("truncated FINAL record fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		truncated := valid[:len(valid)-20] // Only 21 bytes of FINAL record (needs 41)
+		dec, _ := NewDecryptReader(bytes.NewReader(truncated), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrMalformedBPAE) {
+			t.Fatalf("expected ErrMalformedBPAE, got %v", err)
+		}
+	})
+
+	t.Run("corrupted NextChunkIndex fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		finalStart := len(valid) - 41
+		binary.BigEndian.PutUint64(valid[finalStart+1:finalStart+9], 99)
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrCorruptedFinal) {
+			t.Fatalf("expected ErrCorruptedFinal, got %v", err)
+		}
+	})
+
+	t.Run("DataChunkCount mismatch fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		finalStart := len(valid) - 41
+		binary.BigEndian.PutUint64(valid[finalStart+17:finalStart+25], 99)
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrCorruptedFinal) {
+			t.Fatalf("expected ErrCorruptedFinal, got %v", err)
+		}
+	})
+
+	t.Run("TotalPlaintextSize mismatch fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		finalStart := len(valid) - 41
+		binary.BigEndian.PutUint64(valid[finalStart+9:finalStart+17], 99999)
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrCorruptedFinal) {
+			t.Fatalf("expected ErrCorruptedFinal, got %v", err)
+		}
+	})
+
+	t.Run("malformed FINAL fields fails closed", func(t *testing.T) {
+		valid := makeValidEncrypted()
+		finalStart := len(valid) - 41
+		// NextChunkIndex != DataChunkCount
+		binary.BigEndian.PutUint64(valid[finalStart+1:finalStart+9], 1)
+		binary.BigEndian.PutUint64(valid[finalStart+17:finalStart+25], 2)
+		dec, _ := NewDecryptReader(bytes.NewReader(valid), keyProvider, orgID, artifactID)
+		_, err := io.ReadAll(dec)
+		if !errors.Is(err, ErrCorruptedFinal) {
+			t.Fatalf("expected ErrCorruptedFinal, got %v", err)
 		}
 	})
 
@@ -455,6 +681,119 @@ func TestBPAE_FinalHoldbackSemantics(t *testing.T) {
 		}
 		if !errors.Is(err, ErrMissingFinal) {
 			t.Fatalf("expected ErrMissingFinal, got %v", err)
+		}
+	})
+}
+
+// hostileZeroNilReader simulates a reader that returns (0, nil) before either extra bytes or EOF.
+type hostileZeroNilReader struct {
+	data              []byte
+	pos               int
+	emptyReadsToYield int
+	infiniteEmpty     bool
+}
+
+func (h *hostileZeroNilReader) Read(p []byte) (int, error) {
+	if h.pos < len(h.data) {
+		// Read normally until the end of the specified data
+		n := copy(p, h.data[h.pos:])
+		h.pos += n
+		return n, nil
+	}
+
+	// At or beyond the end of data:
+	if h.infiniteEmpty {
+		return 0, nil
+	}
+	if h.emptyReadsToYield > 0 {
+		h.emptyReadsToYield--
+		return 0, nil
+	}
+	return 0, io.EOF
+}
+
+func TestBPAE_ProvableTrailingByteAndEOF(t *testing.T) {
+	kek := bytes.Repeat([]byte{0x99}, 32)
+	keyProvider, _ := NewStaticKeyProvider(kek, 1)
+	orgID := uuid.New()
+	artifactID := uuid.New()
+
+	plaintext := []byte("Testing provable trailing bytes and EOF semantics against hostile readers")
+
+	var buf bytes.Buffer
+	enc, _ := NewEncryptWriter(&buf, keyProvider, orgID, artifactID)
+	_, _ = enc.Write(plaintext)
+	_ = enc.Close()
+	validEncrypted := buf.Bytes()
+
+	t.Run("hostile reader yields (0, nil) before extra trailing byte - fails closed with ErrTrailingBytes", func(t *testing.T) {
+		withTrailing := append(bytes.Clone(validEncrypted), 0x99) // 1 extra trailing byte
+		// The reader will read validEncrypted, then at offset len(validEncrypted) it yields (0,nil) 3 times,
+		// then yields the trailing byte 0x99.
+		hostile := &hostileZeroNilReader{
+			data:              withTrailing,
+			emptyReadsToYield: 3,
+		}
+
+		dec, err := NewDecryptReader(hostile, keyProvider, orgID, artifactID)
+		if err != nil {
+			t.Fatalf("NewDecryptReader failed: %v", err)
+		}
+		defer dec.Close()
+
+		_, err = io.ReadAll(dec)
+		if !errors.Is(err, ErrTrailingBytes) {
+			t.Fatalf("expected ErrTrailingBytes, got %v", err)
+		}
+	})
+
+	t.Run("hostile reader yields (0, nil) before real EOF - decrypts cleanly without hanging", func(t *testing.T) {
+		hostile := &hostileZeroNilReader{
+			data:              validEncrypted,
+			emptyReadsToYield: 3,
+		}
+
+		dec, err := NewDecryptReader(hostile, keyProvider, orgID, artifactID)
+		if err != nil {
+			t.Fatalf("NewDecryptReader failed: %v", err)
+		}
+		defer dec.Close()
+
+		got, err := io.ReadAll(dec)
+		if err != nil {
+			t.Fatalf("expected successful read, got error: %v", err)
+		}
+		if !bytes.Equal(got, plaintext) {
+			t.Fatalf("plaintext mismatch: expected %q, got %q", plaintext, got)
+		}
+	})
+
+	t.Run("hostile reader yields infinite (0, nil) after FINAL - terminates safely with error without hanging", func(t *testing.T) {
+		hostile := &hostileZeroNilReader{
+			data:          validEncrypted,
+			infiniteEmpty: true,
+		}
+
+		dec, err := NewDecryptReader(hostile, keyProvider, orgID, artifactID)
+		if err != nil {
+			t.Fatalf("NewDecryptReader failed: %v", err)
+		}
+		defer dec.Close()
+
+		// bufio.Reader should detect ErrNoProgress after consecutive empty reads and return an error.
+		done := make(chan error, 1)
+		go func() {
+			_, readErr := io.ReadAll(dec)
+			done <- readErr
+		}()
+
+		select {
+		case readErr := <-done:
+			if readErr == nil {
+				t.Fatalf("expected error from infinite empty reads, got nil")
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("HANG DETECTED: DecryptReader hung indefinitely on infinite (0, nil) reader")
 		}
 	})
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/repository"
 	orgDomain "backup-platform/internal/organization/domain"
@@ -940,6 +941,92 @@ func TestVerificationService_InfrastructureErrors(t *testing.T) {
 		// Verify that artifact verification status was NOT marked failed in the database!
 		if status, updated := repo.updatedArts[artID]; updated {
 			t.Fatalf("artifact must NOT have verification status updated when provider resolution fails, got: %v", status)
+		}
+	})
+
+	t.Run("unknown key version returns infrastructure error and preserves prior verification status", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		targetID := uuid.New()
+		storedSize := int64(2048)
+		engineMeta := []byte(`{"ciphertext_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				StorageTargetID:  targetID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "organizations/" + orgID.String() + "/resources/" + uuid.New().String() + "/artifacts/" + artID.String() + ".sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "abc",
+				StoredSizeBytes:  &storedSize,
+				EngineMetadata:   engineMeta,
+			},
+		}
+
+		verifier := &mockVerifier{
+			dbVerifyErr: artifactcrypto.ErrUnknownKeyVersion,
+		}
+		storeProvider := &mockVerifyStorageProvider{}
+		svc := NewVerificationService(repo, storeProvider, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if res != nil {
+			t.Errorf("expected result to be nil on key infrastructure error, got: %+v", res)
+		}
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable, got: %v", err)
+		}
+
+		// Verify that UpdateArtifactVerification was NOT called! Status remains preserved.
+		if status, updated := repo.updatedArts[artID]; updated {
+			t.Fatalf("CRITICAL: UpdateArtifactVerification must NOT be called on ErrUnknownKeyVersion! got updated status: %v", status)
+		}
+	})
+
+	t.Run("corrupted DATA or FINAL tag marks artifact as verification failed", func(t *testing.T) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		artID := uuid.New()
+		targetID := uuid.New()
+		storedSize := int64(2048)
+		engineMeta := []byte(`{"ciphertext_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:               artID,
+				OrganizationID:   orgID,
+				RunID:            runID,
+				StorageTargetID:  targetID,
+				ArtifactType:     domain.ArtifactTypeDatabaseDump,
+				Format:           domain.ArtifactFormatSQLGzip,
+				StorageReference: "organizations/" + orgID.String() + "/resources/" + uuid.New().String() + "/artifacts/" + artID.String() + ".sql.gz",
+				SizeBytes:        1024,
+				ChecksumHash:     "abc",
+				StoredSizeBytes:  &storedSize,
+				EngineMetadata:   engineMeta,
+			},
+		}
+
+		verifier := &mockVerifier{
+			dbVerifyErr: artifactcrypto.ErrAuthFailed,
+		}
+		storeProvider := &mockVerifyStorageProvider{}
+		svc := NewVerificationService(repo, storeProvider, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		res, err := svc.VerifyRun(context.Background(), orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("expected nil error (verification report returned), got: %v", err)
+		}
+		if res.VerificationStatus != domain.VerificationStatusFailed {
+			t.Errorf("expected overallStatus Failed on integrity failure, got: %v", res.VerificationStatus)
+		}
+
+		// Verify that UpdateArtifactVerification WAS called with Failed!
+		if status, updated := repo.updatedArts[artID]; !updated || status != domain.VerificationStatusFailed {
+			t.Fatalf("expected artifact verification status to be updated to Failed, updated=%v, status=%v", updated, status)
 		}
 	})
 }

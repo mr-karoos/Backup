@@ -39,6 +39,8 @@ import (
 	"backup-platform/pkg/uuid"
 )
 
+var e2eTestKeyProvider, _ = artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x42}, 32), 1)
+
 func startMockSSHServer(t *testing.T, user, pass string, handlers map[string]func(ch ssh.Channel, req *ssh.Request)) (int, string, func()) {
 	t.Helper()
 	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -462,7 +464,7 @@ func TestPhase5_CompleteVerticalSlice_EndToEnd(t *testing.T) {
 	jobID := resEnvelope.Data.ID
 
 	// 3. Start Worker Pool to process the durable queue
-	workerPool := backupWorker.NewWorkerPool(
+	workerPool := backupWorker.NewWorkerPoolWithKeyProvider(
 		backupWorker.WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		rf,
@@ -474,6 +476,7 @@ func TestPhase5_CompleteVerticalSlice_EndToEnd(t *testing.T) {
 		verificationEngine,
 		mutexManager,
 		nil,
+		e2eTestKeyProvider,
 	)
 
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())
@@ -657,7 +660,7 @@ func TestE2E_WebsiteFilesBackupWorkflow(t *testing.T) {
 	jobID := resEnvelope.Data.ID
 
 	// 3. Start Worker Pool to process the durable queue
-	workerPool := backupWorker.NewWorkerPool(
+	workerPool := backupWorker.NewWorkerPoolWithKeyProvider(
 		backupWorker.WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
 		repo,
 		rf,
@@ -669,6 +672,7 @@ func TestE2E_WebsiteFilesBackupWorkflow(t *testing.T) {
 		verificationEngine,
 		mutexManager,
 		nil,
+		e2eTestKeyProvider,
 	)
 
 	workerCtx, cancelWorkers := context.WithCancel(context.Background())

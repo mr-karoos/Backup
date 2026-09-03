@@ -382,6 +382,118 @@ func TestArtifactService_OpenArtifactDownload(t *testing.T) {
 			t.Fatal("expected error on missing key provider, got nil")
 		}
 	})
+
+	t.Run("encrypted artifact download fails with safe error on unknown key version", func(t *testing.T) {
+		kpV1, _ := artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x11}, 32), 1)
+		plainContent := []byte("plain SQL database content for download verification")
+		var bpaeBuf bytes.Buffer
+		encWriter, err := artifactcrypto.NewEncryptWriter(&bpaeBuf, kpV1, orgID, artID)
+		if err != nil {
+			t.Fatalf("failed creating encrypt writer: %v", err)
+		}
+		_, _ = encWriter.Write(plainContent)
+		_ = encWriter.Close()
+
+		ciphertext := bpaeBuf.Bytes()
+		storedSize := int64(len(ciphertext))
+
+		repo := &mockArtifactRepo{
+			getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+				return &domain.BackupArtifact{
+					ID:               aID,
+					OrganizationID:   oID,
+					StorageReference: "local://org/db.sql.gz",
+					TargetName:       "ecommerce",
+					SizeBytes:        int64(len(plainContent)),
+					StoredSizeBytes:  &storedSize,
+					IsDeleted:        false,
+				}, nil
+			},
+		}
+
+		stor := &mockStorageProvider{
+			openArtifactFunc: func(ctx context.Context, storageRef string) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(ciphertext)), nil
+			},
+		}
+
+		// Service has key provider configured for version 2 only (version 1 is unknown)
+		kpV2, _ := artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x22}, 32), 2)
+		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil)
+		svc.SetKeyProvider(kpV2)
+
+		_, _, err = svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		if err == nil {
+			t.Fatal("expected error on unknown key version, got nil")
+		}
+		if !errors.Is(err, artifactcrypto.ErrUnknownKeyVersion) {
+			t.Errorf("expected ErrUnknownKeyVersion, got: %v", err)
+		}
+	})
+
+	t.Run("missing or corrupted FINAL produces error and does not return complete plaintext", func(t *testing.T) {
+		kp, _ := artifactcrypto.NewStaticKeyProvider(bytes.Repeat([]byte{0x33}, 32), 1)
+		plainContent := bytes.Repeat([]byte("large-database-content-chunk-"), 3000) // ~90KB (multiple chunks)
+		var bpaeBuf bytes.Buffer
+		encWriter, err := artifactcrypto.NewEncryptWriter(&bpaeBuf, kp, orgID, artID)
+		if err != nil {
+			t.Fatalf("failed creating encrypt writer: %v", err)
+		}
+		_, _ = encWriter.Write(plainContent)
+		_ = encWriter.Close()
+
+		// Truncate the buffer to drop the FINAL chunk entirely
+		truncatedBytes := bpaeBuf.Bytes()[:bpaeBuf.Len()-60]
+		storedSize := int64(len(truncatedBytes))
+
+		repo := &mockArtifactRepo{
+			getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+				return &domain.BackupArtifact{
+					ID:               aID,
+					OrganizationID:   oID,
+					StorageReference: "local://org/db.sql.gz",
+					TargetName:       "ecommerce",
+					SizeBytes:        int64(len(plainContent)),
+					StoredSizeBytes:  &storedSize,
+					IsDeleted:        false,
+				}, nil
+			},
+		}
+
+		stor := &mockStorageProvider{
+			openArtifactFunc: func(ctx context.Context, storageRef string) (io.ReadCloser, error) {
+				return io.NopCloser(bytes.NewReader(truncatedBytes)), nil
+			},
+		}
+
+		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil)
+		svc.SetKeyProvider(kp)
+
+		_, decReader, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		if err != nil {
+			t.Fatalf("unexpected error on open: %v", err)
+		}
+		defer decReader.Close()
+
+		// Reading until the end must produce an error and NOT succeed with all plaintext
+		readBuf := make([]byte, len(plainContent)+1000)
+		totalRead := 0
+		var streamErr error
+		for {
+			n, rErr := decReader.Read(readBuf[totalRead:])
+			totalRead += n
+			if rErr != nil {
+				streamErr = rErr
+				break
+			}
+		}
+		if streamErr == nil || errors.Is(streamErr, io.EOF) {
+			t.Fatalf("expected stream error on missing FINAL chunk, got: %v", streamErr)
+		}
+		if totalRead >= len(plainContent) {
+			t.Fatalf("stream must not return full plaintext when FINAL is missing, got %d of %d", totalRead, len(plainContent))
+		}
+	})
 }
 
 func TestArtifactService_DeleteArtifact(t *testing.T) {

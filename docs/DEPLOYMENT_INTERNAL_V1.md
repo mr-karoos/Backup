@@ -86,25 +86,31 @@ chmod 600 deploy/.env
 ### مرحله ۳: تولید کلیدهای رمزنگاری و کلمات عبور
 کلیدهای زیر را با ابزار `openssl` تولید کرده و درون `deploy/.env` جای‌گذاری نمایید:
 
-1. **کلید رمزگذاری Master Key (AES-256-GCM):**
+1. **کلید رمزگذاری Credential Master Key (AES-256-GCM):**
    ```bash
    openssl rand -base64 32
    ```
    مقدار را در متغیر `ENCRYPTION_MASTER_KEY` قرار دهید.
 
-2. **کلید امضای توکن‌های دسترسی JWT:**
+2. **کلید رمزگذاری Artifact Encryption Master Key (AES-256-GCM / BPAE):**
+   ```bash
+   openssl rand -base64 32
+   ```
+   مقدار را در متغیر `ARTIFACT_ENCRYPTION_MASTER_KEY` قرار دهید (کلید کاملاً مستقل از `ENCRYPTION_MASTER_KEY`).
+
+3. **کلید امضای توکن‌های دسترسی JWT:**
    ```bash
    openssl rand -base64 48
    ```
    مقدار را در متغیر `JWT_SIGNING_KEY` قرار دهید.
 
-3. **رمز عبور تصادفی پایگاه داده PostgreSQL:**
+4. **رمز عبور تصادفی پایگاه داده PostgreSQL:**
    ```bash
    openssl rand -hex 24
    ```
    مقدار را در `POSTGRES_PASSWORD` و همچنین درون رشته اتصال `DATABASE_URL` قرار دهید.
 
-4. **رمز عبور کاربر اولیه Bootstrap System Admin (در صورت نیاز):**
+5. **رمز عبور کاربر اولیه Bootstrap System Admin (در صورت نیاز):**
    ```bash
    openssl rand -hex 20
    ```
@@ -128,6 +134,8 @@ AUTH_COOKIE_SECURE=false
 JWT_SIGNING_KEY=generated_jwt_secret_base64
 ENCRYPTION_MASTER_KEY=generated_master_key_base64_32bytes
 ENCRYPTION_MASTER_KEY_VERSION=1
+ARTIFACT_ENCRYPTION_MASTER_KEY=generated_artifact_key_base64_32bytes
+ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION=1
 
 BOOTSTRAP_ADMIN_EMAIL=admin@internal.zone
 BOOTSTRAP_ADMIN_PASSWORD=generated_admin_bootstrap_password
@@ -302,6 +310,7 @@ docker compose --env-file deploy/.env down
 - [ ] اسکریپت بکاپ متادیتا در `/usr/local/sbin/backup-platform-metadata-backup` با مالکیت `root:root` و مد `0755` نصب شده است.
 - [ ] کلید `JWT_SIGNING_KEY` یکتا و با آنتروپی بالا (حداقل ۳۲ کاراکتر) تنظیم شده است.
 - [ ] کلید `ENCRYPTION_MASTER_KEY` یکتا و دقیقاً ۳۲ بایت (AES-256) تولید شده است.
+- [ ] کلید `ARTIFACT_ENCRYPTION_MASTER_KEY` یکتا و دقیقاً ۳۲ بایت (AES-256) به صورت مستقل تولید شده است.
 - [ ] کلمه عبور `POSTGRES_PASSWORD` پیچیده و تصادفی است.
 - [ ] پورت دیتابیس `5432` روی هاست باز/پابلیش نشده است.
 - [ ] پروسس اپلیکیشن داخل کانتینر به صورت غیرروت (`UID 10001`) اجرا می‌شود.

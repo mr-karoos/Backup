@@ -71,7 +71,7 @@ func TestWorkerPool_StorageTargetResolutionAndEngineValidation(t *testing.T) {
 
 	t.Run("Unsupported engine_type fails closed with ErrUnsupportedEngineType", func(t *testing.T) {
 		repo := newFakeWorkerRepo(orgID)
-		pool := NewWorkerPool(
+		pool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -104,7 +104,7 @@ func TestWorkerPool_StorageTargetResolutionAndEngineValidation(t *testing.T) {
 
 	t.Run("Blank engine_type fails closed with ErrInvalidEngineType", func(t *testing.T) {
 		repo := newFakeWorkerRepo(orgID)
-		pool := NewWorkerPool(
+		pool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -137,7 +137,7 @@ func TestWorkerPool_StorageTargetResolutionAndEngineValidation(t *testing.T) {
 
 	t.Run("Missing StorageTargetID fails closed with ErrStorageTargetNotFound", func(t *testing.T) {
 		repo := newFakeWorkerRepo(orgID)
-		pool := NewWorkerPool(
+		pool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -183,7 +183,7 @@ func TestWorkerPool_StorageTargetResolutionAndEngineValidation(t *testing.T) {
 		}
 
 		localStore, _ := local.NewLocalStorageProvider(t.TempDir())
-		pool := NewWorkerPool(
+		pool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -228,7 +228,7 @@ func TestWorkerPool_StorageTargetResolutionAndEngineValidation(t *testing.T) {
 			Status:         domain.StorageTargetStatusDisabled,
 		}
 
-		pool := NewWorkerPool(
+		pool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},
@@ -275,7 +275,7 @@ func TestWorkerPool_StorageTargetResolutionAndEngineValidation(t *testing.T) {
 		}
 		reg.Register(resDomain.TypeUbuntuSSH, mockCap)
 
-		pool := NewWorkerPool(
+		pool := newTestWorkerPool(
 			WorkerPoolConfig{NumWorkers: 1},
 			repo,
 			&fakeResourceFinder{resWithConn: resWithConn},

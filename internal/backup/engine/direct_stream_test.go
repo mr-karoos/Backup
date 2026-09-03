@@ -338,3 +338,87 @@ func TestDirectStreamBackupEngine_ExecuteFilesBackup_ProducerFailure(t *testing.
 		t.Fatalf("expected error on producer failure")
 	}
 }
+
+type panickingCapability struct{}
+
+func (p *panickingCapability) BackupDatabase(ctx context.Context, target connector.Target, credPayload *payload.PayloadV1, databaseName string, dest io.Writer) error {
+	_, _ = dest.Write([]byte("some data before panic"))
+	panic("unexpected capability panic")
+}
+
+func TestDirectStreamBackupEngine_ProducerPanic(t *testing.T) {
+	tempDir := t.TempDir()
+	storageProvider, _ := local.NewLocalStorageProvider(tempDir)
+	_ = storageProvider.EnsureStorageRoot(context.Background())
+
+	kp := testKeyProvider(t)
+	engine := NewDirectStreamBackupEngineWithKeyProvider(kp)
+
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatalf("expected engine to propagate producer panic, got nil")
+		}
+		if r != "unexpected capability panic" {
+			t.Fatalf("unexpected panic value: %v", r)
+		}
+	}()
+
+	_, _ = engine.ExecuteDatabaseBackup(
+		context.Background(),
+		&panickingCapability{},
+		connector.Target{},
+		&payload.PayloadV1{},
+		"panicking_db",
+		storageProvider,
+		uuid.New(), uuid.New(), uuid.New(), uuid.New(),
+	)
+}
+
+func TestDirectStreamBackupEngine_ContextCancellation(t *testing.T) {
+	tempDir := t.TempDir()
+	storageProvider, _ := local.NewLocalStorageProvider(tempDir)
+	_ = storageProvider.EnsureStorageRoot(context.Background())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately
+
+	kp := testKeyProvider(t)
+	engine := NewDirectStreamBackupEngineWithKeyProvider(kp)
+	cap := &fakeBackupCapability{dataToSend: []byte("database content")}
+
+	_, err := engine.ExecuteDatabaseBackup(
+		ctx,
+		cap,
+		connector.Target{},
+		&payload.PayloadV1{},
+		"canceled_db",
+		storageProvider,
+		uuid.New(), uuid.New(), uuid.New(), uuid.New(),
+	)
+	if err == nil {
+		t.Fatalf("expected error on cancelled context, got nil")
+	}
+}
+
+func TestDirectStreamBackupEngine_MissingOrFailingKeyProvider(t *testing.T) {
+	tempDir := t.TempDir()
+	storageProvider, _ := local.NewLocalStorageProvider(tempDir)
+	_ = storageProvider.EnsureStorageRoot(context.Background())
+
+	engine := NewDirectStreamBackupEngine() // keyProvider is nil
+	cap := &fakeBackupCapability{dataToSend: []byte("database content")}
+
+	_, err := engine.ExecuteDatabaseBackup(
+		context.Background(),
+		cap,
+		connector.Target{},
+		&payload.PayloadV1{},
+		"unencrypted_db",
+		storageProvider,
+		uuid.New(), uuid.New(), uuid.New(), uuid.New(),
+	)
+	if err == nil {
+		t.Fatalf("expected error when key provider is nil, got nil")
+	}
+}

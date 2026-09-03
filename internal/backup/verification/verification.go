@@ -453,6 +453,9 @@ func (v *VerificationEngine) VerifyEncryptedDatabaseArtifact(
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+		if errors.Is(err, artifactcrypto.ErrUnknownKeyVersion) || errors.Is(err, artifactcrypto.ErrInvalidKeyVersion) {
+			return "", err
+		}
 		return "", fmt.Errorf("decrypted artifact is not a valid gzip stream: %w", err)
 	}
 	defer gzReader.Close()
@@ -464,6 +467,9 @@ func (v *VerificationEngine) VerifyEncryptedDatabaseArtifact(
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+		if errors.Is(readErr, artifactcrypto.ErrUnknownKeyVersion) || errors.Is(readErr, artifactcrypto.ErrInvalidKeyVersion) {
+			return "", readErr
+		}
 		return "", fmt.Errorf("failed reading decompressed stream: %w", readErr)
 	}
 
@@ -474,6 +480,9 @@ func (v *VerificationEngine) VerifyEncryptedDatabaseArtifact(
 	if drainErr != nil {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
+		}
+		if errors.Is(drainErr, artifactcrypto.ErrUnknownKeyVersion) || errors.Is(drainErr, artifactcrypto.ErrInvalidKeyVersion) {
+			return "", drainErr
 		}
 		return "", fmt.Errorf("gzip stream integrity check failed: %w", drainErr)
 	}
@@ -620,6 +629,9 @@ func (v *VerificationEngine) VerifyEncryptedFilesArtifact(
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
+		if errors.Is(err, artifactcrypto.ErrUnknownKeyVersion) || errors.Is(err, artifactcrypto.ErrInvalidKeyVersion) {
+			return "", err
+		}
 		return "", fmt.Errorf("decrypted artifact is not a valid gzip stream: %w", err)
 	}
 	defer gzReader.Close()
@@ -635,6 +647,9 @@ func (v *VerificationEngine) VerifyEncryptedFilesArtifact(
 			}
 			if ctx.Err() != nil {
 				return "", ctx.Err()
+			}
+			if errors.Is(err, artifactcrypto.ErrUnknownKeyVersion) || errors.Is(err, artifactcrypto.ErrInvalidKeyVersion) {
+				return "", err
 			}
 			return "", fmt.Errorf("tar structural integrity check failed: %w", err)
 		}

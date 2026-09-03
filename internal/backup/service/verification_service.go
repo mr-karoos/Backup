@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/repository"
 	"backup-platform/internal/backup/verification"
@@ -255,6 +256,18 @@ func (s *VerificationService) VerifyRun(
 		}
 		if errors.Is(verErr, context.Canceled) || errors.Is(verErr, context.DeadlineExceeded) {
 			return nil, verErr
+		}
+
+		// Handle key management / infrastructure failure (not an integrity failure)
+		if errors.Is(verErr, artifactcrypto.ErrUnknownKeyVersion) || errors.Is(verErr, artifactcrypto.ErrInvalidKeyVersion) {
+			s.logger.Error("artifact key infrastructure error during verification",
+				slog.String("org_id", orgID.String()),
+				slog.String("artifact_id", art.ID.String()),
+				slog.String("error", verErr.Error()),
+			)
+			// DO NOT call UpdateArtifactVerification(...Failed...)
+			// Preserve prior verification status and return service/infrastructure error
+			return nil, domain.ErrBackupServiceUnavailable
 		}
 
 		// Handle storage infrastructure failure (not an integrity failure)

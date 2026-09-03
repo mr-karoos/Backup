@@ -167,6 +167,11 @@ func (s *ArtifactService) OpenArtifactDownload(
 			s.logger.Error("failed initializing decrypt reader for download", slog.String("error", err.Error()))
 			return nil, nil, fmt.Errorf("failed initializing decrypt reader: %w", err)
 		}
+		if pErr := decReader.ParsePrologue(); pErr != nil {
+			_ = decReader.Close()
+			s.logger.Error("failed parsing artifact encryption prologue for download", slog.String("error", pErr.Error()))
+			return nil, nil, pErr
+		}
 		return artifact, decReader, nil
 	}
 
