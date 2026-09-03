@@ -222,10 +222,11 @@ func (p *S3StorageProvider) SaveArtifact(
 // [prefix/]organizations/{org_uuid}/resources/{resource_uuid}/artifacts/{artifact_uuid}.sql.gz (or .tar.gz)
 // Rejects absolute keys, backslashes, NUL bytes, traversal, wrong segment counts, invalid UUIDs, and unsupported extensions.
 func (p *S3StorageProvider) ValidateStorageReference(storageReference string) error {
-	ref := strings.TrimSpace(storageReference)
-	if ref == "" {
+	if storageReference == "" || storageReference != strings.TrimSpace(storageReference) || strings.ContainsAny(storageReference, " \t\r\n") {
 		return storage.ErrInvalidStorageReference
 	}
+
+	ref := storageReference
 
 	// Reject absolute-style keys, backslashes, NUL bytes, and directory traversal
 	if strings.HasPrefix(ref, "/") || strings.Contains(ref, "\\") || strings.Contains(ref, "\x00") || strings.Contains(ref, "..") {
@@ -283,7 +284,7 @@ func (p *S3StorageProvider) OpenArtifact(ctx context.Context, storageReference s
 
 	out, err := p.client.GetObject(ctx, &s3client.GetObjectInput{
 		Bucket: aws.String(p.bucket),
-		Key:    aws.String(strings.TrimSpace(storageReference)),
+		Key:    aws.String(storageReference),
 	})
 	if err != nil {
 		var nsk *types.NoSuchKey
@@ -308,7 +309,7 @@ func (p *S3StorageProvider) DeleteArtifact(ctx context.Context, storageReference
 
 	_, err := p.client.DeleteObject(ctx, &s3client.DeleteObjectInput{
 		Bucket: aws.String(p.bucket),
-		Key:    aws.String(strings.TrimSpace(storageReference)),
+		Key:    aws.String(storageReference),
 	})
 	if err != nil {
 		var nsk *types.NoSuchKey

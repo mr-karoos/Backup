@@ -376,6 +376,11 @@ func TestS3StorageProvider_CanonicalReferenceValidation(t *testing.T) {
 		{"unsupported extension txt", pNoPrefix, fmt.Sprintf("organizations/%s/resources/%s/artifacts/%s.txt", orgID, resID, artID), true},
 		{"unsupported extension gz without tar/sql", pNoPrefix, fmt.Sprintf("organizations/%s/resources/%s/artifacts/%s.gz", orgID, resID, artID), true},
 		{"missing expected prefix", pWithPrefix, validSQL, true},
+		{"leading space rejected", pNoPrefix, " " + validSQL, true},
+		{"trailing space rejected", pNoPrefix, validSQL + " ", true},
+		{"leading tab rejected", pNoPrefix, "\t" + validSQL, true},
+		{"trailing newline rejected", pNoPrefix, validSQL + "\n", true},
+		{"internal whitespace in segment", pNoPrefix, fmt.Sprintf("organizations/%s /resources/%s/artifacts/%s.sql.gz", orgID, resID, artID), true},
 	}
 
 	for _, tt := range tests {
@@ -395,11 +400,17 @@ func TestS3StorageProvider_OpenAndDelete_MalformedReference(t *testing.T) {
 	p := &S3StorageProvider{bucket: "test-bucket"}
 	ctx := context.Background()
 
+	validRef := fmt.Sprintf("organizations/%s/resources/%s/artifacts/%s.sql.gz", uuid.New(), uuid.New(), uuid.New())
+
 	malformedRefs := []string{
 		"",
 		"../traversal",
 		"/etc/passwd",
 		"organizations/bad/resources/bad/artifacts/bad.sql.gz",
+		" " + validRef,
+		validRef + " ",
+		"\t" + validRef,
+		validRef + "\n",
 	}
 
 	for _, ref := range malformedRefs {
