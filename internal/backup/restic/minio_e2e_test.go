@@ -123,13 +123,14 @@ func TestResticRunner_MinIO_Live_E2E(t *testing.T) {
 
 	// 6. Test wrong S3 credential fails and does NOT leak secrets
 	t.Log("Step 6: Testing wrong S3 credential failure...")
+	badS3Secret := "InvalidSecretKey456"
 	badTarget, err := NewS3RepositoryTarget(
 		"s3_compatible",
 		s3Cfg,
 		orgID,
 		resourceID,
 		minioAccessKey,
-		"InvalidSecretKey456",
+		badS3Secret,
 		nil,
 		allowInsecure,
 		[]string{hostOnly},
@@ -151,6 +152,9 @@ func TestResticRunner_MinIO_Live_E2E(t *testing.T) {
 		if strings.Contains(errStr, minioSecretKey) {
 			t.Errorf("SECURITY LEAK: error contains plaintext S3 secret key: %s", errStr)
 		}
+		if strings.Contains(errStr, badS3Secret) {
+			t.Errorf("SECURITY LEAK: error contains plaintext bad S3 secret: %s", errStr)
+		}
 	}
 
 	// 7. Test ambient malicious proxy in host environment cannot bypass SecureResticProxy
@@ -165,7 +169,14 @@ func TestResticRunner_MinIO_Live_E2E(t *testing.T) {
 	}()
 
 	ambientTestTarget := newValidTarget()
-	t.Logf("ambientTestTarget proxy env: %+v", ambientTestTarget.Env())
+	proxyFound := false
+	for _, e := range ambientTestTarget.Env() {
+		if strings.HasPrefix(e, "HTTP_PROXY=") {
+			proxyFound = true
+			break
+		}
+	}
+	t.Logf("ambientTestTarget local proxy configured: %v", proxyFound)
 	if err := runner.Probe(ctx, ambientTestTarget, password); err != nil {
 		t.Errorf("probe failed when ambient proxy set (ambient proxy bypassed or interfered): %v", err)
 	}
