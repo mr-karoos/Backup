@@ -19,7 +19,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
 import { EmptyState } from '@/components/ui/empty-state';
-import { formatDate, getStatusBadgeVariant } from '@/lib/format/formatters';
+import { formatDate, getStatusBadgeVariant, formatStorageTargetType } from '@/lib/format/formatters';
 import { HardDrive, Cloud, Server, ChevronRight, Check } from 'lucide-react';
 
 export default function StorageTargetsPage() {
@@ -90,7 +90,7 @@ export default function StorageTargetsPage() {
                   <TableBody>
                     {targets.map((target) => {
                       const { label, variant } = getStatusBadgeVariant(target.status);
-                      const isS3 = target.type === 's3';
+                      const isCloud = target.type === 's3' || target.type === 's3_compatible';
 
                       return (
                         <TableRow key={target.id}>
@@ -99,7 +99,7 @@ export default function StorageTargetsPage() {
                               href={`/storage/${target.id}`}
                               className="hover:underline flex items-center gap-2"
                             >
-                              {isS3 ? (
+                              {isCloud ? (
                                 <Cloud className="h-4 w-4 text-sky-500 shrink-0" />
                               ) : (
                                 <Server className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -107,8 +107,8 @@ export default function StorageTargetsPage() {
                               {target.name}
                             </Link>
                           </TableCell>
-                          <TableCell className="capitalize text-xs font-mono">
-                            {target.type}
+                          <TableCell className="text-xs font-medium">
+                            {formatStorageTargetType(target.type)}
                           </TableCell>
                           <TableCell>
                             {target.is_default ? (
@@ -126,8 +126,10 @@ export default function StorageTargetsPage() {
                             </Badge>
                           </TableCell>
                           <TableCell className="text-xs text-muted-foreground font-mono">
-                            {isS3 && target.s3_config
+                            {target.s3_config
                               ? `bucket: ${target.s3_config.bucket}`
+                              : isCloud
+                              ? 'S3-compatible target'
                               : 'Platform Managed Volume'}
                           </TableCell>
                           <TableCell className="text-xs text-muted-foreground">

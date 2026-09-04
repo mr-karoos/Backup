@@ -12,7 +12,12 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
-import { formatDate, getStatusBadgeVariant } from '@/lib/format/formatters';
+import {
+  formatDate,
+  formatCronSchedule,
+  formatBackupType,
+  getStatusBadgeVariant,
+} from '@/lib/format/formatters';
 import { ArrowLeft, Calendar, Clock, Database, FolderArchive } from 'lucide-react';
 
 export default function BackupPlanDetailPage() {
@@ -101,8 +106,8 @@ export default function BackupPlanDetailPage() {
             </div>
             <div className="grid grid-cols-2 gap-2 border-b pb-3">
               <span className="text-muted-foreground">Backup Type</span>
-              <span className="font-medium capitalize text-foreground">
-                {data.backup_type.replace(/_/g, ' ')}
+              <span className="font-medium text-foreground">
+                {formatBackupType(data.backup_type)}
               </span>
             </div>
             <div className="grid grid-cols-2 gap-2 border-b pb-3">
@@ -137,6 +142,12 @@ export default function BackupPlanDetailPage() {
               <span className="text-muted-foreground">Automated Schedule</span>
               <span className="font-medium text-foreground">
                 {data.schedule.is_enabled ? 'Enabled' : 'Disabled'}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 border-b pb-3">
+              <span className="text-muted-foreground">Schedule</span>
+              <span className="font-medium text-foreground">
+                {formatCronSchedule(data.schedule.cron_expression)}
               </span>
             </div>
             <div className="grid grid-cols-2 gap-2 border-b pb-3">

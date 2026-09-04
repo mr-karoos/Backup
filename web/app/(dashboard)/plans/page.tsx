@@ -21,7 +21,12 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
 import { EmptyState } from '@/components/ui/empty-state';
-import { formatDate, getStatusBadgeVariant } from '@/lib/format/formatters';
+import {
+  formatDate,
+  formatCronSchedule,
+  formatBackupType,
+  getStatusBadgeVariant,
+} from '@/lib/format/formatters';
 import { Calendar, Search, ChevronRight, Clock } from 'lucide-react';
 
 export default function BackupPlansPage() {
@@ -128,14 +133,17 @@ export default function BackupPlansPage() {
                           <TableCell className="text-muted-foreground text-xs">
                             {plan.resource_name || '—'}
                           </TableCell>
-                          <TableCell className="capitalize text-xs font-mono">
-                            {plan.backup_type.replace(/_/g, ' ')}
+                          <TableCell className="text-xs font-medium">
+                            {formatBackupType(plan.backup_type)}
                           </TableCell>
                           <TableCell className="text-xs">
-                            <div className="flex items-center gap-1.5 font-mono">
-                              <Clock className="h-3.5 w-3.5 text-muted-foreground" />
-                              <span>{plan.schedule.cron_expression || 'Manual'}</span>
-                              <span className="text-muted-foreground">({plan.schedule.timezone})</span>
+                            <div className="flex items-center gap-1.5 font-medium">
+                              <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                              <span>{formatCronSchedule(plan.schedule.cron_expression)}</span>
+                              <span className="text-muted-foreground font-normal">({plan.schedule.timezone})</span>
+                            </div>
+                            <div className="text-[11px] text-muted-foreground font-mono mt-0.5 pl-5">
+                              {plan.schedule.cron_expression || 'Manual'}
                             </div>
                           </TableCell>
                           <TableCell>
@@ -184,12 +192,19 @@ export default function BackupPlansPage() {
                       <div className="mt-2 text-xs text-muted-foreground space-y-1">
                         <div>
                           <span>Resource: </span>
-                          <span className="text-foreground">{plan.resource_name}</span>
+                          <span className="text-foreground">{plan.resource_name || '—'}</span>
                         </div>
-                        <div className="flex items-center gap-1 font-mono">
-                          <Clock className="h-3 w-3" />
-                          <span>{plan.schedule.cron_expression || 'Manual'}</span>
+                        <div>
+                          <span>Type: </span>
+                          <span className="text-foreground font-medium">{formatBackupType(plan.backup_type)}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Clock className="h-3 w-3 shrink-0" />
+                          <span>{formatCronSchedule(plan.schedule.cron_expression)}</span>
                           <span>({plan.schedule.timezone})</span>
+                        </div>
+                        <div className="font-mono text-[11px] pl-4">
+                          {plan.schedule.cron_expression || 'Manual'}
                         </div>
                       </div>
                     </Link>

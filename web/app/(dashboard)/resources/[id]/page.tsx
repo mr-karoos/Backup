@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
-import { formatDate, getStatusBadgeVariant } from '@/lib/format/formatters';
+import { formatDate, formatResourceType, getStatusBadgeVariant } from '@/lib/format/formatters';
 import { ArrowLeft, Server, Shield, Network } from 'lucide-react';
 
 export default function ResourceDetailPage() {
@@ -95,8 +95,8 @@ export default function ResourceDetailPage() {
           <CardContent className="space-y-4 text-sm">
             <div className="grid grid-cols-2 gap-2 border-b pb-3">
               <span className="text-muted-foreground">Resource Type</span>
-              <span className="font-medium capitalize text-foreground">
-                {data.type.replace(/_/g, ' ')}
+              <span className="font-medium text-foreground">
+                {formatResourceType(data.type)}
               </span>
             </div>
             <div className="grid grid-cols-2 gap-2 border-b pb-3">

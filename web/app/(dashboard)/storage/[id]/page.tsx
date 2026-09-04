@@ -12,7 +12,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
-import { formatDate, getStatusBadgeVariant } from '@/lib/format/formatters';
+import { formatDate, getStatusBadgeVariant, formatStorageTargetType } from '@/lib/format/formatters';
 import { ArrowLeft, HardDrive, Cloud, Server, ShieldCheck, Check } from 'lucide-react';
 
 export default function StorageTargetDetailPage() {
@@ -54,7 +54,7 @@ export default function StorageTargetDetailPage() {
   }
 
   const { label, variant } = getStatusBadgeVariant(data.status);
-  const isS3 = data.type === 's3';
+  const isCloud = data.type === 's3' || data.type === 's3_compatible';
 
   return (
     <div className="space-y-6">
@@ -69,7 +69,7 @@ export default function StorageTargetDetailPage() {
         <div className="flex flex-wrap items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
-              {isS3 ? <Cloud className="h-5 w-5 text-sky-500" /> : <HardDrive className="h-5 w-5" />}
+              {isCloud ? <Cloud className="h-5 w-5 text-sky-500" /> : <HardDrive className="h-5 w-5" />}
             </div>
             <div>
               <h1 className="text-2xl font-bold tracking-tight text-foreground">{data.name}</h1>
@@ -103,7 +103,7 @@ export default function StorageTargetDetailPage() {
           <CardContent className="space-y-4 text-sm">
             <div className="grid grid-cols-2 gap-2 border-b pb-3">
               <span className="text-muted-foreground">Target Type</span>
-              <span className="font-mono font-medium uppercase text-foreground">{data.type}</span>
+              <span className="font-medium text-foreground">{formatStorageTargetType(data.type)}</span>
             </div>
             <div className="grid grid-cols-2 gap-2 border-b pb-3">
               <span className="text-muted-foreground">Operating Status</span>
@@ -131,7 +131,7 @@ export default function StorageTargetDetailPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4 text-sm">
-            {isS3 && data.s3_config ? (
+            {data.s3_config ? (
               <>
                 <div className="grid grid-cols-2 gap-2 border-b pb-3">
                   <span className="text-muted-foreground">S3 Bucket</span>
@@ -156,6 +156,13 @@ export default function StorageTargetDetailPage() {
                   </span>
                 </div>
               </>
+            ) : isCloud ? (
+              <div className="py-4 space-y-2 text-muted-foreground text-xs">
+                <p className="font-medium text-foreground">S3-Compatible Object Storage Target</p>
+                <p>
+                  Artifacts are streamed directly to external S3-compatible cloud storage. Bucket and endpoint parameters are managed securely via platform configuration.
+                </p>
+              </div>
             ) : (
               <div className="py-4 space-y-2 text-muted-foreground text-xs">
                 <p className="font-medium text-foreground">Platform-Managed Local Storage Target</p>

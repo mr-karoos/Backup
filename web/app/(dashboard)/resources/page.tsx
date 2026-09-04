@@ -21,7 +21,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
 import { EmptyState } from '@/components/ui/empty-state';
-import { formatDate, getStatusBadgeVariant } from '@/lib/format/formatters';
+import { formatDate, formatResourceType, getStatusBadgeVariant } from '@/lib/format/formatters';
 import { Server, Search, ChevronRight } from 'lucide-react';
 
 export default function ResourcesPage() {
@@ -122,8 +122,8 @@ export default function ResourcesPage() {
                               {res.name}
                             </Link>
                           </TableCell>
-                          <TableCell className="capitalize font-mono text-xs">
-                            {res.type.replace(/_/g, ' ')}
+                          <TableCell className="font-medium text-xs">
+                            {formatResourceType(res.type)}
                           </TableCell>
                           <TableCell>
                             <Badge variant={variant} className="capitalize">
@@ -175,7 +175,7 @@ export default function ResourcesPage() {
                       </div>
                       <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-muted-foreground">
                         <div>
-                          <span className="capitalize">{res.type.replace(/_/g, ' ')}</span>
+                          <span className="font-medium text-foreground">{formatResourceType(res.type)}</span>
                         </div>
                         <div className="text-right">
                           <span>Created {formatDate(res.created_at)}</span>

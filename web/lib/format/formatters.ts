@@ -72,8 +72,14 @@ export function getStatusBadgeVariant(status: string): {
     case 'running':
     case 'pending':
       return { label: status, variant: 'secondary' };
+    case 'unverified':
+      return { label: 'unverified', variant: 'outline' };
+    case 'disabled':
     case 'paused':
       return { label: status, variant: 'outline' };
+    case 'unreachable':
+      return { label: 'unreachable', variant: 'destructive' };
+    case 'error':
     case 'failed':
     case 'cancelled':
     case 'archived':
@@ -81,5 +87,88 @@ export function getStatusBadgeVariant(status: string): {
       return { label: status, variant: 'destructive' };
     default:
       return { label: status || 'unknown', variant: 'outline' };
+  }
+}
+
+/**
+ * Conservative deterministic cron formatter for common platform backup patterns.
+ * If expression does not strictly match known safe patterns, returns "Custom schedule".
+ */
+export function formatCronSchedule(cron: string | null | undefined): string {
+  if (!cron) return 'Manual (no schedule)';
+  const trimmed = cron.trim();
+
+  // Pattern: "0 2 * * *" or "30 14 * * *" -> Daily at HH:MM
+  const dailyMatch = trimmed.match(/^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*$/);
+  if (dailyMatch) {
+    const min = dailyMatch[1]!.padStart(2, '0');
+    const hour = dailyMatch[2]!.padStart(2, '0');
+    return `Daily at ${hour}:${min}`;
+  }
+
+  // Pattern: "0 */6 * * *" -> Every 6 hours
+  const stepHourMatch = trimmed.match(/^0\s+\*\/(\d{1,2})\s+\*\s+\*\s+\*$/);
+  if (stepHourMatch) {
+    return `Every ${stepHourMatch[1]} hours`;
+  }
+
+  // Pattern: "0 * * * *" -> Hourly
+  if (trimmed === '0 * * * *') {
+    return 'Hourly';
+  }
+
+  // Pattern: "*/15 * * * *" -> Every 15 minutes
+  const stepMinMatch = trimmed.match(/^\*\/(\d{1,2})\s+\*\s+\*\s+\*\s+\*$/);
+  if (stepMinMatch) {
+    return `Every ${stepMinMatch[1]} minutes`;
+  }
+
+  // Pattern: "0 2 * * 0" -> Weekly on Sunday at 02:00
+  const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const weeklyMatch = trimmed.match(/^(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+([0-6])$/);
+  if (weeklyMatch) {
+    const min = weeklyMatch[1]!.padStart(2, '0');
+    const hour = weeklyMatch[2]!.padStart(2, '0');
+    const day = daysOfWeek[parseInt(weeklyMatch[3]!, 10)] ?? 'Sunday';
+    return `Weekly on ${day} at ${hour}:${min}`;
+  }
+
+  return 'Custom schedule';
+}
+
+export function formatResourceType(type: string): string {
+  switch (type) {
+    case 'ubuntu_ssh':
+      return 'Ubuntu (SSH)';
+    case 'cpanel':
+      return 'cPanel';
+    default:
+      return type;
+  }
+}
+
+export function formatBackupType(type: string): string {
+  switch (type) {
+    case 'mysql_database':
+      return 'MySQL Database';
+    case 'website_files':
+      return 'Website Files';
+    case 'both':
+      return 'Database & Website Files';
+    default:
+      return type;
+  }
+}
+
+export function formatStorageTargetType(type: string): string {
+  switch (type) {
+    case 'local':
+      return 'Local Storage';
+    case 's3':
+      return 'Amazon / Standard S3';
+    case 's3_compatible':
+      return 'S3 Compatible';
+    default:
+      return type;
   }
 }

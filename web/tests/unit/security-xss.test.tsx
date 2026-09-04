@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ErrorState } from '@/components/ui/error-state';
+import { buildCspHeader } from '@/lib/security/csp';
 import nextConfig from '@/next.config.mjs';
 import fs from 'fs';
 import path from 'path';
@@ -59,6 +60,33 @@ describe('Security & Anti-XSS Verification', () => {
     expect(foundViolations).toEqual([]);
   });
 
+  describe('Content-Security-Policy (CSP) Construction & Strict Enforcement', () => {
+    it('generates hardened production CSP without unsafe-inline or unsafe-eval in script-src', () => {
+      const nonce = 'test-random-nonce-12345';
+      const csp = buildCspHeader({ isProduction: true, nonce });
+
+      // Script security assertions
+      expect(csp).toContain(`script-src 'self' 'nonce-${nonce}'`);
+      expect(csp).not.toContain("'unsafe-inline' in script-src");
+      expect(csp).not.toMatch(/script-src[^;]*'unsafe-inline'/);
+      expect(csp).not.toMatch(/script-src[^;]*'unsafe-eval'/);
+
+      // Essential strict policy directives
+      expect(csp).toContain("frame-ancestors 'none'");
+      expect(csp).toContain("object-src 'none'");
+      expect(csp).toContain("base-uri 'self'");
+      expect(csp).toContain("form-action 'self'");
+      expect(csp).toContain("connect-src 'self'");
+      expect(csp).toContain("default-src 'self'");
+    });
+
+    it('allows unsafe-eval strictly only in development mode for HMR, never unsafe-inline', () => {
+      const cspDev = buildCspHeader({ isProduction: false, nonce: 'dev-nonce' });
+      expect(cspDev).toMatch(/script-src[^;]*'unsafe-eval'/);
+      expect(cspDev).not.toMatch(/script-src[^;]*'unsafe-inline'/);
+    });
+  });
+
   it('verifies critical security headers in next.config.mjs', async () => {
     const headersFn = nextConfig.headers;
     expect(headersFn).toBeDefined();
@@ -72,11 +100,10 @@ describe('Security & Anti-XSS Verification', () => {
       headersMap.set(h.key, h.value);
     }
 
-    expect(headersMap.get('Content-Security-Policy')).toContain("frame-ancestors 'none'");
-    expect(headersMap.get('Content-Security-Policy')).toContain("default-src 'self'");
+    // Standard browser hardening headers applied globally in next.config.mjs
     expect(headersMap.get('X-Content-Type-Options')).toBe('nosniff');
     expect(headersMap.get('Referrer-Policy')).toBe('strict-origin-when-cross-origin');
     expect(headersMap.get('X-Frame-Options')).toBe('DENY');
-    expect(headersMap.get('Permissions-Policy')).toBeDefined();
+    expect(headersMap.get('Permissions-Policy')).toBe('camera=(), microphone=(), geolocation=()');
   });
 });

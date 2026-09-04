@@ -5,8 +5,8 @@
 // -------------------------------------------------------------
 // Resources & Connectors
 // -------------------------------------------------------------
-export type ResourceType = 'linux_server' | 'mysql_database';
-export type ResourceStatus = 'active' | 'archived';
+export type ResourceType = 'ubuntu_ssh' | 'cpanel';
+export type ResourceStatus = 'active' | 'unreachable' | 'disabled' | 'error' | 'archived';
 
 export interface ConnectorResponse {
   host?: string;
@@ -32,8 +32,8 @@ export interface ResourceResponse {
 // -------------------------------------------------------------
 // Backup Plans
 // -------------------------------------------------------------
-export type BackupType = 'mysql_database' | 'website_files';
-export type EngineType = 'mysqldump' | 'xtrabackup' | 'tar' | 'restic';
+export type BackupType = 'mysql_database' | 'website_files' | 'both';
+export type EngineType = 'direct_stream';
 export type PlanStatus = 'active' | 'paused' | 'archived';
 
 export interface DatabaseSelectionDTO {
@@ -98,7 +98,7 @@ export interface BackupRunResponse {
 // -------------------------------------------------------------
 // Backup Artifacts
 // -------------------------------------------------------------
-export type VerificationStatus = 'pending' | 'verified' | 'failed';
+export type VerificationStatus = 'unverified' | 'verified' | 'failed';
 
 export interface BackupArtifactResponse {
   id: string;
@@ -116,8 +116,8 @@ export interface BackupArtifactResponse {
 // -------------------------------------------------------------
 // Storage Targets
 // -------------------------------------------------------------
-export type StorageTargetType = 'local' | 's3';
-export type StorageTargetStatus = 'active' | 'archived';
+export type StorageTargetType = 'local' | 's3' | 's3_compatible';
+export type StorageTargetStatus = 'active' | 'disabled' | 'error' | 'archived';
 
 export interface S3TargetConfigDTO {
   bucket: string;
@@ -141,7 +141,12 @@ export interface StorageTargetResponse {
 // -------------------------------------------------------------
 // Credentials (Read-Only Admin Metadata)
 // -------------------------------------------------------------
-export type CredentialType = 'password' | 'ssh_private_key' | 's3_credentials';
+export type CredentialType =
+  | 'ssh_private_key'
+  | 'ssh_password'
+  | 'cpanel_api_token'
+  | 'cpanel_password'
+  | 's3_credentials';
 
 export interface CredentialListItemResponse {
   id: string;

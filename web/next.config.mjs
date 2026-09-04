@@ -12,29 +12,7 @@ const nextConfig = {
     ];
   },
   async headers() {
-    const isProduction = process.env.NODE_ENV === 'production';
-
-    // Production-ready Content Security Policy
-    const cspDirectives = [
-      "default-src 'self'",
-      "script-src 'self' 'unsafe-inline'",
-      "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data:",
-      "font-src 'self'",
-      "connect-src 'self'",
-      "object-src 'none'",
-      "base-uri 'self'",
-      "form-action 'self'",
-      "frame-ancestors 'none'",
-    ];
-
-    const cspHeaderValue = cspDirectives.join('; ');
-
     const securityHeaders = [
-      {
-        key: 'Content-Security-Policy',
-        value: cspHeaderValue,
-      },
       {
         key: 'X-Content-Type-Options',
         value: 'nosniff',

@@ -25,7 +25,7 @@ export interface AuthContextType {
   userRole: OrgRole | null;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
-  switchOrganization: (orgId: string) => void;
+  switchOrganization: (orgId: string) => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -35,16 +35,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('booting');
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [user, setUser] = useState<UserSummary | null>(null);
-  const [memberships, setMemberships] = useState<MembershipSummary[]>([]);
   const [activeOrgId, setActiveOrgId] = useState<string | null>(null);
-
+  const [memberships, setMemberships] = useState<MembershipSummary[]>([]);
   const accessTokenRef = useRef<string | null>(null);
   const activeOrgIdRef = useRef<string | null>(null);
+  const membershipsRef = useRef<MembershipSummary[]>([]);
 
   useEffect(() => {
     accessTokenRef.current = accessToken;
     activeOrgIdRef.current = activeOrgId;
-  }, [accessToken, activeOrgId]);
+    membershipsRef.current = memberships;
+  }, [accessToken, activeOrgId, memberships]);
 
   // Active membership computed from activeOrgId
   const activeMembership = useMemo(() => {
@@ -57,6 +58,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Clear session state cleanly
   const clearSessionState = useCallback(() => {
+    accessTokenRef.current = null;
+    activeOrgIdRef.current = null;
+    membershipsRef.current = [];
     setAccessToken(null);
     setUser(null);
     setMemberships([]);
@@ -71,6 +75,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       getToken: () => accessTokenRef.current,
       getOrgId: () => activeOrgIdRef.current,
       onTokenUpdate: (newToken: string) => {
+        accessTokenRef.current = newToken;
         setAccessToken(newToken);
       },
       onAuthFailure: () => {
@@ -185,8 +190,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // Switch Organization
   const switchOrganization = useCallback(
-    (newOrgId: string) => {
-      if (newOrgId === activeOrgIdRef.current) return;
+    (newOrgId: string): boolean => {
+      if (newOrgId === activeOrgIdRef.current) return true;
+
+      // Validate newOrgId exists in authenticated membership list
+      const targetMembership = membershipsRef.current.find(
+        (m) => m.organization_id === newOrgId
+      );
+
+      if (!targetMembership) {
+        return false;
+      }
+
+      if (targetMembership.status && targetMembership.status !== 'active') {
+        return false;
+      }
 
       // 1. Cancel in-flight tenant queries for old org
       if (activeOrgIdRef.current) {
@@ -197,6 +215,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // 2. Set new active org
       setActiveOrgId(newOrgId);
       activeOrgIdRef.current = newOrgId;
+      return true;
     },
     [queryClient]
   );
