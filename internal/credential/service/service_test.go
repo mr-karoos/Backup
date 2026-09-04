@@ -165,6 +165,27 @@ func (f *fakeRepo) DeleteForOrganization(ctx context.Context, q database.Querier
 		if f.savedCred.OrganizationID != orgID || f.savedCred.ID != credID {
 			return domain.ErrCredentialNotFound
 		}
+		if f.savedCred.ManagedBy == domain.ManagedBySystem {
+			return domain.ErrSystemCredentialRestricted
+		}
+		f.savedCred = nil
+		return nil
+	}
+	return domain.ErrCredentialNotFound
+}
+
+func (f *fakeRepo) DeleteSystemResticKeyForOrganization(ctx context.Context, q database.Querier, orgID, credID uuid.UUID) error {
+	f.deleteCalls++
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if f.savedCred != nil {
+		if f.savedCred.OrganizationID != orgID || f.savedCred.ID != credID {
+			return domain.ErrCredentialNotFound
+		}
+		if f.savedCred.ManagedBy != domain.ManagedBySystem || f.savedCred.Type != domain.TypeResticRepositoryKey {
+			return domain.ErrCredentialNotFound
+		}
 		f.savedCred = nil
 		return nil
 	}

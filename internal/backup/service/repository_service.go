@@ -147,6 +147,11 @@ func (s *RepositoryService) EnsureRepository(
 		}
 		defer target.Cleanup()
 
+		// Defense in depth: compare resolved target Locator() with persisted repository_locator
+		if target.Locator() != existingRepo.RepositoryLocator {
+			return nil, fmt.Errorf("%w: repository locator drifted from '%s' to '%s'", domain.ErrRepositoryTargetMismatch, existingRepo.RepositoryLocator, target.Locator())
+		}
+
 		if err := s.runner.Probe(ctx, target, password); err != nil {
 			return nil, fmt.Errorf("%w: %v", domain.ErrRepositoryCorrupted, err)
 		}

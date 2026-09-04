@@ -1,8 +1,14 @@
 package restic
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+
+	"backup-platform/internal/backup/domain"
+	"backup-platform/pkg/uuid"
 )
 
 func TestFilterCleanEnv(t *testing.T) {
@@ -94,4 +100,113 @@ func TestBoundedBuffer(t *testing.T) {
 	if buf.buf.Len() != 50 {
 		t.Errorf("expected buffer length capped at 50, got %d", buf.buf.Len())
 	}
+}
+
+func TestFilterCleanEnv_Proxies(t *testing.T) {
+	env := []string{
+		"PATH=/usr/bin",
+		"HTTP_PROXY=http://malicious-proxy:8080",
+		"HTTPS_PROXY=http://malicious-proxy:8080",
+		"ALL_PROXY=socks5://malicious-proxy:1080",
+		"NO_PROXY=internal.net",
+		"http_proxy=http://malicious-proxy:8080",
+		"https_proxy=http://malicious-proxy:8080",
+		"SAFE_VAR=val",
+	}
+
+	filtered := filterCleanEnv(env)
+	for _, e := range filtered {
+		upper := strings.ToUpper(e)
+		if strings.HasPrefix(upper, "HTTP_PROXY=") ||
+			strings.HasPrefix(upper, "HTTPS_PROXY=") ||
+			strings.HasPrefix(upper, "ALL_PROXY=") ||
+			strings.HasPrefix(upper, "NO_PROXY=") {
+			t.Errorf("filtered env still contains ambient proxy variable: %s", e)
+		}
+	}
+}
+
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	defer os.Exit(1)
+	// Echo sensitive environment variables to stderr and exit with error
+	pw := os.Getenv("RESTIC_PASSWORD")
+	sec := os.Getenv("AWS_SECRET_ACCESS_KEY")
+	_, _ = fmt.Fprintf(os.Stderr, "FATAL: authentication failed with password %s and secret %s\n", pw, sec)
+}
+
+func TestResticRunner_RedactionOrder(t *testing.T) {
+	ctx := context.Background()
+
+	pw := []byte("super-secret-restic-password-999")
+	awsSecret := "super-secret-aws-key-888"
+
+	// Construct an S3RepositoryTarget that wipes secrets on Cleanup()
+	cfg := domain.S3TargetConfig{Bucket: "test-bucket"}
+	target, err := NewS3RepositoryTarget(
+		"s3",
+		cfg,
+		uuid.New(),
+		uuid.New(),
+		"AKIA12345",
+		awsSecret,
+		nil,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("failed creating target: %v", err)
+	}
+
+	// Use test binary helper process to simulate failing restic process echoing secrets
+	runner := &ResticRunner{
+		binaryPath: os.Args[0],
+	}
+
+	// Set helper process environment
+	origEnv := os.Getenv("GO_WANT_HELPER_PROCESS")
+	os.Setenv("GO_WANT_HELPER_PROCESS", "1")
+	defer os.Setenv("GO_WANT_HELPER_PROCESS", origEnv)
+
+	_, runErr := runner.runCommand(ctx, target, pw, []string{"-test.run=TestHelperProcess", "--"})
+	if runErr == nil {
+		t.Fatalf("expected command failure from helper process")
+	}
+
+	errStr := runErr.Error()
+
+	// Assert NO plaintext password or secret appears in returned error
+	if strings.Contains(errStr, string(pw)) {
+		t.Errorf("SECURITY LEAK: error contains plaintext password: %s", errStr)
+	}
+	if strings.Contains(errStr, awsSecret) {
+		t.Errorf("SECURITY LEAK: error contains plaintext AWS secret: %s", errStr)
+	}
+
+	// Assert redaction placeholders are present
+	if !strings.Contains(errStr, "[REDACTED_PASSWORD]") {
+		t.Errorf("expected [REDACTED_PASSWORD] in error, got: %s", errStr)
+	}
+	if !strings.Contains(errStr, "[REDACTED_SECRET]") {
+		t.Errorf("expected [REDACTED_SECRET] in error, got: %s", errStr)
+	}
+
+	// Assert target.Cleanup() was called and zeroed the in-memory secret
+	if len(target.secretAccessKey) != 0 {
+		t.Errorf("expected target secretAccessKey to be zeroed after runner completes")
+	}
+}
+
+func TestResticRunner_ValidateVersion(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("rejects non-existent binary", func(t *testing.T) {
+		runner := NewResticRunner("/non/existent/path/to/restic-binary", nil)
+		err := runner.ValidateVersion(ctx)
+		if err == nil {
+			t.Errorf("expected error for non-existent binary")
+		}
+	})
 }

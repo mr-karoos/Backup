@@ -122,6 +122,50 @@ func (p *EndpointSecurityPolicy) ValidateEndpointURL(endpointURL string) (*url.U
 	return u, nil
 }
 
+// ValidateEndpoint checks syntax, scheme, userinfo, host, path, query, and fragment,
+// and enforces IP-level validation for both IP literals and resolved hostnames fail-closed.
+func (p *EndpointSecurityPolicy) ValidateEndpoint(endpointURL string) (*url.URL, error) {
+	u, err := p.ValidateEndpointURL(endpointURL)
+	if err != nil {
+		return nil, err
+	}
+	if u == nil {
+		return nil, nil // Default AWS endpoint
+	}
+
+	host := u.Hostname()
+
+	// If host is an IP literal (IPv4 or unbracketed IPv6), evaluate directly
+	if parsedIP := net.ParseIP(host); parsedIP != nil {
+		if !p.IsIPAllowed(host, parsedIP) {
+			return nil, fmt.Errorf("%w: endpoint host '%s'", ErrBlockedAddress, host)
+		}
+		return u, nil
+	}
+
+	// For DNS hostnames, perform resolution check to ensure at least one IP is currently permissible
+	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	if err != nil {
+		return nil, fmt.Errorf("failed resolving s3 endpoint host '%s': %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no IP addresses resolved for s3 endpoint host '%s'", host)
+	}
+
+	hasAllowed := false
+	for _, ip := range ips {
+		if p.IsIPAllowed(host, ip.IP) {
+			hasAllowed = true
+			break
+		}
+	}
+	if !hasAllowed {
+		return nil, fmt.Errorf("%w: s3 endpoint host '%s' resolved to disallowed IP(s)", ErrBlockedAddress, host)
+	}
+
+	return u, nil
+}
+
 // IsIPAllowed evaluates whether a resolved IP address is permissible.
 func (p *EndpointSecurityPolicy) IsIPAllowed(host string, ip net.IP) bool {
 	if ip == nil {

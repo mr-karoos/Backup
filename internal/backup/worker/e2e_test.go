@@ -333,6 +333,9 @@ func (r *memoryBackupRepo) CountPlansByStorageTarget(ctx context.Context, orgID,
 func (r *memoryBackupRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
 	return 0, nil
 }
+func (r *memoryBackupRepo) CountRepositoriesByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
 func (r *memoryBackupRepo) CreateRepository(ctx context.Context, repo *domain.BackupRepository) (*domain.BackupRepository, error) {
 	return nil, nil
 }

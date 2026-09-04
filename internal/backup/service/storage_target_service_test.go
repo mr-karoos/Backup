@@ -17,6 +17,7 @@ type mockStorageTargetRepo struct {
 	artifactCount int64
 	planCount     int64
 	jobCount      int64
+	repoCount     int64
 }
 
 func newMockStorageTargetRepo() *mockStorageTargetRepo {
@@ -93,6 +94,10 @@ func (m *mockStorageTargetRepo) CountPlansByStorageTarget(ctx context.Context, o
 
 func (m *mockStorageTargetRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
 	return m.jobCount, nil
+}
+
+func (m *mockStorageTargetRepo) CountRepositoriesByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return m.repoCount, nil
 }
 
 type mockCredFinder struct {
@@ -400,6 +405,142 @@ func TestStorageTargetService_RBAC(t *testing.T) {
 			if !errors.Is(err, domain.ErrUnauthorizedRole) {
 				t.Errorf("expected DeleteStorageTarget to reject role %s with ErrUnauthorizedRole, got: %v", role, err)
 			}
+		}
+	})
+}
+
+func TestStorageTargetService_RepositoryInUseProtection(t *testing.T) {
+	ctx := context.Background()
+	orgID := uuid.New()
+	credID := uuid.New()
+	targetID := uuid.New()
+
+	repo := newMockStorageTargetRepo()
+	credFinder := &mockCredFinder{
+		creds: map[uuid.UUID]*credDomain.CredentialMetadata{
+			credID: {
+				ID:             credID,
+				OrganizationID: orgID,
+				Type:           credDomain.TypeS3Credentials,
+			},
+		},
+	}
+	secPolicy := &s3Storage.EndpointSecurityPolicy{AllowInsecureHTTP: false}
+	svc := NewStorageTargetService(repo, credFinder, secPolicy, nil)
+
+	origConfig := []byte(`{"bucket":"orig-bucket","endpoint":"https://s3.us-east-1.amazonaws.com","region":"us-east-1","force_path_style":false,"prefix":"backups/orig"}`)
+
+	target := &domain.StorageTarget{
+		ID:             targetID,
+		OrganizationID: orgID,
+		Name:           "Production S3",
+		Type:           domain.StorageTargetTypeS3,
+		Status:         domain.StorageTargetStatusActive,
+		IsDefault:      false,
+		Config:         origConfig,
+		CredentialID:   &credID,
+	}
+	repo.targets[targetID] = target
+
+	// Mark target as referenced by a restic repository
+	repo.repoCount = 1
+
+	t.Run("bucket change is blocked when repository exists", func(t *testing.T) {
+		newCfg := []byte(`{"bucket":"new-bucket","endpoint":"https://s3.us-east-1.amazonaws.com","region":"us-east-1","force_path_style":false,"prefix":"backups/orig"}`)
+		_, err := svc.UpdateStorageTarget(ctx, orgDomain.RoleAdmin, orgID, targetID, UpdateStorageTargetInput{
+			Name:         "Production S3",
+			Status:       domain.StorageTargetStatusActive,
+			CredentialID: &credID,
+			Config:       newCfg,
+		})
+		if !errors.Is(err, domain.ErrStorageTargetLocationImmutable) {
+			t.Errorf("expected ErrStorageTargetLocationImmutable, got: %v", err)
+		}
+	})
+
+	t.Run("endpoint change is blocked when repository exists", func(t *testing.T) {
+		newCfg := []byte(`{"bucket":"orig-bucket","endpoint":"https://s3.eu-central-1.amazonaws.com","region":"us-east-1","force_path_style":false,"prefix":"backups/orig"}`)
+		_, err := svc.UpdateStorageTarget(ctx, orgDomain.RoleAdmin, orgID, targetID, UpdateStorageTargetInput{
+			Name:         "Production S3",
+			Status:       domain.StorageTargetStatusActive,
+			CredentialID: &credID,
+			Config:       newCfg,
+		})
+		if !errors.Is(err, domain.ErrStorageTargetLocationImmutable) {
+			t.Errorf("expected ErrStorageTargetLocationImmutable, got: %v", err)
+		}
+	})
+
+	t.Run("region change is blocked when repository exists", func(t *testing.T) {
+		newCfg := []byte(`{"bucket":"orig-bucket","endpoint":"https://s3.us-east-1.amazonaws.com","region":"eu-west-1","force_path_style":false,"prefix":"backups/orig"}`)
+		_, err := svc.UpdateStorageTarget(ctx, orgDomain.RoleAdmin, orgID, targetID, UpdateStorageTargetInput{
+			Name:         "Production S3",
+			Status:       domain.StorageTargetStatusActive,
+			CredentialID: &credID,
+			Config:       newCfg,
+		})
+		if !errors.Is(err, domain.ErrStorageTargetLocationImmutable) {
+			t.Errorf("expected ErrStorageTargetLocationImmutable, got: %v", err)
+		}
+	})
+
+	t.Run("force_path_style change is blocked when repository exists", func(t *testing.T) {
+		newCfg := []byte(`{"bucket":"orig-bucket","endpoint":"https://s3.us-east-1.amazonaws.com","region":"us-east-1","force_path_style":true,"prefix":"backups/orig"}`)
+		_, err := svc.UpdateStorageTarget(ctx, orgDomain.RoleAdmin, orgID, targetID, UpdateStorageTargetInput{
+			Name:         "Production S3",
+			Status:       domain.StorageTargetStatusActive,
+			CredentialID: &credID,
+			Config:       newCfg,
+		})
+		if !errors.Is(err, domain.ErrStorageTargetLocationImmutable) {
+			t.Errorf("expected ErrStorageTargetLocationImmutable, got: %v", err)
+		}
+	})
+
+	t.Run("prefix change is blocked when repository exists", func(t *testing.T) {
+		newCfg := []byte(`{"bucket":"orig-bucket","endpoint":"https://s3.us-east-1.amazonaws.com","region":"us-east-1","force_path_style":false,"prefix":"backups/new-prefix"}`)
+		_, err := svc.UpdateStorageTarget(ctx, orgDomain.RoleAdmin, orgID, targetID, UpdateStorageTargetInput{
+			Name:         "Production S3",
+			Status:       domain.StorageTargetStatusActive,
+			CredentialID: &credID,
+			Config:       newCfg,
+		})
+		if !errors.Is(err, domain.ErrStorageTargetLocationImmutable) {
+			t.Errorf("expected ErrStorageTargetLocationImmutable, got: %v", err)
+		}
+	})
+
+	t.Run("delete target is blocked when repository exists", func(t *testing.T) {
+		err := svc.DeleteStorageTarget(ctx, orgDomain.RoleAdmin, orgID, targetID)
+		if !errors.Is(err, domain.ErrStorageTargetInUse) {
+			t.Errorf("expected ErrStorageTargetInUse, got: %v", err)
+		}
+	})
+
+	t.Run("archiving/disabling target is blocked when repository exists", func(t *testing.T) {
+		_, err := svc.UpdateStorageTarget(ctx, orgDomain.RoleAdmin, orgID, targetID, UpdateStorageTargetInput{
+			Name:         "Production S3",
+			Status:       domain.StorageTargetStatusDisabled,
+			CredentialID: &credID,
+			Config:       origConfig,
+		})
+		if !errors.Is(err, domain.ErrStorageTargetInUse) {
+			t.Errorf("expected ErrStorageTargetInUse, got: %v", err)
+		}
+	})
+
+	t.Run("name change is allowed when repository exists", func(t *testing.T) {
+		updated, err := svc.UpdateStorageTarget(ctx, orgDomain.RoleAdmin, orgID, targetID, UpdateStorageTargetInput{
+			Name:         "Production S3 Renamed",
+			Status:       domain.StorageTargetStatusActive,
+			CredentialID: &credID,
+			Config:       origConfig,
+		})
+		if err != nil {
+			t.Fatalf("expected name update to succeed, got: %v", err)
+		}
+		if updated.Name != "Production S3 Renamed" {
+			t.Errorf("expected updated name Production S3 Renamed, got %s", updated.Name)
 		}
 	})
 }

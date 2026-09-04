@@ -273,7 +273,20 @@ func run() error {
 	storageTargetService := backupService.NewStorageTargetService(backupRepository, vaultService, endpointPolicy, log)
 
 	// 14b. Initialize Restic Repository Subsystem (Future Phase A Step A.3)
-	resticRunner := restic.NewResticRunner("", log)
+	resticBinPath := "/usr/local/bin/restic"
+	if p := os.Getenv("RESTIC_BINARY_PATH"); p != "" {
+		resticBinPath = p
+	}
+	resticRunner := restic.NewResticRunner(resticBinPath, log)
+
+	// Validate exact Restic version 0.19.1 at startup (fail-fast)
+	resticVerCtx, resticVerCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := resticRunner.ValidateVersion(resticVerCtx); err != nil {
+		resticVerCancel()
+		log.Error("restic binary validation failed at startup", "error", err)
+		os.Exit(1)
+	}
+	resticVerCancel()
 	resticTargetResolver := restic.NewTargetResolver(
 		backupRepository,
 		vaultService,

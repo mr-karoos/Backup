@@ -140,6 +140,9 @@ func (m *mockBackupRepo) CountPlansByStorageTarget(ctx context.Context, orgID, t
 func (m *mockBackupRepo) CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
 	return 0, nil
 }
+func (m *mockBackupRepo) CountRepositoriesByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	return 0, nil
+}
 func (m *mockBackupRepo) CreateRepository(ctx context.Context, repo *domain.BackupRepository) (*domain.BackupRepository, error) {
 	return nil, nil
 }

@@ -289,6 +289,17 @@ func (r *PostgresBackupRepository) CountActiveJobsByStorageTarget(ctx context.Co
 	return count, nil
 }
 
+// CountRepositoriesByStorageTarget counts backup repositories using the given target.
+func (r *PostgresBackupRepository) CountRepositoriesByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error) {
+	q := r.txManager.Querier()
+	query := `SELECT COUNT(*) FROM backup_repositories WHERE organization_id = $1 AND storage_target_id = $2;`
+	var count int64
+	if err := q.QueryRow(ctx, query, orgID, targetID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("failed counting repositories for storage target: %w", err)
+	}
+	return count, nil
+}
+
 // GetPlanByID retrieves a backup plan by ID within an organization.
 func (r *PostgresBackupRepository) GetPlanByID(ctx context.Context, orgID, planID uuid.UUID) (*domain.BackupPlan, error) {
 	q := r.txManager.Querier()

@@ -8,6 +8,7 @@ import (
 	"backup-platform/internal/backup/domain"
 	credDomain "backup-platform/internal/credential/domain"
 	"backup-platform/internal/credential/payload"
+	"backup-platform/internal/credential/secretcrypto"
 	"backup-platform/pkg/uuid"
 )
 
@@ -82,6 +83,8 @@ func (r *TargetResolver) ResolveTarget(
 		if err != nil {
 			return nil, fmt.Errorf("failed loading storage target credentials: %w", err)
 		}
+		defer secretcrypto.ZeroBytes(decryptedSecret)
+
 		if credType != credDomain.TypeS3Credentials {
 			return nil, fmt.Errorf("unexpected credential type %s for s3 target", credType)
 		}
@@ -90,6 +93,7 @@ func (r *TargetResolver) ResolveTarget(
 		if err != nil {
 			return nil, fmt.Errorf("failed decoding s3 credentials payload: %w", err)
 		}
+		defer payload.ClearS3(s3Payload)
 
 		repoTarget, err := NewS3RepositoryTarget(
 			string(target.Type),
@@ -102,7 +106,6 @@ func (r *TargetResolver) ResolveTarget(
 			r.allowInsecure,
 			r.privateAllowlist,
 		)
-		payload.ClearS3(s3Payload)
 		if err != nil {
 			return nil, fmt.Errorf("failed creating s3 repository target: %w", err)
 		}
@@ -127,5 +130,16 @@ func (r *TargetResolver) ResolveTargetForRepository(
 		return nil, err
 	}
 
-	return r.ResolveTarget(ctx, repo.OrganizationID, repo.ResourceID, target)
+	resolvedTarget, err := r.ResolveTarget(ctx, repo.OrganizationID, repo.ResourceID, target)
+	if err != nil {
+		return nil, err
+	}
+
+	// Defense in depth: compare resolved target Locator() with persisted repository_locator
+	if resolvedTarget.Locator() != repo.RepositoryLocator {
+		resolvedTarget.Cleanup()
+		return nil, fmt.Errorf("%w: repository locator drifted from '%s' to '%s'", domain.ErrRepositoryTargetMismatch, repo.RepositoryLocator, resolvedTarget.Locator())
+	}
+
+	return resolvedTarget, nil
 }

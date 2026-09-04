@@ -460,7 +460,7 @@ func (s *VaultService) DeleteSystemCredential(
 		return domain.ErrInvalidCredentialID
 	}
 
-	return s.repo.DeleteForOrganization(ctx, s.txManager.Querier(), orgID, credID)
+	return s.repo.DeleteSystemResticKeyForOrganization(ctx, s.txManager.Querier(), orgID, credID)
 }
 
 // LoadCredentialForUse retrieves and decrypts the credential for operational connector use.

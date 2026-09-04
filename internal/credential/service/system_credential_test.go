@@ -3,10 +3,15 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
-	"time"
 
 	"backup-platform/internal/credential/domain"
+	credRepo "backup-platform/internal/credential/repository"
+	"backup-platform/internal/credential/secretcrypto"
+	"backup-platform/internal/platform/database"
 	"backup-platform/pkg/uuid"
 )
 
@@ -97,6 +102,14 @@ func TestVaultService_SystemCredential_Lifecycle(t *testing.T) {
 		}
 	})
 
+	t.Run("Public DeleteCredential rejects system credential", func(t *testing.T) {
+		systemCredID := repo.savedCred.ID
+		err := svc.DeleteCredential(ctx, orgID, systemCredID)
+		if !errors.Is(err, domain.ErrSystemCredentialRestricted) {
+			t.Errorf("expected ErrSystemCredentialRestricted, got: %v", err)
+		}
+	})
+
 	t.Run("Internal DeleteSystemCredential allows cleanup", func(t *testing.T) {
 		systemCredID := repo.savedCred.ID
 		err := svc.DeleteSystemCredential(ctx, orgID, systemCredID)
@@ -106,6 +119,80 @@ func TestVaultService_SystemCredential_Lifecycle(t *testing.T) {
 	})
 }
 
-func init() {
-	_ = time.Now()
+func TestVaultService_RealPostgres_SystemCredentialCleanup(t *testing.T) {
+	testDBURL := strings.TrimSpace(os.Getenv("TEST_DATABASE_URL"))
+	if testDBURL == "" {
+		t.Skip("skipping real postgres system credential test: TEST_DATABASE_URL not set")
+	}
+
+	ctx := context.Background()
+	pool, err := database.New(ctx, testDBURL)
+	if err != nil {
+		t.Fatalf("failed initializing database pool: %v", err)
+	}
+	defer pool.Close()
+
+	orgID := uuid.New()
+	cleanup := func() {
+		cleanupCtx := context.Background()
+		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM credentials WHERE organization_id = $1", orgID)
+		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM organizations WHERE id = $1", orgID)
+	}
+	cleanup()
+	defer cleanup()
+
+	// Seed Organization
+	slug := fmt.Sprintf("org-syscred-%s", orgID.String()[:8])
+	_, err = pool.Querier().Exec(ctx, `
+		INSERT INTO organizations (id, name, slug, status, metadata, created_at, updated_at)
+		VALUES ($1, 'SysCred Test Org', $2, 'active', '{}'::jsonb, NOW(), NOW())`,
+		orgID, slug)
+	if err != nil {
+		t.Fatalf("failed inserting org: %v", err)
+	}
+
+	masterKey := []byte("12345678901234567890123456789012")
+	keyProvider, err := secretcrypto.NewStaticKeyProvider(masterKey, 1)
+	if err != nil {
+		t.Fatalf("failed creating key provider: %v", err)
+	}
+	cryptoEngine, err := secretcrypto.NewAESGCMEngine(keyProvider)
+	if err != nil {
+		t.Fatalf("failed creating crypto engine: %v", err)
+	}
+
+	repo := credRepo.NewPostgresCredentialRepository()
+	svc := NewVaultService(cryptoEngine, repo, pool, nil)
+
+	// 1. Create real system Restic credential
+	credSecret := []byte("high-entropy-restic-repo-password-32-bytes")
+	meta, err := svc.CreateSystemCredential(ctx, orgID, "restic-key-res1", domain.TypeResticRepositoryKey, credSecret)
+	if err != nil {
+		t.Fatalf("failed creating system credential: %v", err)
+	}
+
+	// 2. Verify public DeleteCredential fails with ErrSystemCredentialRestricted
+	err = svc.DeleteCredential(ctx, orgID, meta.ID)
+	if !errors.Is(err, domain.ErrSystemCredentialRestricted) {
+		t.Fatalf("expected ErrSystemCredentialRestricted on public delete, got: %v", err)
+	}
+
+	// Verify credential is still present in database
+	var count int
+	err = pool.Querier().QueryRow(ctx, "SELECT COUNT(*) FROM credentials WHERE id = $1", meta.ID).Scan(&count)
+	if err != nil || count != 1 {
+		t.Fatalf("expected credential to still exist, count=%d err=%v", count, err)
+	}
+
+	// 3. Internal DeleteSystemCredential succeeds
+	err = svc.DeleteSystemCredential(ctx, orgID, meta.ID)
+	if err != nil {
+		t.Fatalf("expected internal DeleteSystemCredential to succeed, got: %v", err)
+	}
+
+	// 4. Verify credential is now absent from database
+	err = pool.Querier().QueryRow(ctx, "SELECT COUNT(*) FROM credentials WHERE id = $1", meta.ID).Scan(&count)
+	if err != nil || count != 0 {
+		t.Fatalf("expected credential to be deleted, count=%d err=%v", count, err)
+	}
 }

@@ -41,6 +41,8 @@ CREATE TABLE IF NOT EXISTS backup_repositories (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_backup_repositories_org_id_id UNIQUE (organization_id, id),
     CONSTRAINT uq_backup_repositories_resource_id UNIQUE (resource_id),
+    CONSTRAINT uq_backup_repositories_credential_id UNIQUE (credential_id),
+    CONSTRAINT uq_backup_repositories_target_locator UNIQUE (storage_target_id, repository_locator),
     CONSTRAINT fk_backup_repositories_resource FOREIGN KEY (organization_id, resource_id)
         REFERENCES resources(organization_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_backup_repositories_storage_target FOREIGN KEY (organization_id, storage_target_id)
@@ -48,6 +50,21 @@ CREATE TABLE IF NOT EXISTS backup_repositories (
     CONSTRAINT fk_backup_repositories_credential FOREIGN KEY (organization_id, credential_id)
         REFERENCES credentials(organization_id, id) ON DELETE RESTRICT
 );
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uq_backup_repositories_credential_id'
+    ) THEN
+        ALTER TABLE backup_repositories ADD CONSTRAINT uq_backup_repositories_credential_id UNIQUE (credential_id);
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uq_backup_repositories_target_locator'
+    ) THEN
+        ALTER TABLE backup_repositories ADD CONSTRAINT uq_backup_repositories_target_locator UNIQUE (storage_target_id, repository_locator);
+    END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_backup_repositories_org_id ON backup_repositories(organization_id);
 CREATE INDEX IF NOT EXISTS idx_backup_repositories_resource_id ON backup_repositories(resource_id);

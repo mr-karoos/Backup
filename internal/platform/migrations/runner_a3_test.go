@@ -181,6 +181,42 @@ func TestMigrations_StepA3_Integration(t *testing.T) {
 		t.Errorf("expected unique constraint violation for duplicate repository on resource_id")
 	}
 
+	// 6e. Uniqueness on credential_id: a single restic key cannot be shared across repositories
+	resC := uuid.New()
+	_, err = connPool.Exec(ctx, `
+		INSERT INTO resources (id, organization_id, name, type, status, metadata, created_at, updated_at)
+		VALUES ($1, $2, 'Res C', 'ubuntu_ssh', 'active', '{}'::jsonb, NOW(), NOW())`,
+		resC, orgA)
+	if err != nil {
+		t.Fatalf("failed seeding Res C: %v", err)
+	}
+
+	_, err = connPool.Exec(ctx, `
+		INSERT INTO backup_repositories (id, organization_id, resource_id, storage_target_id, credential_id, repository_locator, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, 'loc-c', NOW(), NOW())`,
+		uuid.New(), orgA, resC, targetA, systemCredA)
+	if err == nil {
+		t.Errorf("expected unique constraint violation for duplicate credential_id on backup_repositories")
+	}
+
+	// 6f. Uniqueness on (storage_target_id, repository_locator): physical locator cannot be claimed twice
+	systemCredC := uuid.New()
+	_, err = connPool.Exec(ctx, `
+		INSERT INTO credentials (id, organization_id, name, type, managed_by, encrypted_secret, nonce, auth_tag, key_version, created_at, updated_at)
+		VALUES ($1, $2, 'System Restic Key C', 'restic_repository_key', 'system', '\x01', '\x02', '\x03', 1, NOW(), NOW())`,
+		systemCredC, orgA)
+	if err != nil {
+		t.Fatalf("failed seeding System Restic Key C: %v", err)
+	}
+
+	_, err = connPool.Exec(ctx, `
+		INSERT INTO backup_repositories (id, organization_id, resource_id, storage_target_id, credential_id, repository_locator, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+		uuid.New(), orgA, resC, targetA, systemCredC, locatorA)
+	if err == nil {
+		t.Errorf("expected unique constraint violation for duplicate (storage_target_id, repository_locator) on backup_repositories")
+	}
+
 	// 7. Test DOWN migration fails closed when backup_repositories exist
 	downErr := m.Migrate(7)
 	if downErr == nil {

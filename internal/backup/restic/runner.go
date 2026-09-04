@@ -21,6 +21,7 @@ type CommandRunner interface {
 	Init(ctx context.Context, target RepositoryTarget, password []byte) error
 	Probe(ctx context.Context, target RepositoryTarget, password []byte) error
 	Version(ctx context.Context) (string, error)
+	ValidateVersion(ctx context.Context) error
 }
 
 // ResticRunner implements CommandRunner by safely invoking the official Restic binary via exec.CommandContext.
@@ -30,7 +31,7 @@ type ResticRunner struct {
 }
 
 // NewResticRunner constructs a new ResticRunner.
-// If binaryPath is empty, it discovers the binary via RESTIC_BINARY_PATH env var, /usr/local/bin/restic, or PATH.
+// Production explicitly defaults to /usr/local/bin/restic unless overridden.
 func NewResticRunner(binaryPath string, logger *slog.Logger) *ResticRunner {
 	if logger == nil {
 		logger = slog.Default()
@@ -40,12 +41,8 @@ func NewResticRunner(binaryPath string, logger *slog.Logger) *ResticRunner {
 	if resolvedPath == "" {
 		if envPath := os.Getenv("RESTIC_BINARY_PATH"); envPath != "" {
 			resolvedPath = envPath
-		} else if _, err := os.Stat("/usr/local/bin/restic"); err == nil {
-			resolvedPath = "/usr/local/bin/restic"
-		} else if path, err := exec.LookPath("restic"); err == nil {
-			resolvedPath = path
 		} else {
-			resolvedPath = "restic"
+			resolvedPath = "/usr/local/bin/restic"
 		}
 	}
 
@@ -103,6 +100,20 @@ func (r *ResticRunner) Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// ValidateVersion executes "restic version" and asserts that it matches the exact required version (0.19.1).
+func (r *ResticRunner) ValidateVersion(ctx context.Context) error {
+	v, err := r.Version(ctx)
+	if err != nil {
+		return fmt.Errorf("restic binary validation failed: %w", err)
+	}
+
+	fields := strings.Fields(v)
+	if len(fields) < 2 || fields[0] != "restic" || fields[1] != "0.19.1" {
+		return fmt.Errorf("unsupported restic version %q: expected exact version 0.19.1", v)
+	}
+	return nil
+}
+
 // runCommand handles safe subprocess dispatch with child-only secret environment and sanitized output.
 func (r *ResticRunner) runCommand(
 	ctx context.Context,
@@ -110,20 +121,24 @@ func (r *ResticRunner) runCommand(
 	password []byte,
 	args []string,
 ) (string, error) {
-	// Defensive copy of password for process execution
+	// 1. Defensive copy of password for process execution
 	passwordCopy := make([]byte, len(password))
 	copy(passwordCopy, password)
 	defer secretcrypto.ZeroBytes(passwordCopy)
 
-	// Clean filtered base environment without ambient RESTIC_* or AWS_* secrets
+	// 2. Clean filtered base environment without ambient RESTIC_*, AWS_*, or proxy variables
 	baseEnv := filterCleanEnv(os.Environ())
+
+	// 3. Capture target sensitive environment and repository URL before process launch/cleanup
+	targetEnv := target.Env()
+	repoURL := target.ResticRepositoryURL()
 
 	// Child-only environment variables
 	childEnv := append(baseEnv,
-		"RESTIC_REPOSITORY="+target.ResticRepositoryURL(),
+		"RESTIC_REPOSITORY="+repoURL,
 		"RESTIC_PASSWORD="+string(passwordCopy),
 	)
-	if targetEnv := target.Env(); len(targetEnv) > 0 {
+	if len(targetEnv) > 0 {
 		childEnv = append(childEnv, targetEnv...)
 	}
 
@@ -137,17 +152,21 @@ func (r *ResticRunner) runCommand(
 	cmd.Stdout = stdoutLimit
 	cmd.Stderr = stderrLimit
 
+	// 4. Execute subprocess
 	runErr := cmd.Run()
 
-	// Zero password copies immediately after command returns
+	// 5. Sanitize stdout, stderr, and execution errors using original captured secrets BEFORE target.Cleanup()
+	stdoutStr := sanitizeSecrets(stdoutLimit.String(), string(password), targetEnv)
+	stderrStr := sanitizeSecrets(stderrLimit.String(), string(password), targetEnv)
+
+	// 6. Zeroize temporary password copy
 	secretcrypto.ZeroBytes(passwordCopy)
+
+	// 7. Clean up target resources and zero in-memory credentials
 	target.Cleanup()
 
-	stdoutStr := sanitizeSecrets(stdoutLimit.String(), string(password), target.Env())
-	stderrStr := sanitizeSecrets(stderrLimit.String(), string(password), target.Env())
-
 	if runErr != nil {
-		sanitizedErr := sanitizeSecrets(runErr.Error(), string(password), target.Env())
+		sanitizedErr := sanitizeSecrets(runErr.Error(), string(password), targetEnv)
 		if stderrStr != "" {
 			return stdoutStr, fmt.Errorf("%s: %s", sanitizedErr, stderrStr)
 		}
@@ -183,13 +202,17 @@ func (b *boundedBuffer) String() string {
 	return b.buf.String()
 }
 
-// filterCleanEnv removes any ambient RESTIC_* or AWS_* variables from the host environment.
+// filterCleanEnv removes any ambient RESTIC_*, AWS_*, or proxy variables from the host environment.
 func filterCleanEnv(env []string) []string {
 	var filtered []string
 	for _, e := range env {
 		upper := strings.ToUpper(e)
 		if strings.HasPrefix(upper, "RESTIC_") ||
-			strings.HasPrefix(upper, "AWS_") {
+			strings.HasPrefix(upper, "AWS_") ||
+			strings.HasPrefix(upper, "HTTP_PROXY=") ||
+			strings.HasPrefix(upper, "HTTPS_PROXY=") ||
+			strings.HasPrefix(upper, "ALL_PROXY=") ||
+			strings.HasPrefix(upper, "NO_PROXY=") {
 			continue
 		}
 		filtered = append(filtered, e)
@@ -197,7 +220,7 @@ func filterCleanEnv(env []string) []string {
 	return filtered
 }
 
-// sanitizeSecrets strips any sensitive password or secret keys from captured output/errors.
+// sanitizeSecrets strips any sensitive password, AWS secret access key, session token, or key fragments from captured output/errors.
 func sanitizeSecrets(input string, password string, envVars []string) string {
 	result := input
 	if password != "" {
@@ -206,7 +229,13 @@ func sanitizeSecrets(input string, password string, envVars []string) string {
 	for _, ev := range envVars {
 		parts := strings.SplitN(ev, "=", 2)
 		if len(parts) == 2 && parts[1] != "" {
-			result = strings.ReplaceAll(result, parts[1], "[REDACTED_SECRET]")
+			keyUpper := strings.ToUpper(parts[0])
+			if strings.Contains(keyUpper, "SECRET") ||
+				strings.Contains(keyUpper, "TOKEN") ||
+				strings.Contains(keyUpper, "PASSWORD") ||
+				strings.Contains(keyUpper, "KEY") {
+				result = strings.ReplaceAll(result, parts[1], "[REDACTED_SECRET]")
+			}
 		}
 	}
 	return result

@@ -19,6 +19,7 @@ type StorageTargetRepository interface {
 	CountArtifactsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error)
 	CountPlansByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error)
 	CountActiveJobsByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error)
+	CountRepositoriesByStorageTarget(ctx context.Context, orgID, targetID uuid.UUID) (int64, error)
 }
 
 // BackupRepository abstracts all database persistence operations for plans, jobs, runs, artifacts, and storage targets.

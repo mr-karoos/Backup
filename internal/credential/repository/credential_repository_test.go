@@ -658,3 +658,52 @@ func TestPostgresCredentialRepository_DeleteForOrganization(t *testing.T) {
 		}
 	})
 }
+
+func TestPostgresCredentialRepository_DeleteSystemResticKeyForOrganization(t *testing.T) {
+	ctx := context.Background()
+	orgID := uuid.New()
+	credID := uuid.New()
+	repo := NewPostgresCredentialRepository()
+
+	t.Run("successfully executes delete for system restic key", func(t *testing.T) {
+		spy := &spyExecQuerier{
+			rowsAffected: 1,
+		}
+
+		err := repo.DeleteSystemResticKeyForOrganization(ctx, spy, orgID, credID)
+		if err != nil {
+			t.Fatalf("expected nil error, got: %v", err)
+		}
+
+		if !strings.Contains(spy.capturedSQL, "type = 'restic_repository_key'") ||
+			!strings.Contains(spy.capturedSQL, "managed_by = 'system'") {
+			t.Errorf("query missing type/managed_by check: %s", spy.capturedSQL)
+		}
+	})
+
+	t.Run("returns ErrCredentialNotFound when 0 rows affected", func(t *testing.T) {
+		spy := &spyExecQuerier{
+			rowsAffected: 0,
+		}
+
+		err := repo.DeleteSystemResticKeyForOrganization(ctx, spy, orgID, credID)
+		if !errors.Is(err, domain.ErrCredentialNotFound) {
+			t.Fatalf("expected ErrCredentialNotFound, got: %v", err)
+		}
+	})
+
+	t.Run("converts fk_backup_repositories_credential to ErrCredentialInUse", func(t *testing.T) {
+		fkErr := &pgconn.PgError{
+			Code:           "23503",
+			ConstraintName: "fk_backup_repositories_credential",
+		}
+		spy := &spyExecQuerier{
+			execErr: fkErr,
+		}
+
+		err := repo.DeleteSystemResticKeyForOrganization(ctx, spy, orgID, credID)
+		if !errors.Is(err, domain.ErrCredentialInUse) {
+			t.Fatalf("expected ErrCredentialInUse, got: %v", err)
+		}
+	})
+}

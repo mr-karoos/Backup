@@ -263,13 +263,14 @@ func (s *StorageTargetService) UpdateStorageTarget(
 				}
 			}
 
-			// Immutability check: if target has historical artifacts, location fields (Bucket, Endpoint, Region, ForcePathStyle) CANNOT change
+			// Immutability check: if target has historical artifacts or restic repositories, location fields (Bucket, Endpoint, Region, ForcePathStyle, Prefix) CANNOT change
 			existingS3Config, err := domain.ParseS3TargetConfig(existing.Config)
 			if err == nil {
 				locationChanged := existingS3Config.Bucket != newS3Config.Bucket ||
 					existingS3Config.Endpoint != newS3Config.Endpoint ||
 					existingS3Config.Region != newS3Config.Region ||
-					existingS3Config.ForcePathStyle != newS3Config.ForcePathStyle
+					existingS3Config.ForcePathStyle != newS3Config.ForcePathStyle ||
+					existingS3Config.Prefix != newS3Config.Prefix
 
 				if locationChanged {
 					artifactCount, err := s.repo.CountArtifactsByStorageTarget(ctx, orgID, targetID)
@@ -277,6 +278,14 @@ func (s *StorageTargetService) UpdateStorageTarget(
 						return nil, domain.ErrBackupServiceUnavailable
 					}
 					if artifactCount > 0 {
+						return nil, domain.ErrStorageTargetLocationImmutable
+					}
+
+					repoCount, err := s.repo.CountRepositoriesByStorageTarget(ctx, orgID, targetID)
+					if err != nil {
+						return nil, domain.ErrBackupServiceUnavailable
+					}
+					if repoCount > 0 {
 						return nil, domain.ErrStorageTargetLocationImmutable
 					}
 				}
@@ -287,6 +296,17 @@ func (s *StorageTargetService) UpdateStorageTarget(
 				return nil, fmt.Errorf("%w: failed marshaling s3 config: %v", domain.ErrInvalidStorageTargetConfig, err)
 			}
 			updatedConfigBytes = cfgJSON
+		}
+	}
+
+	// If changing status away from active, verify no restic repositories depend on this target
+	if statusToUse != domain.StorageTargetStatusActive && existing.Status == domain.StorageTargetStatusActive {
+		repoCount, err := s.repo.CountRepositoriesByStorageTarget(ctx, orgID, targetID)
+		if err != nil {
+			return nil, domain.ErrBackupServiceUnavailable
+		}
+		if repoCount > 0 {
+			return nil, domain.ErrStorageTargetInUse
 		}
 	}
 
@@ -309,7 +329,7 @@ func (s *StorageTargetService) UpdateStorageTarget(
 	return updated, nil
 }
 
-// DeleteStorageTarget deletes a storage target, rejecting deletion if it is default or referenced by artifacts, plans, or active jobs.
+// DeleteStorageTarget deletes a storage target, rejecting deletion if it is default or referenced by artifacts, plans, active jobs, or restic repositories.
 func (s *StorageTargetService) DeleteStorageTarget(
 	ctx context.Context,
 	userRole orgDomain.Role,
@@ -358,6 +378,15 @@ func (s *StorageTargetService) DeleteStorageTarget(
 		return domain.ErrBackupServiceUnavailable
 	}
 	if jobCount > 0 {
+		return domain.ErrStorageTargetInUse
+	}
+
+	// Verify target is not in use by restic repositories
+	repoCount, err := s.repo.CountRepositoriesByStorageTarget(ctx, orgID, targetID)
+	if err != nil {
+		return domain.ErrBackupServiceUnavailable
+	}
+	if repoCount > 0 {
 		return domain.ErrStorageTargetInUse
 	}
 

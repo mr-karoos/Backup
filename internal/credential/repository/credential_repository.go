@@ -21,6 +21,7 @@ type CredentialRepository interface {
 	UpdateNameForOrganization(ctx context.Context, q database.Querier, orgID, credID uuid.UUID, name string) (*domain.CredentialMetadata, error)
 	UpdateEncryptedForOrganization(ctx context.Context, q database.Querier, cred *domain.Credential) (*domain.CredentialMetadata, error)
 	DeleteForOrganization(ctx context.Context, q database.Querier, orgID, credID uuid.UUID) error
+	DeleteSystemResticKeyForOrganization(ctx context.Context, q database.Querier, orgID, credID uuid.UUID) error
 }
 
 // PostgresCredentialRepository implements CredentialRepository using PostgreSQL.
@@ -315,6 +316,35 @@ func (r *PostgresCredentialRepository) DeleteForOrganization(ctx context.Context
 				return domain.ErrSystemCredentialRestricted
 			}
 		}
+		return domain.ErrCredentialNotFound
+	}
+
+	return nil
+}
+
+// DeleteSystemResticKeyForOrganization strictly deletes an internal system restic key credential.
+// Only deletes where type = 'restic_repository_key' AND managed_by = 'system' AND organization_id = orgID AND id = credID.
+// If referenced by a backup_repository, FK constraint violation returns domain.ErrCredentialInUse.
+func (r *PostgresCredentialRepository) DeleteSystemResticKeyForOrganization(ctx context.Context, q database.Querier, orgID, credID uuid.UUID) error {
+	const query = `
+		DELETE FROM credentials
+		WHERE id = $1 AND organization_id = $2
+		  AND type = 'restic_repository_key'
+		  AND managed_by = 'system'
+	`
+
+	cmdTag, err := q.Exec(ctx, query, credID, orgID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			if pgErr.ConstraintName == "fk_backup_repositories_credential" {
+				return domain.ErrCredentialInUse
+			}
+		}
+		return err
+	}
+
+	if cmdTag.RowsAffected() == 0 {
 		return domain.ErrCredentialNotFound
 	}
 

@@ -90,6 +90,14 @@ func (m *mockResticRunner) Probe(ctx context.Context, target restic.RepositoryTa
 	return m.probeErr
 }
 
+func (m *mockResticRunner) Version(ctx context.Context) (string, error) {
+	return "restic 0.19.1", nil
+}
+
+func (m *mockResticRunner) ValidateVersion(ctx context.Context) error {
+	return nil
+}
+
 type mockResticTarget struct {
 	tType   string
 	locator string
@@ -345,6 +353,37 @@ func TestRepositoryService_EnsureRepository(t *testing.T) {
 		_, err = svc.EnsureRepository(ctx, orgID, resID, targetID)
 		if !errors.Is(err, domain.ErrStorageTargetNotSupported) {
 			t.Errorf("expected ErrStorageTargetNotSupported, got: %v", err)
+		}
+	})
+
+	t.Run("detects physical locator drift on existing repository", func(t *testing.T) {
+		_, _, _, resolver, _, svc := setup()
+
+		// 1. Ensure initial repository
+		repo, err := svc.EnsureRepository(ctx, orgID, resID, targetID)
+		if err != nil {
+			t.Fatalf("ensure failed: %v", err)
+		}
+
+		// 2. Unchanged target probes successfully
+		probed, err := svc.EnsureRepository(ctx, orgID, resID, targetID)
+		if err != nil {
+			t.Fatalf("subsequent probe failed: %v", err)
+		}
+		if probed.ID != repo.ID {
+			t.Errorf("expected same repo ID, got %s vs %s", probed.ID, repo.ID)
+		}
+
+		// 3. Simulate locator drift by changing resolver target output
+		resolver.resolvedTarget = &mockResticTarget{
+			tType:   "s3",
+			locator: "different/drifted/locator/path",
+			url:     "s3:https://s3.amazonaws.com/bucket/different/drifted/locator/path",
+		}
+
+		_, err = svc.EnsureRepository(ctx, orgID, resID, targetID)
+		if !errors.Is(err, domain.ErrRepositoryTargetMismatch) {
+			t.Errorf("expected ErrRepositoryTargetMismatch on drifted locator, got: %v", err)
 		}
 	})
 }

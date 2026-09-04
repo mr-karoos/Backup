@@ -63,6 +63,10 @@ func NewLocalRepositoryTarget(storageRoot string, orgID, resourceID uuid.UUID) (
 	if err := os.MkdirAll(fullPath, 0700); err != nil {
 		return nil, fmt.Errorf("failed creating local repository directory: %w", err)
 	}
+	// Enforce 0700 permissions even if the directory already existed with more permissive mode
+	if err := os.Chmod(fullPath, 0700); err != nil {
+		return nil, fmt.Errorf("failed setting permissions on local repository directory: %w", err)
+	}
 
 	return &LocalRepositoryTarget{
 		storageRoot: cleanRoot,
@@ -104,6 +108,7 @@ type S3RepositoryTarget struct {
 	secretAccessKey []byte
 	sessionToken    []byte
 	region          string
+	proxy           *SecureResticProxy
 }
 
 // NewS3RepositoryTarget constructs and validates an S3RepositoryTarget reusing A.1 S3 security rules.
@@ -136,9 +141,10 @@ func NewS3RepositoryTarget(
 
 	var endpointHostPort string
 	var useHTTPS bool = true
+	var proxy *SecureResticProxy
 
 	if strings.TrimSpace(s3Cfg.Endpoint) != "" {
-		u, err := policy.ValidateEndpointURL(s3Cfg.Endpoint)
+		u, err := policy.ValidateEndpoint(s3Cfg.Endpoint)
 		if err != nil {
 			return nil, fmt.Errorf("invalid s3 endpoint: %w", err)
 		}
@@ -146,12 +152,22 @@ func NewS3RepositoryTarget(
 			useHTTPS = false
 		}
 		endpointHostPort = u.Host
+
+		// Start local secure loopback proxy for this target to enforce connection-time SSRF and DNS-rebinding policy
+		p, err := StartSecureResticProxy(policy)
+		if err != nil {
+			return nil, fmt.Errorf("failed starting secure restic proxy: %w", err)
+		}
+		proxy = p
 	}
 
 	// 2. Enforce strictly scoped namespace: organizations/{orgID}/resources/{resourceID}/restic
 	// Optional prefix may only act as base prefix if it doesn't escape
 	cleanBasePrefix := strings.Trim(strings.TrimSpace(s3Cfg.Prefix), "/")
 	for strings.Contains(cleanBasePrefix, "..") {
+		if proxy != nil {
+			_ = proxy.Close()
+		}
 		return nil, errors.New("invalid s3 prefix traversal detected")
 	}
 
@@ -189,6 +205,7 @@ func NewS3RepositoryTarget(
 		accessKeyID:     accessKeyID,
 		secretAccessKey: []byte(secretAccessKey),
 		region:          s3Cfg.Region,
+		proxy:           proxy,
 	}
 
 	if sessionToken != nil && len(*sessionToken) > 0 {
@@ -221,10 +238,17 @@ func (t *S3RepositoryTarget) Env() []string {
 	if len(t.sessionToken) > 0 {
 		env = append(env, "AWS_SESSION_TOKEN="+string(t.sessionToken))
 	}
+	if t.proxy != nil {
+		env = append(env, t.proxy.Env()...)
+	}
 	return env
 }
 
 func (t *S3RepositoryTarget) Cleanup() {
+	if t.proxy != nil {
+		_ = t.proxy.Close()
+		t.proxy = nil
+	}
 	secretcrypto.ZeroBytes(t.secretAccessKey)
 	t.secretAccessKey = nil
 	if len(t.sessionToken) > 0 {
