@@ -3,6 +3,7 @@ package restic
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -139,35 +140,44 @@ func NewS3RepositoryTarget(
 		PrivateAllowlist:  privateAllowlist,
 	}
 
+	// Start local secure loopback proxy for ALL S3 targets (both standard AWS and custom endpoints)
+	// to enforce connection-time SSRF and DNS-rebinding protection.
+	proxy, err := StartSecureResticProxy(policy)
+	if err != nil {
+		return nil, fmt.Errorf("failed starting secure restic proxy: %w", err)
+	}
+
+	// 2. Validate region
+	region := s3Cfg.Region
+	if region == "" {
+		region = "us-east-1"
+	}
+	if !domain.IsValidS3Region(region) {
+		_ = proxy.Close()
+		return nil, fmt.Errorf("invalid s3 region %q: must match [a-z0-9][a-z0-9-]{0,62}", s3Cfg.Region)
+	}
+
+	var scheme string
 	var endpointHostPort string
-	var useHTTPS bool = true
-	var proxy *SecureResticProxy
 
 	if strings.TrimSpace(s3Cfg.Endpoint) != "" {
 		u, err := policy.ValidateEndpoint(s3Cfg.Endpoint)
 		if err != nil {
+			_ = proxy.Close()
 			return nil, fmt.Errorf("invalid s3 endpoint: %w", err)
 		}
-		if u.Scheme == "http" {
-			useHTTPS = false
-		}
+		scheme = u.Scheme
 		endpointHostPort = u.Host
-
-		// Start local secure loopback proxy for this target to enforce connection-time SSRF and DNS-rebinding policy
-		p, err := StartSecureResticProxy(policy)
-		if err != nil {
-			return nil, fmt.Errorf("failed starting secure restic proxy: %w", err)
-		}
-		proxy = p
+	} else {
+		scheme = "https"
+		endpointHostPort = fmt.Sprintf("s3.%s.amazonaws.com", region)
 	}
 
-	// 2. Enforce strictly scoped namespace: organizations/{orgID}/resources/{resourceID}/restic
+	// 3. Enforce strictly scoped namespace: organizations/{orgID}/resources/{resourceID}/restic
 	// Optional prefix may only act as base prefix if it doesn't escape
 	cleanBasePrefix := strings.Trim(strings.TrimSpace(s3Cfg.Prefix), "/")
 	for strings.Contains(cleanBasePrefix, "..") {
-		if proxy != nil {
-			_ = proxy.Close()
-		}
+		_ = proxy.Close()
 		return nil, errors.New("invalid s3 prefix traversal detected")
 	}
 
@@ -178,23 +188,18 @@ func NewS3RepositoryTarget(
 		relNamespace = path.Join("organizations", orgID.String(), "resources", resourceID.String(), "restic")
 	}
 
-	// 3. Construct Restic S3 repository URL:
-	// If custom endpoint: s3:http(s)://endpoint/bucket/prefix
-	// If standard AWS: s3:s3.amazonaws.com/bucket/prefix or s3:https://s3.region.amazonaws.com/bucket/prefix
-	var repoURL string
-	if endpointHostPort != "" {
-		scheme := "https"
-		if !useHTTPS {
-			scheme = "http"
-		}
-		repoURL = fmt.Sprintf("s3:%s://%s/%s/%s", scheme, endpointHostPort, s3Cfg.Bucket, relNamespace)
-	} else {
-		region := s3Cfg.Region
-		if region == "" {
-			region = "us-east-1"
-		}
-		repoURL = fmt.Sprintf("s3:https://s3.%s.amazonaws.com/%s/%s", region, s3Cfg.Bucket, relNamespace)
+	// 4. Construct Restic S3 repository URL using safe net/url construction
+	targetURL := &url.URL{
+		Scheme: scheme,
+		Host:   endpointHostPort,
+		Path:   path.Join("/", s3Cfg.Bucket, relNamespace),
 	}
+	if targetURL.User != nil || targetURL.RawQuery != "" || targetURL.Fragment != "" {
+		_ = proxy.Close()
+		return nil, errors.New("unsafe repository URL parameters detected")
+	}
+
+	repoURL := "s3:" + targetURL.String()
 
 	target := &S3RepositoryTarget{
 		targetType:      targetType,
@@ -204,7 +209,7 @@ func NewS3RepositoryTarget(
 		resticRepoURL:   repoURL,
 		accessKeyID:     accessKeyID,
 		secretAccessKey: []byte(secretAccessKey),
-		region:          s3Cfg.Region,
+		region:          region,
 		proxy:           proxy,
 	}
 

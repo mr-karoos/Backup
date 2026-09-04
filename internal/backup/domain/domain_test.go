@@ -293,3 +293,62 @@ func TestValidateTargetSpec_WebsiteFiles(t *testing.T) {
 		}
 	})
 }
+
+func TestValidateS3TargetConfig_RegionSecurity(t *testing.T) {
+	validRegions := []string{
+		"us-east-1",
+		"eu-central-1",
+		"us-gov-west-1",
+		"auto",
+		"ap-southeast-2",
+		"a",
+		"a1-b2-c3",
+	}
+
+	for _, reg := range validRegions {
+		cfg := &S3TargetConfig{
+			Bucket: "valid-bucket",
+			Region: reg,
+		}
+		if err := ValidateS3TargetConfig(cfg); err != nil {
+			t.Errorf("expected valid region %q to be accepted, got error: %v", reg, err)
+		}
+	}
+
+	invalidRegions := []struct {
+		name   string
+		region string
+	}{
+		{"empty", ""},
+		{"malicious url authority injection", "us-east-1.amazonaws.com@169.254.169.254/"},
+		{"slash delimiter", "us-east-1/test"},
+		{"backslash delimiter", `us-east-1\test`},
+		{"at sign", "us-east-1@badhost"},
+		{"colon port", "us-east-1:8080"},
+		{"query param", "us-east-1?param=val"},
+		{"fragment", "us-east-1#frag"},
+		{"ipv6 bracket", "[::1]"},
+		{"url encoding", "us%20east"},
+		{"spaces", "us east 1"},
+		{"leading space", " us-east-1"},
+		{"trailing space", "us-east-1 "},
+		{"control character null", "us-east-1\x00"},
+		{"control character crlf", "us-east-1\r\n"},
+		{"uppercase characters", "US-EAST-1"},
+		{"dot in region", "us.east.1"},
+		{"starts with hyphen", "-us-east-1"},
+		{"too long", strings.Repeat("a", 64)},
+	}
+
+	for _, tc := range invalidRegions {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &S3TargetConfig{
+				Bucket: "valid-bucket",
+				Region: tc.region,
+			}
+			if err := ValidateS3TargetConfig(cfg); err == nil {
+				t.Errorf("SECURITY DEFECT: expected region %q to be rejected, but was accepted", tc.region)
+			}
+		})
+	}
+}

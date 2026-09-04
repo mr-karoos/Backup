@@ -199,6 +199,24 @@ func TestResticRunner_RedactionOrder(t *testing.T) {
 	}
 }
 
+func TestResticRunner_EnvironmentSeparation(t *testing.T) {
+	orig := os.Getenv("RESTIC_BINARY_PATH")
+	os.Setenv("RESTIC_BINARY_PATH", "/malicious/override/binary")
+	defer os.Setenv("RESTIC_BINARY_PATH", orig)
+
+	// NewResticRunner with empty path MUST default to /usr/local/bin/restic and NEVER read RESTIC_BINARY_PATH
+	runner := NewResticRunner("", nil)
+	if runner.binaryPath != "/usr/local/bin/restic" {
+		t.Fatalf("SECURITY FLAW: NewResticRunner inspected RESTIC_BINARY_PATH internally: got %q, expected /usr/local/bin/restic", runner.binaryPath)
+	}
+
+	// Caller may explicitly supply a path
+	custom := NewResticRunner("/opt/custom/restic", nil)
+	if custom.binaryPath != "/opt/custom/restic" {
+		t.Fatalf("expected explicit path to be retained, got %q", custom.binaryPath)
+	}
+}
+
 func TestResticRunner_ValidateVersion(t *testing.T) {
 	ctx := context.Background()
 
@@ -207,6 +225,36 @@ func TestResticRunner_ValidateVersion(t *testing.T) {
 		err := runner.ValidateVersion(ctx)
 		if err == nil {
 			t.Errorf("expected error for non-existent binary")
+		}
+	})
+
+	t.Run("parseAndValidateResticVersion exact matching", func(t *testing.T) {
+		validCases := []string{
+			"restic 0.19.1",
+			"restic 0.19.1 compiled with go1.24.0 on linux/amd64",
+			"restic 0.19.1 compiled with go1.26.4 on windows/amd64",
+		}
+		for _, vc := range validCases {
+			if err := parseAndValidateResticVersion(vc); err != nil {
+				t.Errorf("expected %q to be accepted, got error: %v", vc, err)
+			}
+		}
+
+		invalidCases := []string{
+			"restic 0.19.0 compiled with go1.24.0 on linux/amd64",
+			"restic 0.19.10 compiled with go1.24.0 on linux/amd64",
+			"restic 1.0.0 compiled with go1.24.0 on linux/amd64",
+			"restic 0.18.0",
+			"restic 0.19.2",
+			"other 0.19.1",
+			"",
+			"   ",
+			"restic",
+		}
+		for _, ic := range invalidCases {
+			if err := parseAndValidateResticVersion(ic); err == nil {
+				t.Errorf("expected %q to be rejected, but was accepted", ic)
+			}
 		}
 	})
 }

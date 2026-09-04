@@ -247,7 +247,7 @@ func TestMigrations_StepA3_Integration(t *testing.T) {
 	_ = m.Force(8)
 
 	// Delete system credentials
-	_, err = connPool.Exec(ctx, "DELETE FROM credentials WHERE id IN ($1, $2)", systemCredA, systemCredB)
+	_, err = connPool.Exec(ctx, "DELETE FROM credentials WHERE id IN ($1, $2, $3)", systemCredA, systemCredB, systemCredC)
 	if err != nil {
 		t.Fatalf("failed deleting system credentials: %v", err)
 	}

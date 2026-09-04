@@ -273,9 +273,18 @@ func run() error {
 	storageTargetService := backupService.NewStorageTargetService(backupRepository, vaultService, endpointPolicy, log)
 
 	// 14b. Initialize Restic Repository Subsystem (Future Phase A Step A.3)
-	resticBinPath := "/usr/local/bin/restic"
-	if p := os.Getenv("RESTIC_BINARY_PATH"); p != "" {
-		resticBinPath = p
+	var resticBinPath string
+	if cfg.AppEnv == config.EnvProduction || cfg.AppEnv == config.EnvStaging {
+		if p := os.Getenv("RESTIC_BINARY_PATH"); p != "" {
+			return fmt.Errorf("RESTIC_BINARY_PATH environment override is strictly forbidden in %s environment", cfg.AppEnv)
+		}
+		resticBinPath = "/usr/local/bin/restic"
+	} else {
+		if p := os.Getenv("RESTIC_BINARY_PATH"); p != "" {
+			resticBinPath = p
+		} else {
+			resticBinPath = "/usr/local/bin/restic"
+		}
 	}
 	resticRunner := restic.NewResticRunner(resticBinPath, log)
 
@@ -283,8 +292,7 @@ func run() error {
 	resticVerCtx, resticVerCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	if err := resticRunner.ValidateVersion(resticVerCtx); err != nil {
 		resticVerCancel()
-		log.Error("restic binary validation failed at startup", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("restic binary validation failed at startup: %w", err)
 	}
 	resticVerCancel()
 	resticTargetResolver := restic.NewTargetResolver(

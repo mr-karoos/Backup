@@ -31,7 +31,9 @@ type ResticRunner struct {
 }
 
 // NewResticRunner constructs a new ResticRunner.
-// Production explicitly defaults to /usr/local/bin/restic unless overridden.
+// If binaryPath is specified, it uses it. If blank, it defaults to the trusted container path /usr/local/bin/restic.
+// It NEVER reads environment variables (such as RESTIC_BINARY_PATH) directly;
+// the decision of binary selection is strictly owned by the caller/configuration.
 func NewResticRunner(binaryPath string, logger *slog.Logger) *ResticRunner {
 	if logger == nil {
 		logger = slog.Default()
@@ -39,11 +41,7 @@ func NewResticRunner(binaryPath string, logger *slog.Logger) *ResticRunner {
 
 	resolvedPath := strings.TrimSpace(binaryPath)
 	if resolvedPath == "" {
-		if envPath := os.Getenv("RESTIC_BINARY_PATH"); envPath != "" {
-			resolvedPath = envPath
-		} else {
-			resolvedPath = "/usr/local/bin/restic"
-		}
+		resolvedPath = "/usr/local/bin/restic"
 	}
 
 	return &ResticRunner{
@@ -100,18 +98,22 @@ func (r *ResticRunner) Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// parseAndValidateResticVersion parses the output of "restic version" and asserts exact semantic version 0.19.1.
+func parseAndValidateResticVersion(output string) error {
+	fields := strings.Fields(strings.TrimSpace(output))
+	if len(fields) < 2 || fields[0] != "restic" || fields[1] != "0.19.1" {
+		return fmt.Errorf("unsupported restic version %q: expected exact version 0.19.1", output)
+	}
+	return nil
+}
+
 // ValidateVersion executes "restic version" and asserts that it matches the exact required version (0.19.1).
 func (r *ResticRunner) ValidateVersion(ctx context.Context) error {
 	v, err := r.Version(ctx)
 	if err != nil {
 		return fmt.Errorf("restic binary validation failed: %w", err)
 	}
-
-	fields := strings.Fields(v)
-	if len(fields) < 2 || fields[0] != "restic" || fields[1] != "0.19.1" {
-		return fmt.Errorf("unsupported restic version %q: expected exact version 0.19.1", v)
-	}
-	return nil
+	return parseAndValidateResticVersion(v)
 }
 
 // runCommand handles safe subprocess dispatch with child-only secret environment and sanitized output.

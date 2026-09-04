@@ -1,6 +1,7 @@
 package restic
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -127,10 +128,24 @@ func TestS3RepositoryTarget(t *testing.T) {
 			t.Errorf("missing AWS env credentials in %+v", env)
 		}
 
-		// Verify cleanup zeroes secret
+		// Verify that standard AWS target also receives SecureResticProxy environment
+		hasProxy := false
+		for _, e := range env {
+			if strings.HasPrefix(e, "HTTP_PROXY=http://127.0.0.1:") {
+				hasProxy = true
+			}
+		}
+		if !hasProxy {
+			t.Errorf("SECURITY DEFECT: standard AWS target missing SecureResticProxy environment: %+v", env)
+		}
+
+		// Verify cleanup zeroes secret and closes proxy
 		target.Cleanup()
 		if len(target.secretAccessKey) != 0 {
 			t.Errorf("expected secretAccessKey to be cleared after cleanup")
+		}
+		if target.proxy != nil {
+			t.Errorf("expected proxy to be cleared after cleanup")
 		}
 	})
 
@@ -279,5 +294,67 @@ func TestS3RepositoryTarget(t *testing.T) {
 			t.Fatalf("expected success for allowlisted private IPv4 endpoint, got: %v", err)
 		}
 		target.Cleanup()
+	})
+
+	t.Run("rejects malicious Region injection attempts", func(t *testing.T) {
+		maliciousRegions := []string{
+			"us-east-1.amazonaws.com@169.254.169.254/",
+			"us-east-1/escape",
+			`us-east-1\escape`,
+			"us-east-1:8080",
+			"us-east-1?param=1",
+			"us-east-1#frag",
+			"[::1]",
+			"us%20east",
+			"us-east-1\x00",
+			"US-EAST-1",
+		}
+
+		for _, reg := range maliciousRegions {
+			cfg := domain.S3TargetConfig{
+				Bucket: "my-bucket",
+				Region: reg,
+			}
+			_, err := NewS3RepositoryTarget("s3", cfg, orgID, resourceID, "KEY", "SECRET", nil, false, nil)
+			if err == nil {
+				t.Errorf("SECURITY DEFECT: expected region %q to be rejected, but was accepted", reg)
+			}
+		}
+	})
+
+	t.Run("proves no URL delimiters in Region can produce userinfo, alternate host, query, or fragment", func(t *testing.T) {
+		cfg := domain.S3TargetConfig{
+			Bucket: "valid-bucket",
+			Region: "eu-central-1",
+		}
+		target, err := NewS3RepositoryTarget("s3", cfg, orgID, resourceID, "KEY", "SECRET", nil, false, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		defer target.Cleanup()
+
+		rawURL := target.ResticRepositoryURL()
+		if !strings.HasPrefix(rawURL, "s3:") {
+			t.Fatalf("expected s3: prefix on url: %s", rawURL)
+		}
+
+		cleanURL := strings.TrimPrefix(rawURL, "s3:")
+		u, err := url.Parse(cleanURL)
+		if err != nil {
+			t.Fatalf("failed parsing generated url: %v", err)
+		}
+
+		if u.User != nil {
+			t.Errorf("SECURITY DEFECT: generated URL contains userinfo: %v", u.User)
+		}
+		if u.Host != "s3.eu-central-1.amazonaws.com" {
+			t.Errorf("expected host s3.eu-central-1.amazonaws.com, got: %s", u.Host)
+		}
+		if u.RawQuery != "" {
+			t.Errorf("SECURITY DEFECT: generated URL contains query: %s", u.RawQuery)
+		}
+		if u.Fragment != "" {
+			t.Errorf("SECURITY DEFECT: generated URL contains fragment: %s", u.Fragment)
+		}
 	})
 }

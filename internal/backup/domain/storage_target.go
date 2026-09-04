@@ -78,6 +78,12 @@ type S3TargetConfig struct {
 }
 
 var s3BucketRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+var s3RegionRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// IsValidS3Region checks if a region string is a safe, opaque region token matching ^[a-z0-9][a-z0-9-]{0,62}$.
+func IsValidS3Region(region string) bool {
+	return s3RegionRegex.MatchString(region)
+}
 
 // ValidateS3TargetConfig validates the non-secret S3 target parameters.
 func ValidateS3TargetConfig(cfg *S3TargetConfig) error {
@@ -94,11 +100,12 @@ func ValidateS3TargetConfig(cfg *S3TargetConfig) error {
 	}
 	cfg.Bucket = bucket
 
-	region := strings.TrimSpace(cfg.Region)
-	if region == "" {
+	if cfg.Region == "" {
 		return errors.New("s3 region is required")
 	}
-	cfg.Region = region
+	if !IsValidS3Region(cfg.Region) {
+		return errors.New("invalid s3 region: must be 1-63 characters, lowercase letters, numbers, or hyphens")
+	}
 
 	endpoint := strings.TrimSpace(cfg.Endpoint)
 	if endpoint != "" {
