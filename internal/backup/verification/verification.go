@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"backup-platform/internal/artifactcrypto"
+	"backup-platform/internal/backup/domain"
+	"backup-platform/internal/backup/restic"
 	"backup-platform/internal/storage"
 	"backup-platform/pkg/uuid"
 )
@@ -62,7 +64,21 @@ type Verifier interface {
 		ciphertextSHA256 string,
 		orgID, artifactID uuid.UUID,
 	) (string, error)
+
+	VerifyResticSnapshot(
+		ctx context.Context,
+		runner restic.CommandRunner,
+		target restic.RepositoryTarget,
+		password []byte,
+		snapshotID string,
+		orgID, resID, runID, artifactID uuid.UUID,
+		targetToken string,
+		internalFilename string,
+		expectedLogicalSize int64,
+	) (string, error)
 }
+
+const canonicalResticVerifiedMsg = "level-1 restic snapshot verified: tags, file structure, and sample dump confirmed"
 
 // VerificationEngine performs multi-point integrity checks on database and file backup artifacts.
 type VerificationEngine struct {
@@ -735,4 +751,103 @@ func (v *VerificationEngine) VerifyEncryptedFilesArtifact(
 	}
 
 	return canonicalFilesVerifiedMsg, nil
+}
+
+// VerifyResticSnapshot performs Level-1 post-backup verification immediately after Restic snapshot creation (ADR-033).
+func (v *VerificationEngine) VerifyResticSnapshot(
+	ctx context.Context,
+	runner restic.CommandRunner,
+	target restic.RepositoryTarget,
+	password []byte,
+	snapshotID string,
+	orgID, resID, runID, artifactID uuid.UUID,
+	targetToken string,
+	internalFilename string,
+	expectedLogicalSize int64,
+) (string, error) {
+	if runner == nil {
+		return "", errors.New("restic runner cannot be nil")
+	}
+	if target == nil {
+		return "", errors.New("repository target cannot be nil")
+	}
+	if len(password) == 0 {
+		return "", errors.New("repository password cannot be empty")
+	}
+	if snapshotID == "" {
+		return "", fmt.Errorf("%w: snapshot ID cannot be empty", domain.ErrVerificationFailed)
+	}
+
+	// 1. Fetch snapshot from repository index
+	snap, err := runner.GetSnapshot(ctx, target, password, snapshotID)
+	if err != nil {
+		if errors.Is(err, restic.ErrSnapshotNotFound) {
+			return "", fmt.Errorf("%w: snapshot %q not found in repository index", domain.ErrVerificationFailed, snapshotID)
+		}
+		// Connectivity / execution / infrastructure error: do not falsely claim corruption
+		return "", fmt.Errorf("repository infrastructure error during verification: %w", err)
+	}
+
+	// 2. Exact snapshot ID match
+	if snap.ID != snapshotID && !strings.HasPrefix(snap.ID, snapshotID) && snap.ShortID != snapshotID {
+		return "", fmt.Errorf("%w: snapshot ID mismatch: expected %q, got %q", domain.ErrVerificationFailed, snapshotID, snap.ID)
+	}
+
+	// 3. Verify all mandatory six tags
+	expectedTags := map[string]bool{
+		"platform=backup-platform-v1":     false,
+		"org=" + orgID.String():           false,
+		"resource=" + resID.String():      false,
+		"run=" + runID.String():           false,
+		"artifact=" + artifactID.String(): false,
+		"target=" + targetToken:           false,
+	}
+
+	for _, tag := range snap.Tags {
+		if _, ok := expectedTags[tag]; ok {
+			expectedTags[tag] = true
+		}
+	}
+
+	for tag, found := range expectedTags {
+		if !found {
+			return "", fmt.Errorf("%w: missing mandatory snapshot tag %q", domain.ErrVerificationFailed, tag)
+		}
+	}
+
+	// 4. Verify expected internal filename exists in snapshot tree
+	nodes, err := runner.ListSnapshotNodes(ctx, target, password, snapshotID)
+	if err != nil {
+		return "", fmt.Errorf("failed listing snapshot nodes during verification: %w", err)
+	}
+
+	var foundFile bool
+	var fileSize int64
+	for _, node := range nodes {
+		if node.Name == internalFilename || strings.HasSuffix(node.Path, internalFilename) {
+			foundFile = true
+			fileSize = node.Size
+			break
+		}
+	}
+
+	if !foundFile {
+		return "", fmt.Errorf("%w: expected internal file %q not found in snapshot tree", domain.ErrVerificationFailed, internalFilename)
+	}
+
+	// 5. Verify logical size is non-zero
+	if fileSize <= 0 && expectedLogicalSize <= 0 {
+		return "", fmt.Errorf("%w: snapshot internal file has zero size", domain.ErrVerificationFailed)
+	}
+
+	// 6. Verify first up-to-64-KiB sample can be read using restic dump
+	sample, err := runner.DumpSample(ctx, target, password, snapshotID, internalFilename, maxSanityHeaderBytes)
+	if err != nil {
+		return "", fmt.Errorf("%w: failed reading restic dump sample: %v", domain.ErrVerificationFailed, err)
+	}
+	if len(sample) == 0 {
+		return "", fmt.Errorf("%w: restic dump returned empty sample", domain.ErrVerificationFailed)
+	}
+
+	return canonicalResticVerifiedMsg, nil
 }

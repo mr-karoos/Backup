@@ -53,7 +53,7 @@ type BackupHistoryManager interface {
 type BackupArtifactManager interface {
 	ListArtifacts(ctx context.Context, role orgDomain.Role, orgID uuid.UUID) ([]*domain.BackupArtifact, error)
 	GetArtifact(ctx context.Context, role orgDomain.Role, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, error)
-	OpenArtifactDownload(ctx context.Context, role orgDomain.Role, orgID, artifactID uuid.UUID) (*domain.BackupArtifact, io.ReadCloser, error)
+	OpenArtifactDownload(ctx context.Context, role orgDomain.Role, orgID, artifactID uuid.UUID) (*service.DownloadDescriptor, error)
 	RecordDownloadAudit(ctx context.Context, orgID, userID, artifactID uuid.UUID, sizeBytes int64, clientIP, userAgent string) error
 	DeleteArtifact(ctx context.Context, role orgDomain.Role, orgID, userID, artifactID uuid.UUID, clientIP, userAgent string) error
 }
@@ -740,7 +740,7 @@ func (h *Handler) DownloadBackupArtifact(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	artifact, reader, err := h.artifactService.OpenArtifactDownload(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, artifactID)
+	desc, err := h.artifactService.OpenArtifactDownload(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, artifactID)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrUnauthorizedRole):
@@ -753,28 +753,27 @@ func (h *Handler) DownloadBackupArtifact(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	defer reader.Close()
+	defer desc.Reader.Close()
 
-	safeName := SafeArtifactFilename(artifact.TargetName, artifact.Format, artifact.ID)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, safeName))
-	w.Header().Set("Content-Type", "application/gzip")
-	if artifact.SizeBytes > 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(artifact.SizeBytes, 10))
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, desc.Filename))
+	w.Header().Set("Content-Type", desc.ContentType)
+	if desc.OptionalContentLength != nil && *desc.OptionalContentLength > 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(*desc.OptionalContentLength, 10))
 	}
 	w.WriteHeader(http.StatusOK)
 
-	written, copyErr := io.Copy(w, reader)
-	if copyErr != nil || (artifact.SizeBytes > 0 && written != artifact.SizeBytes) {
+	written, copyErr := io.Copy(w, desc.Reader)
+	if copyErr != nil || (desc.OptionalContentLength != nil && *desc.OptionalContentLength > 0 && written != *desc.OptionalContentLength) {
 		reqLogger.Error("interrupted while streaming artifact download")
 		return
 	}
 
 	clientIP := extractClientIP(r)
 	userAgent := sanitizeUserAgent(r.UserAgent())
-	if auditErr := h.artifactService.RecordDownloadAudit(r.Context(), tenantCtx.OrganizationID, tenantCtx.UserID, artifact.ID, artifact.SizeBytes, clientIP, userAgent); auditErr != nil {
+	if auditErr := h.artifactService.RecordDownloadAudit(r.Context(), tenantCtx.OrganizationID, tenantCtx.UserID, desc.Artifact.ID, written, clientIP, userAgent); auditErr != nil {
 		reqLogger.Error("failed recording audit log for artifact download",
 			slog.String("org_id", tenantCtx.OrganizationID.String()),
-			slog.String("artifact_id", artifact.ID.String()),
+			slog.String("artifact_id", desc.Artifact.ID.String()),
 		)
 	}
 }

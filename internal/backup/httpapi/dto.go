@@ -1,9 +1,6 @@
 package httpapi
 
 import (
-	"fmt"
-	"path"
-	"strings"
 	"time"
 
 	"backup-platform/internal/backup/domain"
@@ -282,11 +279,12 @@ type BackupArtifactResponse struct {
 	RunID              uuid.UUID                 `json:"run_id"`
 	ResourceID         uuid.UUID                 `json:"resource_id"`
 	ArtifactName       string                    `json:"artifact_name"`
-	SizeBytes          int64                     `json:"size_bytes"`
-	ChecksumSHA256     string                    `json:"checksum_sha256"`
+	SizeBytes          *int64                    `json:"size_bytes"`
+	ChecksumSHA256     *string                   `json:"checksum_sha256"`
 	CompressionType    string                    `json:"compression_type"`
 	VerificationStatus domain.VerificationStatus `json:"verification_status"`
 	VerifiedAt         *time.Time                `json:"verified_at"`
+	LogicalSizeBytes   *int64                    `json:"logical_size_bytes,omitempty"`
 	CreatedAt          time.Time                 `json:"created_at"`
 }
 
@@ -295,57 +293,44 @@ func toBackupArtifactResponse(a *domain.BackupArtifact) *BackupArtifactResponse 
 		return nil
 	}
 
+	var sizeBytes *int64
+	var checksumSHA256 *string
+	var logicalSizeBytes *int64
 	compType := "gzip"
-	if a.Format == domain.ArtifactFormatSQLGzip || a.Format == domain.ArtifactFormatTarGzip {
-		compType = "gzip"
+
+	if a.Format == domain.ArtifactFormatResticSnapshot {
+		compType = "restic"
+		logicalSizeBytes = a.LogicalSizeBytes
+	} else {
+		s := a.SizeBytes
+		sizeBytes = &s
+		h := a.ChecksumHash
+		checksumSHA256 = &h
 	}
 
 	return &BackupArtifactResponse{
 		ID:                 a.ID,
 		RunID:              a.RunID,
 		ResourceID:         a.ResourceID,
-		ArtifactName:       SafeArtifactFilename(a.TargetName, a.Format, a.ID),
-		SizeBytes:          a.SizeBytes,
-		ChecksumSHA256:     a.ChecksumHash,
+		ArtifactName:       SafeArtifactFilenameWithType(a.TargetName, a.Format, a.ArtifactType, a.ID),
+		SizeBytes:          sizeBytes,
+		ChecksumSHA256:     checksumSHA256,
 		CompressionType:    compType,
 		VerificationStatus: a.VerificationStatus,
 		VerifiedAt:         a.VerifiedAt,
+		LogicalSizeBytes:   logicalSizeBytes,
 		CreatedAt:          a.CreatedAt,
 	}
 }
 
+// SafeArtifactFilenameWithType generates a deterministic, safe, logical filename for a backup artifact with type awareness.
+func SafeArtifactFilenameWithType(targetName string, format domain.ArtifactFormat, artType domain.ArtifactType, artifactID uuid.UUID) string {
+	return domain.SafeArtifactFilenameWithType(targetName, format, artType, artifactID)
+}
+
 // SafeArtifactFilename generates a deterministic, safe, logical filename for a backup artifact.
-// It maps database targets (e.g. "prod_db" -> "prod_db.sql.gz") and website file paths
-// (e.g. "/var/www/example/public_html" -> "public_html.tar.gz") without exposing internal
-// storage filesystem paths, storage references, or directory structures.
 func SafeArtifactFilename(targetName string, format domain.ArtifactFormat, artifactID uuid.UUID) string {
-	ext := ".bin"
-	switch format {
-	case domain.ArtifactFormatSQLGzip:
-		ext = ".sql.gz"
-	case domain.ArtifactFormatTarGzip:
-		ext = ".tar.gz"
-	}
-
-	clean := strings.TrimSpace(targetName)
-	clean = strings.ReplaceAll(clean, "\\", "/")
-	clean = path.Base(clean)
-	clean = strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.' {
-			return r
-		}
-		return '_'
-	}, clean)
-
-	clean = strings.Trim(clean, "._-")
-	if clean == "" {
-		return fmt.Sprintf("backup_%s%s", artifactID.String(), ext)
-	}
-
-	if strings.HasSuffix(clean, ext) {
-		return clean
-	}
-	return fmt.Sprintf("%s%s", clean, ext)
+	return domain.SafeArtifactFilename(targetName, format, artifactID)
 }
 
 // VerificationDetails defines the strict 4-field public details structure matching Section 14.5 of docs/API_DESIGN.md.

@@ -2,15 +2,19 @@ package service
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
 	"backup-platform/internal/artifactcrypto"
 	auditDomain "backup-platform/internal/audit/domain"
 	"backup-platform/internal/backup/domain"
+	"backup-platform/internal/backup/restic"
+	credDomain "backup-platform/internal/credential/domain"
 	orgDomain "backup-platform/internal/organization/domain"
 	"backup-platform/internal/storage"
 	"backup-platform/pkg/uuid"
@@ -258,20 +262,20 @@ func TestArtifactService_OpenArtifactDownload(t *testing.T) {
 
 		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil)
 
-		art, reader, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleMember, orgID, artID)
+		desc, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleMember, orgID, artID)
 		if err != nil {
 			t.Fatalf("expected no error for member, got: %v", err)
 		}
-		defer reader.Close()
+		defer desc.Reader.Close()
 
-		if art.ID != artID {
+		if desc.Artifact.ID != artID {
 			t.Fatalf("unexpected artifact")
 		}
 	})
 
 	t.Run("rejects viewer with ErrUnauthorizedRole", func(t *testing.T) {
 		svc := NewArtifactService(&mockArtifactRepo{}, &mockStorageProvider{}, &mockAuditService{}, nil)
-		_, _, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleViewer, orgID, artID)
+		_, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleViewer, orgID, artID)
 		if !errors.Is(err, domain.ErrUnauthorizedRole) {
 			t.Fatalf("expected ErrUnauthorizedRole for viewer, got: %v", err)
 		}
@@ -293,7 +297,7 @@ func TestArtifactService_OpenArtifactDownload(t *testing.T) {
 		}
 
 		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil)
-		_, _, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		_, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
 		if !errors.Is(err, domain.ErrArtifactNotFound) {
 			t.Fatalf("expected ErrArtifactNotFound, got: %v", err)
 		}
@@ -347,17 +351,17 @@ func TestArtifactService_OpenArtifactDownload(t *testing.T) {
 		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil)
 		svc.SetKeyProvider(kp)
 
-		art, reader, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		desc, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
 		if err != nil {
 			t.Fatalf("expected successful download open, got: %v", err)
 		}
-		defer reader.Close()
+		defer desc.Reader.Close()
 
-		if art.ID != artID {
-			t.Errorf("expected artifact ID %s, got %s", artID, art.ID)
+		if desc.Artifact.ID != artID {
+			t.Errorf("expected artifact ID %s, got %s", artID, desc.Artifact.ID)
 		}
 
-		decrypted, err := io.ReadAll(reader)
+		decrypted, err := io.ReadAll(desc.Reader)
 		if err != nil {
 			t.Fatalf("failed reading decrypted stream: %v", err)
 		}
@@ -389,7 +393,7 @@ func TestArtifactService_OpenArtifactDownload(t *testing.T) {
 
 		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil) // no key provider
 
-		_, _, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		_, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
 		if err == nil {
 			t.Fatal("expected error on missing key provider, got nil")
 		}
@@ -434,7 +438,7 @@ func TestArtifactService_OpenArtifactDownload(t *testing.T) {
 		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil)
 		svc.SetKeyProvider(kpV2)
 
-		_, _, err = svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		_, err = svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
 		if err == nil {
 			t.Fatal("expected error on unknown key version, got nil")
 		}
@@ -481,18 +485,18 @@ func TestArtifactService_OpenArtifactDownload(t *testing.T) {
 		svc := NewArtifactService(repo, stor, &mockAuditService{}, nil)
 		svc.SetKeyProvider(kp)
 
-		_, decReader, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		desc, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
 		if err != nil {
 			t.Fatalf("unexpected error on open: %v", err)
 		}
-		defer decReader.Close()
+		defer desc.Reader.Close()
 
 		// Reading until the end must produce an error and NOT succeed with all plaintext
 		readBuf := make([]byte, len(plainContent)+1000)
 		totalRead := 0
 		var streamErr error
 		for {
-			n, rErr := decReader.Read(readBuf[totalRead:])
+			n, rErr := desc.Reader.Read(readBuf[totalRead:])
 			totalRead += n
 			if rErr != nil {
 				streamErr = rErr
@@ -714,3 +718,251 @@ func TestArtifactService_RecordDownloadAudit(t *testing.T) {
 		}
 	})
 }
+
+type mockResticRunnerForDownload struct {
+	restic.CommandRunner
+	dumpStreamFunc func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error)
+	listNodesFunc  func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) ([]restic.SnapshotNode, error)
+}
+
+func (m *mockResticRunnerForDownload) DumpStream(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error) {
+	if m.dumpStreamFunc != nil {
+		return m.dumpStreamFunc(ctx, target, password, snapshotID, internalFilename)
+	}
+	return nil, errors.New("not implemented")
+}
+
+func (m *mockResticRunnerForDownload) ListSnapshotNodes(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) ([]restic.SnapshotNode, error) {
+	if m.listNodesFunc != nil {
+		return m.listNodesFunc(ctx, target, password, snapshotID)
+	}
+	return []restic.SnapshotNode{{Name: "ecommerce.sql", Type: "file"}}, nil
+}
+
+type mockTargetResolverForDownload struct {
+	resolveTargetFunc func(ctx context.Context, orgID, resourceID uuid.UUID, target *domain.StorageTarget) (restic.RepositoryTarget, error)
+}
+
+func (m *mockTargetResolverForDownload) ResolveTarget(ctx context.Context, orgID, resourceID uuid.UUID, target *domain.StorageTarget) (restic.RepositoryTarget, error) {
+	if m.resolveTargetFunc != nil {
+		return m.resolveTargetFunc(ctx, orgID, resourceID, target)
+	}
+	return restic.NewLocalRepositoryTarget("/tmp/repo", orgID, resourceID)
+}
+
+type mockVaultForDownload struct {
+	loadCredFunc func(ctx context.Context, orgID, credID uuid.UUID) (credDomain.Type, []byte, error)
+}
+
+func (m *mockVaultForDownload) CreateSystemCredential(ctx context.Context, orgID uuid.UUID, name string, credType credDomain.Type, plaintextPayload []byte) (*credDomain.CredentialMetadata, error) {
+	return nil, nil
+}
+func (m *mockVaultForDownload) LoadCredentialForUse(ctx context.Context, orgID, credID uuid.UUID) (credDomain.Type, []byte, error) {
+	if m.loadCredFunc != nil {
+		return m.loadCredFunc(ctx, orgID, credID)
+	}
+	return credDomain.TypeResticRepositoryKey, []byte("password123"), nil
+}
+func (m *mockVaultForDownload) DeleteSystemCredential(ctx context.Context, orgID, credID uuid.UUID) error {
+	return nil
+}
+
+func TestArtifactService_ResticDownload(t *testing.T) {
+	orgID := uuid.New()
+	artID := uuid.New()
+	repoID := uuid.New()
+	targetID := uuid.New()
+	resID := uuid.New()
+	credID := uuid.New()
+
+	rawDumpContent := []byte("CREATE TABLE customers (id INT PRIMARY KEY); INSERT INTO customers VALUES (1);")
+
+	resticArt := &domain.BackupArtifact{
+		ID:               artID,
+		OrganizationID:   orgID,
+		Format:           domain.ArtifactFormatResticSnapshot,
+		ArtifactType:     domain.ArtifactTypeDatabaseDump,
+		TargetName:       "ecommerce",
+		RepositoryID:     &repoID,
+		SnapshotID:       "snap123456",
+		StorageTargetID:  targetID,
+		LogicalSizeBytes: int64Ptr(int64(len(rawDumpContent))),
+	}
+
+	backupRepo := &mockArtifactRepo{
+		getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+			if aID == artID {
+				return resticArt, nil
+			}
+			return nil, domain.ErrArtifactNotFound
+		},
+	}
+
+	coordinator := restic.NewRepositoryOperationCoordinator()
+	runner := &mockResticRunnerForDownload{
+		dumpStreamFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error) {
+			if snapshotID != "snap123456" {
+				return nil, errors.New("wrong snapshot ID")
+			}
+			return io.NopCloser(bytes.NewReader(rawDumpContent)), nil
+		},
+	}
+	vault := &mockVaultForDownload{}
+	targetResolver := &mockTargetResolverForDownload{}
+
+	t.Run("successful restic streaming download with on-the-fly gzip", func(t *testing.T) {
+		mockRepoFull := &mockRepoWithResticGet{
+			mockArtifactRepo: backupRepo,
+			repoRecord: &domain.BackupRepository{
+				ID:              repoID,
+				OrganizationID:  orgID,
+				ResourceID:      resID,
+				StorageTargetID: targetID,
+				CredentialID:    credID,
+			},
+			storageTargetRecord: &domain.StorageTarget{
+				ID:             targetID,
+				OrganizationID: orgID,
+				Type:           domain.StorageTargetTypeLocal,
+				Status:         domain.StorageTargetStatusActive,
+			},
+		}
+
+		svc := NewArtifactService(mockRepoFull, &mockStorageProvider{}, &mockAuditService{}, nil)
+		svc.SetResticDependencies(runner, coordinator, vault, targetResolver)
+
+		desc, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		if err != nil {
+			t.Fatalf("expected successful restic download open, got: %v", err)
+		}
+		defer desc.Reader.Close()
+
+		if desc.ContentType != "application/gzip" {
+			t.Errorf("expected application/gzip content type, got: %s", desc.ContentType)
+		}
+		if desc.OptionalContentLength != nil {
+			t.Errorf("expected nil OptionalContentLength for chunked restic stream, got: %v", desc.OptionalContentLength)
+		}
+		if !strings.HasSuffix(desc.Filename, ".sql.gz") {
+			t.Errorf("expected filename ending in .sql.gz, got: %s", desc.Filename)
+		}
+
+		// Verify coordinator lock is held (exclusive acquire should time out)
+		lockCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		_, errEx := coordinator.AcquireExclusive(lockCtx, repoID)
+		cancel()
+		if errEx == nil {
+			t.Errorf("expected shared lock to prevent exclusive lock while stream is open")
+		}
+
+		// Read and decompress
+		gzReader, err := gzip.NewReader(desc.Reader)
+		if err != nil {
+			t.Fatalf("failed creating gzip reader: %v", err)
+		}
+		decompressed, err := io.ReadAll(gzReader)
+		if err != nil {
+			t.Fatalf("failed reading decompressed stream: %v", err)
+		}
+		_ = gzReader.Close()
+
+		if !bytes.Equal(decompressed, rawDumpContent) {
+			t.Errorf("decompressed content mismatch: expected %q, got %q", string(rawDumpContent), string(decompressed))
+		}
+
+		// Close reader and verify lock is released
+		if err := desc.Reader.Close(); err != nil {
+			t.Errorf("failed closing reader: %v", err)
+		}
+
+		lockCtx2, cancel2 := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		relEx, errEx2 := coordinator.AcquireExclusive(lockCtx2, repoID)
+		cancel2()
+		if errEx2 != nil {
+			t.Errorf("expected shared lock to be released after reader close, got: %v", errEx2)
+		} else {
+			relEx()
+		}
+	})
+
+	t.Run("fails when restic dependencies are nil", func(t *testing.T) {
+		svc := NewArtifactService(backupRepo, &mockStorageProvider{}, &mockAuditService{}, nil)
+		_, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable on missing restic dependencies, got: %v", err)
+		}
+	})
+
+	t.Run("fails when repository_id is nil", func(t *testing.T) {
+		nilRepoArt := &domain.BackupArtifact{
+			ID:             artID,
+			OrganizationID: orgID,
+			Format:         domain.ArtifactFormatResticSnapshot,
+			SnapshotID:     "snap123",
+		}
+		repoNil := &mockArtifactRepo{
+			getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+				return nilRepoArt, nil
+			},
+		}
+		svc := NewArtifactService(repoNil, &mockStorageProvider{}, &mockAuditService{}, nil)
+		svc.SetResticDependencies(runner, coordinator, vault, targetResolver)
+
+		_, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable on nil repository_id, got: %v", err)
+		}
+	})
+}
+
+func TestArtifactService_DeleteArtifact_ResticPrevention(t *testing.T) {
+	orgID := uuid.New()
+	userID := uuid.New()
+	artID := uuid.New()
+	repoID := uuid.New()
+
+	resticArt := &domain.BackupArtifact{
+		ID:             artID,
+		OrganizationID: orgID,
+		Format:         domain.ArtifactFormatResticSnapshot,
+		RepositoryID:   &repoID,
+		SnapshotID:     "snap123",
+	}
+
+	backupRepo := &mockArtifactRepo{
+		getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+			return resticArt, nil
+		},
+	}
+
+	svc := NewArtifactService(backupRepo, &mockStorageProvider{}, &mockAuditService{}, nil)
+	err := svc.DeleteArtifact(context.Background(), orgDomain.RoleAdmin, orgID, userID, artID, "127.0.0.1", "agent")
+	if err == nil {
+		t.Fatalf("expected error when deleting restic snapshot artifact")
+	}
+	if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+		t.Fatalf("expected ErrBackupServiceUnavailable, got: %v", err)
+	}
+}
+
+type mockRepoWithResticGet struct {
+	*mockArtifactRepo
+	repoRecord          *domain.BackupRepository
+	storageTargetRecord *domain.StorageTarget
+}
+
+func (m *mockRepoWithResticGet) GetRepositoryByID(ctx context.Context, orgID, repoID uuid.UUID) (*domain.BackupRepository, error) {
+	if m.repoRecord != nil {
+		return m.repoRecord, nil
+	}
+	return nil, domain.ErrRepositoryNotFound
+}
+
+func (m *mockRepoWithResticGet) GetStorageTargetByID(ctx context.Context, orgID, targetID uuid.UUID) (*domain.StorageTarget, error) {
+	if m.storageTargetRecord != nil {
+		return m.storageTargetRecord, nil
+	}
+	return nil, domain.ErrStorageTargetNotFound
+}
+
+func int64Ptr(v int64) *int64 { return &v }

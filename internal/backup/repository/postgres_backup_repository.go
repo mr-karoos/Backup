@@ -1378,12 +1378,84 @@ func (r *PostgresBackupRepository) CreateArtifact(ctx context.Context, artifact 
 		engineMeta = []byte("{}")
 	}
 
+	if artifact.Format == domain.ArtifactFormatResticSnapshot {
+		if artifact.RepositoryID == nil || *artifact.RepositoryID == uuid.Nil || artifact.SnapshotID == "" || artifact.LogicalSizeBytes == nil || *artifact.LogicalSizeBytes <= 0 {
+			return nil, domain.ErrArtifactChainMismatch
+		}
+
+		query := `
+			INSERT INTO backup_artifacts (
+				id, organization_id, run_id, resource_id, storage_target_id,
+				artifact_type, format, target_name, storage_reference, size_bytes,
+				checksum_algorithm, checksum_hash, verification_status, verified_at,
+				verification_details, stored_size_bytes, engine_metadata,
+				repository_id, snapshot_id, logical_size_bytes,
+				is_deleted, deleted_at, created_at, updated_at
+			)
+			SELECT
+				$1, r.organization_id, r.id, j.resource_id, st.id,
+				$6, $7, $8, NULL, NULL,
+				NULL, NULL, 'unverified', NULL,
+				NULL, NULL, COALESCE($9::jsonb, '{}'::jsonb),
+				repo.id, $10, $11,
+				false, NULL, NOW(), NOW()
+			FROM backup_runs r
+			JOIN backup_jobs j ON j.id = r.job_id AND j.organization_id = r.organization_id
+			JOIN storage_targets st ON st.id = j.storage_target_id AND st.organization_id = r.organization_id
+			JOIN backup_repositories repo ON repo.id = $12
+			                             AND repo.organization_id = r.organization_id
+			                             AND repo.resource_id = j.resource_id
+			                             AND repo.storage_target_id = j.storage_target_id
+			WHERE r.id = $3
+			  AND r.organization_id = $2
+			  AND j.resource_id = $4
+			  AND st.id = $5
+			  AND r.status = 'running'
+			  AND j.engine_type = 'restic'
+			  AND st.status = 'active'
+			  AND st.type IN ('local', 's3', 's3_compatible')
+			  AND repo.status = 'active'
+			RETURNING id, organization_id, run_id, resource_id, storage_target_id,
+			          artifact_type, format, target_name, storage_reference, size_bytes,
+			          checksum_algorithm, checksum_hash, verification_status, verified_at,
+			          verification_details, stored_size_bytes, engine_metadata,
+			          repository_id, snapshot_id, logical_size_bytes,
+			          is_deleted, deleted_at, created_at, updated_at;
+		`
+		row := q.QueryRow(
+			ctx,
+			query,
+			artifact.ID,
+			artifact.OrganizationID,
+			artifact.RunID,
+			artifact.ResourceID,
+			artifact.StorageTargetID,
+			artifact.ArtifactType,
+			artifact.Format,
+			artifact.TargetName,
+			engineMeta,
+			artifact.SnapshotID,
+			*artifact.LogicalSizeBytes,
+			*artifact.RepositoryID,
+		)
+
+		created, err := scanBackupArtifact(row)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, domain.ErrArtifactChainMismatch
+			}
+			return nil, fmt.Errorf("failed inserting restic backup artifact: %w", err)
+		}
+		return created, nil
+	}
+
 	query := `
 		INSERT INTO backup_artifacts (
 			id, organization_id, run_id, resource_id, storage_target_id,
 			artifact_type, format, target_name, storage_reference, size_bytes,
 			checksum_algorithm, checksum_hash, verification_status, verified_at,
 			verification_details, stored_size_bytes, engine_metadata,
+			repository_id, snapshot_id, logical_size_bytes,
 			is_deleted, deleted_at, created_at, updated_at
 		)
 		SELECT
@@ -1391,6 +1463,7 @@ func (r *PostgresBackupRepository) CreateArtifact(ctx context.Context, artifact 
 			$6, $7, $8, $9, $10,
 			'sha256', $11, 'unverified', NULL,
 			NULL, $12, COALESCE($13::jsonb, '{}'::jsonb),
+			NULL, NULL, NULL,
 			false, NULL, NOW(), NOW()
 		FROM backup_runs r
 		JOIN backup_jobs j ON j.id = r.job_id AND j.organization_id = r.organization_id
@@ -1407,6 +1480,7 @@ func (r *PostgresBackupRepository) CreateArtifact(ctx context.Context, artifact 
 		          artifact_type, format, target_name, storage_reference, size_bytes,
 		          checksum_algorithm, checksum_hash, verification_status, verified_at,
 		          verification_details, stored_size_bytes, engine_metadata,
+		          repository_id, snapshot_id, logical_size_bytes,
 		          is_deleted, deleted_at, created_at, updated_at;
 	`
 	row := q.QueryRow(
@@ -1492,6 +1566,7 @@ func (r *PostgresBackupRepository) GetArtifactByID(ctx context.Context, orgID, a
 			artifact_type, format, target_name, storage_reference, size_bytes,
 			checksum_algorithm, checksum_hash, verification_status, verified_at,
 			verification_details, stored_size_bytes, engine_metadata,
+			repository_id, snapshot_id, logical_size_bytes,
 			is_deleted, deleted_at, created_at, updated_at
 		FROM backup_artifacts
 		WHERE organization_id = $1 AND id = $2;
@@ -1516,6 +1591,7 @@ func (r *PostgresBackupRepository) ListArtifacts(ctx context.Context, orgID uuid
 			artifact_type, format, target_name, storage_reference, size_bytes,
 			checksum_algorithm, checksum_hash, verification_status, verified_at,
 			verification_details, stored_size_bytes, engine_metadata,
+			repository_id, snapshot_id, logical_size_bytes,
 			is_deleted, deleted_at, created_at, updated_at
 		FROM backup_artifacts
 		WHERE organization_id = $1 AND is_deleted = false
@@ -1550,6 +1626,7 @@ func (r *PostgresBackupRepository) GetRunArtifacts(ctx context.Context, orgID, r
 		       artifact_type, format, target_name, storage_reference, size_bytes,
 		       checksum_algorithm, checksum_hash, verification_status, verified_at,
 		       verification_details, stored_size_bytes, engine_metadata,
+		       repository_id, snapshot_id, logical_size_bytes,
 		       is_deleted, deleted_at, created_at, updated_at
 		FROM backup_artifacts
 		WHERE organization_id = $1 AND run_id = $2;
@@ -1865,6 +1942,13 @@ func scanBackupArtifact(s scannable) (*domain.BackupArtifact, error) {
 	var verifiedAt *time.Time
 	var verDetails *string
 	var deletedAt *time.Time
+	var storageRef *string
+	var sizeBytes *int64
+	var checksumAlg *string
+	var checksumHash *string
+	var repoID *uuid.UUID
+	var snapID *string
+	var logicalSizeBytes *int64
 
 	err := s.Scan(
 		&a.ID,
@@ -1875,15 +1959,18 @@ func scanBackupArtifact(s scannable) (*domain.BackupArtifact, error) {
 		&a.ArtifactType,
 		&a.Format,
 		&a.TargetName,
-		&a.StorageReference,
-		&a.SizeBytes,
-		&a.ChecksumAlgorithm,
-		&a.ChecksumHash,
+		&storageRef,
+		&sizeBytes,
+		&checksumAlg,
+		&checksumHash,
 		&a.VerificationStatus,
 		&verifiedAt,
 		&verDetails,
 		&a.StoredSizeBytes,
 		&a.EngineMetadata,
+		&repoID,
+		&snapID,
+		&logicalSizeBytes,
 		&a.IsDeleted,
 		&deletedAt,
 		&a.CreatedAt,
@@ -1893,6 +1980,23 @@ func scanBackupArtifact(s scannable) (*domain.BackupArtifact, error) {
 		return nil, err
 	}
 
+	if storageRef != nil {
+		a.StorageReference = *storageRef
+	}
+	if sizeBytes != nil {
+		a.SizeBytes = *sizeBytes
+	}
+	if checksumAlg != nil {
+		a.ChecksumAlgorithm = domain.ChecksumAlgorithm(*checksumAlg)
+	}
+	if checksumHash != nil {
+		a.ChecksumHash = *checksumHash
+	}
+	a.RepositoryID = repoID
+	if snapID != nil {
+		a.SnapshotID = *snapID
+	}
+	a.LogicalSizeBytes = logicalSizeBytes
 	a.VerifiedAt = verifiedAt
 	a.VerificationDetails = verDetails
 	a.DeletedAt = deletedAt

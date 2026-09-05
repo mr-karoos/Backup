@@ -176,7 +176,7 @@ func ValidateStorageTargetName(name string) (string, error) {
 // IsEngineCompatibleWithStorage returns true if the engine can store artifacts to the target type.
 func IsEngineCompatibleWithStorage(engine EngineType, storageType StorageTargetType) bool {
 	switch engine {
-	case EngineTypeDirectStream:
+	case EngineTypeDirectStream, EngineTypeRestic:
 		return storageType == StorageTargetTypeLocal ||
 			storageType == StorageTargetTypeS3 ||
 			storageType == StorageTargetTypeS3Compatible

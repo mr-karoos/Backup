@@ -32,11 +32,12 @@ type EngineType string
 
 const (
 	EngineTypeDirectStream EngineType = "direct_stream"
+	EngineTypeRestic       EngineType = "restic"
 )
 
 // IsValid checks whether the engine type is supported in this release.
 func (e EngineType) IsValid() bool {
-	return e == EngineTypeDirectStream
+	return e == EngineTypeDirectStream || e == EngineTypeRestic
 }
 
 // ValidateEngineType verifies that the engine type is supported.

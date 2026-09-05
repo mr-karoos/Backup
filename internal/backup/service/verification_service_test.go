@@ -14,6 +14,7 @@ import (
 	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/repository"
+	"backup-platform/internal/backup/restic"
 	orgDomain "backup-platform/internal/organization/domain"
 	"backup-platform/internal/storage"
 	"backup-platform/pkg/uuid"
@@ -265,6 +266,24 @@ func (m *mockVerifier) VerifyEncryptedFilesArtifact(
 		return "", m.fileVerifyErr
 	}
 	return m.fileVerifyMsg, nil
+}
+
+func (m *mockVerifier) VerifyResticSnapshot(
+	ctx context.Context,
+	runner restic.CommandRunner,
+	target restic.RepositoryTarget,
+	password []byte,
+	snapshotID string,
+	orgID, resID, runID, artifactID uuid.UUID,
+	targetToken string,
+	internalFilename string,
+	expectedLogicalSize int64,
+) (string, error) {
+	m.callsCount++
+	if m.dbVerifyErr != nil {
+		return "", m.dbVerifyErr
+	}
+	return m.dbVerifyMsg, nil
 }
 
 func TestVerificationService_RBAC(t *testing.T) {

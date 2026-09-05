@@ -302,7 +302,10 @@ func run() error {
 		cfg.S3AllowInsecureEndpoints,
 		cfg.S3PrivateEndpointsAllowlist,
 	)
-	_ = backupService.NewRepositoryService(
+	resticCoordinator := restic.NewRepositoryOperationCoordinator()
+	resticSupervisor := backupEngine.NewGatedEOFSupervisor(resticBinPath, log)
+	resticEngine := backupEngine.NewResticBackupEngine(resticSupervisor, log)
+	repoService := backupService.NewRepositoryService(
 		backupRepository,
 		backupRepository,
 		resFinder,
@@ -311,6 +314,7 @@ func run() error {
 		resticRunner,
 		log,
 	)
+	artifactService.SetResticDependencies(resticRunner, resticCoordinator, vaultService, resticTargetResolver)
 
 	backupHandler := backupHttpapi.NewHandler(backupJobService, backupPlanService, historyService, artifactService, verificationService, log)
 	backupHandler.SetStorageTargetService(storageTargetService)
@@ -354,6 +358,7 @@ func run() error {
 	workerPool.SetRetentionManager(retentionProcessor)
 	workerPool.SetStorageResolver(storageResolverService)
 	workerPool.SetKeyProvider(artifactKeyProvider)
+	workerPool.SetResticEngine(resticEngine, resticCoordinator, repoService, resticRunner, resticTargetResolver)
 	workerPool.Start(backgroundCtx)
 
 	staleReaper := backupWorker.NewStaleRunReaper(backupRepository, localStorageProvider, 30*time.Second, log)

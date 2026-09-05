@@ -18,6 +18,7 @@ import (
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/engine"
 	"backup-platform/internal/backup/repository"
+	"backup-platform/internal/backup/restic"
 	"backup-platform/internal/backup/retention"
 	"backup-platform/internal/backup/verification"
 	"backup-platform/internal/connector"
@@ -1394,6 +1395,20 @@ func (f *failingVerificationEngine) VerifyEncryptedFilesArtifact(
 	return "", domain.ErrVerificationFailed
 }
 
+func (f *failingVerificationEngine) VerifyResticSnapshot(
+	ctx context.Context,
+	runner restic.CommandRunner,
+	target restic.RepositoryTarget,
+	password []byte,
+	snapshotID string,
+	orgID, resID, runID, artifactID uuid.UUID,
+	targetToken string,
+	internalFilename string,
+	expectedLogicalSize int64,
+) (string, error) {
+	return "", domain.ErrVerificationFailed
+}
+
 func TestWorkerPool_VerificationFailure_UpdatesAndCleans(t *testing.T) {
 	tempDir := t.TempDir()
 	storageProvider, _ := local.NewLocalStorageProvider(tempDir)
@@ -1495,6 +1510,19 @@ func (k *keyUnavailableVerificationEngine) VerifyEncryptedDatabaseArtifact(ctx c
 	return "", artifactcrypto.ErrUnknownKeyVersion
 }
 func (k *keyUnavailableVerificationEngine) VerifyEncryptedFilesArtifact(ctx context.Context, storageProvider storage.StorageProvider, storageReference string, expectedPlaintextSize int64, expectedPlaintextChecksum string, storedSizeBytes int64, ciphertextSHA256 string, orgID, artifactID uuid.UUID) (string, error) {
+	return "", artifactcrypto.ErrUnknownKeyVersion
+}
+func (k *keyUnavailableVerificationEngine) VerifyResticSnapshot(
+	ctx context.Context,
+	runner restic.CommandRunner,
+	target restic.RepositoryTarget,
+	password []byte,
+	snapshotID string,
+	orgID, resID, runID, artifactID uuid.UUID,
+	targetToken string,
+	internalFilename string,
+	expectedLogicalSize int64,
+) (string, error) {
 	return "", artifactcrypto.ErrUnknownKeyVersion
 }
 
@@ -3211,6 +3239,437 @@ func TestWorkerPool_S3DirectStream_PersistsS3TargetAndNeverFallsBackToLocal(t *t
 		defer repo.mu.Unlock()
 		if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusFailed {
 			t.Errorf("expected run to be marked failed, got finalized run: %+v", repo.finalizedRun)
+		}
+	})
+}
+
+type fakeResticEngine struct {
+	dbCalled    bool
+	filesCalled bool
+	dbResult    *engine.ResticExecutionResult
+	filesResult *engine.ResticExecutionResult
+	dbErr       error
+	filesErr    error
+}
+
+func (f *fakeResticEngine) ExecuteDatabaseBackup(
+	ctx context.Context,
+	cap connector.DatabaseBackupCapability,
+	target connector.Target,
+	credPayload *payload.PayloadV1,
+	databaseName string,
+	repoTarget restic.RepositoryTarget,
+	repoPassword []byte,
+	orgID, resID, runID, artifactID uuid.UUID,
+) (*engine.ResticExecutionResult, error) {
+	f.dbCalled = true
+	if f.dbErr != nil {
+		return nil, f.dbErr
+	}
+	return f.dbResult, nil
+}
+
+func (f *fakeResticEngine) ExecuteFilesBackup(
+	ctx context.Context,
+	cap connector.FileBackupCapability,
+	target connector.Target,
+	credPayload *payload.PayloadV1,
+	config connector.FileBackupConfig,
+	repoTarget restic.RepositoryTarget,
+	repoPassword []byte,
+	orgID, resID, runID, artifactID uuid.UUID,
+) (*engine.ResticExecutionResult, error) {
+	f.filesCalled = true
+	if f.filesErr != nil {
+		return nil, f.filesErr
+	}
+	return f.filesResult, nil
+}
+
+type fakeRepoEnsurer struct {
+	repo *domain.BackupRepository
+	err  error
+}
+
+func (f *fakeRepoEnsurer) EnsureRepository(ctx context.Context, orgID, resourceID, storageTargetID uuid.UUID) (*domain.BackupRepository, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.repo, nil
+}
+
+type fakeTargetResolver struct {
+	target restic.RepositoryTarget
+	err    error
+}
+
+func (f *fakeTargetResolver) ResolveTarget(ctx context.Context, orgID, resourceID uuid.UUID, target *domain.StorageTarget) (restic.RepositoryTarget, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.target, nil
+}
+
+type fakeResticVault struct {
+	repoKeyCredID   uuid.UUID
+	repoKeyBytes    []byte
+	targetCredID    uuid.UUID
+	targetCredBytes []byte
+}
+
+func (f *fakeResticVault) LoadCredentialForUse(ctx context.Context, orgID, credID uuid.UUID) (credDomain.Type, []byte, error) {
+	if credID == f.repoKeyCredID {
+		cp := make([]byte, len(f.repoKeyBytes))
+		copy(cp, f.repoKeyBytes)
+		return credDomain.TypeResticRepositoryKey, cp, nil
+	}
+	if credID == f.targetCredID {
+		cp := make([]byte, len(f.targetCredBytes))
+		copy(cp, f.targetCredBytes)
+		return credDomain.TypeSSHPassword, cp, nil
+	}
+	return "", nil, errors.New("credential not found in fakeResticVault")
+}
+
+type fakeResticVerifier struct {
+	verDetails string
+	verErr     error
+	called     bool
+}
+
+func (f *fakeResticVerifier) VerifyDatabaseArtifact(ctx context.Context, storageProvider storage.StorageProvider, storageReference string, expectedSizeBytes int64, expectedChecksumSHA256 string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeResticVerifier) VerifyEncryptedDatabaseArtifact(ctx context.Context, storageProvider storage.StorageProvider, storageReference string, expectedPlaintextSize int64, expectedPlaintextChecksum string, storedSizeBytes int64, ciphertextSHA256 string, orgID, artifactID uuid.UUID) (string, error) {
+	return "", nil
+}
+
+func (f *fakeResticVerifier) VerifyEncryptedFilesArtifact(ctx context.Context, storageProvider storage.StorageProvider, storageReference string, expectedPlaintextSize int64, expectedPlaintextChecksum string, storedSizeBytes int64, ciphertextSHA256 string, orgID, artifactID uuid.UUID) (string, error) {
+	return "", nil
+}
+
+func (f *fakeResticVerifier) VerifyFilesArtifact(ctx context.Context, storageProvider storage.StorageProvider, storageReference string, expectedSizeBytes int64, expectedChecksumSHA256 string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeResticVerifier) VerifyResticSnapshot(
+	ctx context.Context,
+	runner restic.CommandRunner,
+	target restic.RepositoryTarget,
+	password []byte,
+	snapshotID string,
+	orgID, resID, runID, artifactID uuid.UUID,
+	targetToken string,
+	internalFilename string,
+	expectedLogicalSize int64,
+) (string, error) {
+	f.called = true
+	if f.verErr != nil {
+		return "", f.verErr
+	}
+	return f.verDetails, nil
+}
+
+type fakeResticRepoTarget struct{}
+
+func (f *fakeResticRepoTarget) Type() string                { return "local" }
+func (f *fakeResticRepoTarget) Locator() string             { return "orgs/res/restic" }
+func (f *fakeResticRepoTarget) ResticRepositoryURL() string { return "/tmp/repo" }
+func (f *fakeResticRepoTarget) Env() []string               { return nil }
+func (f *fakeResticRepoTarget) Cleanup()                    {}
+
+type fakeCommandRunner struct{}
+
+func (f *fakeCommandRunner) Init(ctx context.Context, target restic.RepositoryTarget, password []byte) error {
+	return nil
+}
+func (f *fakeCommandRunner) Probe(ctx context.Context, target restic.RepositoryTarget, password []byte) error {
+	return nil
+}
+func (f *fakeCommandRunner) Version(ctx context.Context) (string, error) {
+	return "restic 0.19.1", nil
+}
+func (f *fakeCommandRunner) ValidateVersion(ctx context.Context) error {
+	return nil
+}
+func (f *fakeCommandRunner) GetSnapshot(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) (*restic.SnapshotItem, error) {
+	return &restic.SnapshotItem{ID: snapshotID}, nil
+}
+func (f *fakeCommandRunner) ListSnapshotNodes(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) ([]restic.SnapshotNode, error) {
+	return nil, nil
+}
+func (f *fakeCommandRunner) DumpSample(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID, internalFilename string, maxBytes int) ([]byte, error) {
+	return nil, nil
+}
+func (f *fakeCommandRunner) DumpStream(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error) {
+	return nil, nil
+}
+
+func TestWorkerPool_ResticExecution(t *testing.T) {
+	orgID := uuid.New()
+	resID := uuid.New()
+	targetID := uuid.New()
+	repoID := uuid.New()
+	repoCredID := uuid.New()
+	targetCredID := uuid.New()
+
+	validPassJSON, err := payload.EncodeV1("ssh-secret-password", nil)
+	if err != nil {
+		t.Fatalf("failed encoding payload: %v", err)
+	}
+
+	storageTarget := &domain.StorageTarget{
+		ID:             targetID,
+		OrganizationID: orgID,
+		Name:           "Local Restic Target",
+		Type:           domain.StorageTargetTypeLocal,
+		Status:         domain.StorageTargetStatusActive,
+		IsDefault:      true,
+	}
+
+	resWithConn := &resDomain.ResourceWithConnector{
+		Resource: &resDomain.Resource{
+			ID:             resID,
+			OrganizationID: orgID,
+			Name:           "Test Ubuntu Server",
+			Type:           resDomain.TypeUbuntuSSH,
+			Status:         resDomain.StatusActive,
+		},
+		Connector: &resDomain.ResourceConnector{
+			ID:           uuid.New(),
+			ResourceID:   resID,
+			CredentialID: targetCredID,
+			Host:         "127.0.0.1",
+			Port:         22,
+			AuthType:     resDomain.AuthTypeSSHPassword,
+			Config: resDomain.ConnectorConfig{
+				Username: "root",
+			},
+		},
+	}
+
+	backupRepo := &domain.BackupRepository{
+		ID:                repoID,
+		OrganizationID:    orgID,
+		ResourceID:        resID,
+		StorageTargetID:   targetID,
+		CredentialID:      repoCredID,
+		RepositoryLocator: "orgs/res/restic",
+		Status:            domain.BackupRepositoryStatusActive,
+	}
+
+	t.Run("Database_Success_CreatesPolymorphicArtifactAndMarksVerified", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		repo.targets[targetID] = storageTarget
+
+		jobID := uuid.New()
+		job := &domain.BackupJob{
+			ID:              jobID,
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeRestic,
+			StorageTargetID: targetID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"mydb"}},
+			Status:          domain.JobStatusPending,
+			CreatedAt:       time.Now(),
+		}
+		repo.jobs[jobID] = job
+
+		resticEng := &fakeResticEngine{
+			dbResult: &engine.ResticExecutionResult{
+				SnapshotID:       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				LogicalSizeBytes: 1048576,
+				InternalFilename: "mydb.sql",
+				TargetToken:      "mydb",
+			},
+		}
+
+		verifier := &fakeResticVerifier{
+			verDetails: "level-1 verified successfully",
+		}
+
+		vault := &fakeResticVault{
+			repoKeyCredID:   repoCredID,
+			repoKeyBytes:    []byte("restic-encryption-password-32b!"),
+			targetCredID:    targetCredID,
+			targetCredBytes: validPassJSON,
+		}
+
+		reg := connector.NewBackupCapabilityRegistry()
+		reg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{
+			sqlDump: "-- MySQL dump\nCREATE DATABASE `mydb`;\n",
+		})
+
+		localDir := t.TempDir()
+		baseLocalStore, _ := local.NewLocalStorageProvider(localDir)
+		_ = baseLocalStore.EnsureStorageRoot(context.Background())
+		localStore := &trackingStorageProvider{StorageProvider: baseLocalStore}
+
+		workerPool := newTestWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			vault,
+			reg,
+			nil,
+			engine.NewDirectStreamBackupEngine(),
+			localStore,
+			verifier,
+			NewPerResourceMutexManager(),
+			slog.Default(),
+		)
+
+		coordinator := restic.NewRepositoryOperationCoordinator()
+		workerPool.SetResticEngine(
+			resticEng,
+			coordinator,
+			&fakeRepoEnsurer{repo: backupRepo},
+			&fakeCommandRunner{},
+			&fakeTargetResolver{target: &fakeResticRepoTarget{}},
+		)
+
+		workerPool.processNextAvailableJob(context.Background(), 1)
+
+		if !resticEng.dbCalled {
+			t.Errorf("expected ResticEngine.ExecuteDatabaseBackup to be called")
+		}
+		if !verifier.called {
+			t.Errorf("expected Verifier.VerifyResticSnapshot to be called")
+		}
+
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+
+		if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusSuccess {
+			t.Fatalf("expected run to be completed, got: %+v", repo.finalizedRun)
+		}
+
+		// Verify polymorphic artifact in repository
+		if len(repo.artifacts) != 1 {
+			t.Fatalf("expected 1 artifact created, got %d", len(repo.artifacts))
+		}
+		for _, art := range repo.artifacts {
+			if art.Format != domain.ArtifactFormatResticSnapshot {
+				t.Errorf("expected format restic_snapshot, got: %s", art.Format)
+			}
+			if art.SnapshotID != "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" {
+				t.Errorf("expected snapshot ID, got: %s", art.SnapshotID)
+			}
+			if art.RepositoryID == nil || *art.RepositoryID != repoID {
+				t.Errorf("expected repository ID %s, got: %v", repoID, art.RepositoryID)
+			}
+			if art.LogicalSizeBytes == nil || *art.LogicalSizeBytes != 1048576 {
+				t.Errorf("expected logical size 1048576, got: %v", art.LogicalSizeBytes)
+			}
+			if art.SizeBytes != 0 {
+				t.Errorf("expected physical size_bytes to be 0 for restic artifact, got: %d", art.SizeBytes)
+			}
+			if art.StorageReference != "" {
+				t.Errorf("expected empty storage reference for restic artifact, got: %s", art.StorageReference)
+			}
+			if art.VerificationStatus != domain.VerificationStatusVerified {
+				t.Errorf("expected verification status verified, got: %s", art.VerificationStatus)
+			}
+		}
+
+		// Ensure local storage was never touched
+		if localStore.saveCalls != 0 || localStore.deleteCalls != 0 {
+			t.Errorf("expected local storage to never be called on restic job, got saveCalls=%d", localStore.saveCalls)
+		}
+	})
+
+	t.Run("VerificationFailure_MarksArtifactFailed_AndFailsRunWithoutFallback", func(t *testing.T) {
+		repo := newFakeWorkerRepo(orgID)
+		repo.targets[targetID] = storageTarget
+
+		jobID := uuid.New()
+		job := &domain.BackupJob{
+			ID:              jobID,
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeRestic,
+			StorageTargetID: targetID,
+			TargetSpec:      domain.TargetSpec{Databases: []string{"mydb"}},
+			Status:          domain.JobStatusPending,
+			CreatedAt:       time.Now(),
+		}
+		repo.jobs[jobID] = job
+
+		resticEng := &fakeResticEngine{
+			dbResult: &engine.ResticExecutionResult{
+				SnapshotID:       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				LogicalSizeBytes: 1048576,
+				InternalFilename: "mydb.sql",
+				TargetToken:      "mydb",
+			},
+		}
+
+		// Verification fails with domain.ErrVerificationFailed
+		verifier := &fakeResticVerifier{
+			verErr: domain.ErrVerificationFailed,
+		}
+
+		vault := &fakeResticVault{
+			repoKeyCredID:   repoCredID,
+			repoKeyBytes:    []byte("restic-encryption-password-32b!"),
+			targetCredID:    targetCredID,
+			targetCredBytes: validPassJSON,
+		}
+
+		reg := connector.NewBackupCapabilityRegistry()
+		reg.Register(resDomain.TypeUbuntuSSH, &fakeCapability{
+			sqlDump: "-- MySQL dump\nCREATE DATABASE `mydb`;\n",
+		})
+
+		localDir := t.TempDir()
+		baseLocalStore, _ := local.NewLocalStorageProvider(localDir)
+		_ = baseLocalStore.EnsureStorageRoot(context.Background())
+		localStore := &trackingStorageProvider{StorageProvider: baseLocalStore}
+		workerPool := newTestWorkerPool(
+			WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+			repo,
+			&fakeResourceFinder{resWithConn: resWithConn},
+			vault,
+			reg,
+			nil,
+			engine.NewDirectStreamBackupEngine(),
+			localStore,
+			verifier,
+			NewPerResourceMutexManager(),
+			slog.Default(),
+		)
+
+		coordinator := restic.NewRepositoryOperationCoordinator()
+		workerPool.SetResticEngine(
+			resticEng,
+			coordinator,
+			&fakeRepoEnsurer{repo: backupRepo},
+			&fakeCommandRunner{},
+			&fakeTargetResolver{target: &fakeResticRepoTarget{}},
+		)
+
+		workerPool.processNextAvailableJob(context.Background(), 1)
+
+		repo.mu.Lock()
+		defer repo.mu.Unlock()
+
+		if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusFailed {
+			t.Fatalf("expected run to be marked failed on verification failure, got: %+v", repo.finalizedRun)
+		}
+
+		// Artifact verification status should be failed
+		for _, art := range repo.artifacts {
+			if art.VerificationStatus != domain.VerificationStatusFailed {
+				t.Errorf("expected artifact status failed, got: %s", art.VerificationStatus)
+			}
+		}
+
+		// No fallback to local direct stream
+		if localStore.saveCalls != 0 {
+			t.Errorf("expected no fallback to local storage on restic verification failure")
 		}
 	})
 }

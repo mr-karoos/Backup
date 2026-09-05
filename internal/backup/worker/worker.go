@@ -13,7 +13,9 @@ import (
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/engine"
 	"backup-platform/internal/backup/repository"
+	"backup-platform/internal/backup/restic"
 	"backup-platform/internal/backup/retention"
+	"backup-platform/internal/backup/service"
 	"backup-platform/internal/backup/verification"
 	"backup-platform/internal/connector"
 	"backup-platform/internal/connector/sshconn"
@@ -81,6 +83,43 @@ type WorkerPool struct {
 	databaseDiscoverer     databaseDiscoverer
 	retentionManager       RetentionManager
 	keyProvider            artifactcrypto.KeyProvider
+
+	// Restic dependencies
+	resticEngine   ResticEngine
+	coordinator    restic.RepositoryOperationCoordinator
+	repoService    RepositoryEnsurer
+	resticRunner   restic.CommandRunner
+	targetResolver service.RepositoryTargetResolver
+}
+
+// ResticEngine defines the interface for executing streaming backups into Restic.
+type ResticEngine interface {
+	ExecuteDatabaseBackup(
+		ctx context.Context,
+		cap connector.DatabaseBackupCapability,
+		target connector.Target,
+		credPayload *payload.PayloadV1,
+		databaseName string,
+		repoTarget restic.RepositoryTarget,
+		repoPassword []byte,
+		orgID, resID, runID, artifactID uuid.UUID,
+	) (*engine.ResticExecutionResult, error)
+
+	ExecuteFilesBackup(
+		ctx context.Context,
+		cap connector.FileBackupCapability,
+		target connector.Target,
+		credPayload *payload.PayloadV1,
+		config connector.FileBackupConfig,
+		repoTarget restic.RepositoryTarget,
+		repoPassword []byte,
+		orgID, resID, runID, artifactID uuid.UUID,
+	) (*engine.ResticExecutionResult, error)
+}
+
+// RepositoryEnsurer provides an interface for provisioning and ensuring repositories.
+type RepositoryEnsurer interface {
+	EnsureRepository(ctx context.Context, orgID, resourceID, storageTargetID uuid.UUID) (*domain.BackupRepository, error)
 }
 
 // NewWorkerPool constructs a new WorkerPool instance.
@@ -187,6 +226,21 @@ func (p *WorkerPool) resolveStorageProvider(ctx context.Context, orgID, targetID
 // SetRetentionManager injects a custom retention manager into the worker pool.
 func (p *WorkerPool) SetRetentionManager(rm RetentionManager) {
 	p.retentionManager = rm
+}
+
+// SetResticEngine configures the components necessary for executing backups via Restic.
+func (p *WorkerPool) SetResticEngine(
+	resticEngine ResticEngine,
+	coordinator restic.RepositoryOperationCoordinator,
+	repoService RepositoryEnsurer,
+	runner restic.CommandRunner,
+	targetResolver service.RepositoryTargetResolver,
+) {
+	p.resticEngine = resticEngine
+	p.coordinator = coordinator
+	p.repoService = repoService
+	p.resticRunner = runner
+	p.targetResolver = targetResolver
 }
 
 // SetKeyProvider injects an artifact crypto key provider into the worker pool.
@@ -552,6 +606,9 @@ func (p *WorkerPool) cleanupRunArtifacts(orgID, runID uuid.UUID) {
 		if art == nil || art.IsDeleted {
 			continue
 		}
+		if art.Format == domain.ArtifactFormatResticSnapshot {
+			continue // Restic snapshot physical deletion requires maintenance forget/prune in Phase A.5
+		}
 		if err := p.cleanupArtifact(cleanupCtx, orgID, art.ID, art.StorageTargetID, art.StorageReference); err != nil {
 			p.logger.Warn("failed cleaning up artifact for run",
 				slog.String("run_id", runID.String()),
@@ -566,11 +623,11 @@ func (p *WorkerPool) executeBackupPipeline(
 	run *domain.BackupRun,
 	job *domain.BackupJob,
 ) error {
-	// 1. Validate EngineType (ADR-033: only direct_stream supported in Step A.1; fail-closed on blank or unsupported)
+	// 1. Validate EngineType (DirectStream or Restic supported)
 	if job.EngineType == "" {
 		return domain.ErrInvalidEngineType
 	}
-	if job.EngineType != domain.EngineTypeDirectStream {
+	if job.EngineType != domain.EngineTypeDirectStream && job.EngineType != domain.EngineTypeRestic {
 		return domain.ErrUnsupportedEngineType
 	}
 
@@ -617,10 +674,14 @@ func (p *WorkerPool) executeBackupPipeline(
 		return domain.ErrIncompatibleEngineStorage
 	}
 
-	// 5. Resolve StorageProvider for target
-	targetStorageProvider, err := p.resolveStorageProvider(ctx, job.OrganizationID, storageTarget.ID)
-	if err != nil {
-		return err
+	// 5. Resolve StorageProvider for target if DirectStream
+	var targetStorageProvider storage.StorageProvider
+	if job.EngineType == domain.EngineTypeDirectStream {
+		var err error
+		targetStorageProvider, err = p.resolveStorageProvider(ctx, job.OrganizationID, storageTarget.ID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// 6. Branch by BackupType
@@ -680,6 +741,10 @@ func (p *WorkerPool) executeDatabaseTarget(
 	cap connector.DatabaseBackupCapability,
 	dbName string,
 ) error {
+	if job.EngineType == domain.EngineTypeRestic {
+		return p.executeResticDatabaseTarget(ctx, run, job, resWithConn, storageTarget, cap, dbName)
+	}
+
 	// Decrypt credential payload strictly scoped to this database dump
 	credType, plaintextBytes, credErr := p.vault.LoadCredentialForUse(ctx, job.OrganizationID, resWithConn.Connector.CredentialID)
 	if credErr != nil {
@@ -823,6 +888,10 @@ func (p *WorkerPool) executeFileTarget(
 	sourcePath string,
 	excludePatterns []string,
 ) error {
+	if job.EngineType == domain.EngineTypeRestic {
+		return p.executeResticFileTarget(ctx, run, job, resWithConn, storageTarget, fileCap, sourcePath, excludePatterns)
+	}
+
 	// Decrypt credential payload strictly scoped to this file path extraction
 	credType, plaintextBytes, credErr := p.vault.LoadCredentialForUse(ctx, job.OrganizationID, resWithConn.Connector.CredentialID)
 	if credErr != nil {
@@ -1016,4 +1085,340 @@ func (p *WorkerPool) resolveMySQLDatabases(
 	}
 
 	return dbNames, nil
+}
+
+func (p *WorkerPool) executeResticDatabaseTarget(
+	ctx context.Context,
+	run *domain.BackupRun,
+	job *domain.BackupJob,
+	resWithConn *resDomain.ResourceWithConnector,
+	storageTarget *domain.StorageTarget,
+	cap connector.DatabaseBackupCapability,
+	dbName string,
+) error {
+	if p.resticEngine == nil || p.coordinator == nil || p.repoService == nil || p.resticRunner == nil || p.targetResolver == nil {
+		return domain.ErrBackupServiceUnavailable
+	}
+
+	// 1. Ensure dedicated per-resource repository exists and is healthy
+	repo, err := p.repoService.EnsureRepository(ctx, job.OrganizationID, job.ResourceID, storageTarget.ID)
+	if err != nil {
+		return err
+	}
+
+	// 2. Acquire shared lock on repository
+	releaseLock, err := p.coordinator.AcquireShared(ctx, repo.ID)
+	if err != nil {
+		return fmt.Errorf("failed acquiring shared repository lock: %w", err)
+	}
+	defer releaseLock()
+
+	// 3. Resolve concrete repository target
+	repoTarget, err := p.targetResolver.ResolveTarget(ctx, job.OrganizationID, job.ResourceID, storageTarget)
+	if err != nil {
+		return err
+	}
+	defer repoTarget.Cleanup()
+
+	// 4. Load repository encryption key
+	credType, repoKey, err := p.vault.LoadCredentialForUse(ctx, job.OrganizationID, repo.CredentialID)
+	if err != nil {
+		return fmt.Errorf("failed loading repository encryption key: %w", err)
+	}
+	defer secretcrypto.ZeroBytes(repoKey)
+	if credType != credDomain.TypeResticRepositoryKey || len(repoKey) == 0 {
+		return errors.New("invalid restic repository key")
+	}
+
+	// 5. Decrypt resource connector credential payload strictly scoped to this database dump
+	targetCredType, plaintextBytes, credErr := p.vault.LoadCredentialForUse(ctx, job.OrganizationID, resWithConn.Connector.CredentialID)
+	if credErr != nil {
+		return credErr
+	}
+	if (resWithConn.Connector.AuthType == resDomain.AuthTypeSSHKey && targetCredType != credDomain.TypeSSHPrivateKey) ||
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeSSHPassword && targetCredType != credDomain.TypeSSHPassword) {
+		secretcrypto.ZeroBytes(plaintextBytes)
+		return connector.ErrInvalidCredentialFormat
+	}
+	credPayload, decodeErr := payload.Decode(plaintextBytes)
+	secretcrypto.ZeroBytes(plaintextBytes)
+	if decodeErr != nil {
+		return connector.ErrInvalidCredentialFormat
+	}
+	defer payload.Clear(credPayload)
+
+	target := connector.Target{
+		Host:               resWithConn.Connector.Host,
+		Port:               resWithConn.Connector.Port,
+		Username:           resWithConn.Connector.Config.Username,
+		AuthType:           resWithConn.Connector.AuthType,
+		HostKeyFingerprint: resWithConn.Connector.HostKeyFingerprint,
+		ConnectionTimeout:  resWithConn.Connector.Config.ConnectionTimeoutSeconds,
+	}
+
+	artifactID := uuid.New()
+
+	// 6. Execute streaming backup via Gated EOF supervisor
+	saveRes, streamErr := p.resticEngine.ExecuteDatabaseBackup(
+		ctx,
+		cap,
+		target,
+		credPayload,
+		dbName,
+		repoTarget,
+		repoKey,
+		job.OrganizationID,
+		job.ResourceID,
+		run.ID,
+		artifactID,
+	)
+	if streamErr != nil {
+		return streamErr
+	}
+
+	// 7. Insert unverified polymorphic artifact record
+	engineMeta, metaErr := json.Marshal(map[string]any{
+		"snapshot_id": saveRes.SnapshotID,
+	})
+	if metaErr != nil {
+		return fmt.Errorf("failed marshaling engine metadata: %w", metaErr)
+	}
+
+	artRecord := &domain.BackupArtifact{
+		ID:                 artifactID,
+		OrganizationID:     job.OrganizationID,
+		RunID:              run.ID,
+		ResourceID:         job.ResourceID,
+		StorageTargetID:    storageTarget.ID,
+		ArtifactType:       domain.ArtifactTypeDatabaseDump,
+		Format:             domain.ArtifactFormatResticSnapshot,
+		TargetName:         dbName,
+		StorageReference:   "",
+		SizeBytes:          0,
+		ChecksumAlgorithm:  domain.ChecksumAlgorithmSHA256,
+		ChecksumHash:       "",
+		RepositoryID:       &repo.ID,
+		SnapshotID:         saveRes.SnapshotID,
+		LogicalSizeBytes:   &saveRes.LogicalSizeBytes,
+		EngineMetadata:     engineMeta,
+		VerificationStatus: domain.VerificationStatusUnverified,
+	}
+
+	_, createArtErr := p.repo.CreateArtifact(ctx, artRecord)
+	if createArtErr != nil {
+		return createArtErr
+	}
+
+	// 8. Level-1 Verification Phase
+	targetToken := engine.BuildDeterministicTargetToken(domain.BackupTypeMySQLDatabase, dbName)
+	internalFilename := targetToken + ".sql"
+
+	verDetails, verErr := p.verifier.VerifyResticSnapshot(
+		ctx,
+		p.resticRunner,
+		repoTarget,
+		repoKey,
+		saveRes.SnapshotID,
+		job.OrganizationID,
+		job.ResourceID,
+		run.ID,
+		artifactID,
+		targetToken,
+		internalFilename,
+		saveRes.LogicalSizeBytes,
+	)
+	if verErr != nil {
+		if errors.Is(verErr, context.Canceled) || errors.Is(verErr, context.DeadlineExceeded) {
+			return verErr
+		}
+		if errors.Is(verErr, domain.ErrVerificationFailed) {
+			failMsg := "level-1 restic snapshot verification failed"
+			_ = p.repo.UpdateArtifactVerification(ctx, job.OrganizationID, artifactID, domain.VerificationStatusFailed, &failMsg)
+			return domain.ErrVerificationFailed
+		}
+		p.logger.Error("restic verification infrastructure error",
+			slog.String("run_id", run.ID.String()),
+			slog.String("artifact_id", artifactID.String()),
+			slog.String("error", verErr.Error()),
+		)
+		return fmt.Errorf("restic verification infrastructure error: %w", verErr)
+	}
+
+	// 9. Mark verified
+	if updateErr := p.repo.UpdateArtifactVerification(ctx, job.OrganizationID, artifactID, domain.VerificationStatusVerified, &verDetails); updateErr != nil {
+		return updateErr
+	}
+
+	return nil
+}
+
+func (p *WorkerPool) executeResticFileTarget(
+	ctx context.Context,
+	run *domain.BackupRun,
+	job *domain.BackupJob,
+	resWithConn *resDomain.ResourceWithConnector,
+	storageTarget *domain.StorageTarget,
+	fileCap connector.FileBackupCapability,
+	sourcePath string,
+	excludePatterns []string,
+) error {
+	if p.resticEngine == nil || p.coordinator == nil || p.repoService == nil || p.resticRunner == nil || p.targetResolver == nil {
+		return domain.ErrBackupServiceUnavailable
+	}
+
+	// 1. Ensure dedicated per-resource repository exists and is healthy
+	repo, err := p.repoService.EnsureRepository(ctx, job.OrganizationID, job.ResourceID, storageTarget.ID)
+	if err != nil {
+		return err
+	}
+
+	// 2. Acquire shared lock on repository
+	releaseLock, err := p.coordinator.AcquireShared(ctx, repo.ID)
+	if err != nil {
+		return fmt.Errorf("failed acquiring shared repository lock: %w", err)
+	}
+	defer releaseLock()
+
+	// 3. Resolve concrete repository target
+	repoTarget, err := p.targetResolver.ResolveTarget(ctx, job.OrganizationID, job.ResourceID, storageTarget)
+	if err != nil {
+		return err
+	}
+	defer repoTarget.Cleanup()
+
+	// 4. Load repository encryption key
+	credType, repoKey, err := p.vault.LoadCredentialForUse(ctx, job.OrganizationID, repo.CredentialID)
+	if err != nil {
+		return fmt.Errorf("failed loading repository encryption key: %w", err)
+	}
+	defer secretcrypto.ZeroBytes(repoKey)
+	if credType != credDomain.TypeResticRepositoryKey || len(repoKey) == 0 {
+		return errors.New("invalid restic repository key")
+	}
+
+	// 5. Decrypt resource connector credential payload strictly scoped to this file backup
+	targetCredType, plaintextBytes, credErr := p.vault.LoadCredentialForUse(ctx, job.OrganizationID, resWithConn.Connector.CredentialID)
+	if credErr != nil {
+		return credErr
+	}
+	if (resWithConn.Connector.AuthType == resDomain.AuthTypeSSHKey && targetCredType != credDomain.TypeSSHPrivateKey) ||
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeSSHPassword && targetCredType != credDomain.TypeSSHPassword) {
+		secretcrypto.ZeroBytes(plaintextBytes)
+		return connector.ErrInvalidCredentialFormat
+	}
+	credPayload, decodeErr := payload.Decode(plaintextBytes)
+	secretcrypto.ZeroBytes(plaintextBytes)
+	if decodeErr != nil {
+		return connector.ErrInvalidCredentialFormat
+	}
+	defer payload.Clear(credPayload)
+
+	target := connector.Target{
+		Host:               resWithConn.Connector.Host,
+		Port:               resWithConn.Connector.Port,
+		Username:           resWithConn.Connector.Config.Username,
+		AuthType:           resWithConn.Connector.AuthType,
+		HostKeyFingerprint: resWithConn.Connector.HostKeyFingerprint,
+		ConnectionTimeout:  resWithConn.Connector.Config.ConnectionTimeoutSeconds,
+	}
+
+	config := connector.FileBackupConfig{
+		SourcePath:      sourcePath,
+		ExcludePatterns: excludePatterns,
+	}
+
+	artifactID := uuid.New()
+
+	// 6. Execute streaming backup via Gated EOF supervisor
+	saveRes, streamErr := p.resticEngine.ExecuteFilesBackup(
+		ctx,
+		fileCap,
+		target,
+		credPayload,
+		config,
+		repoTarget,
+		repoKey,
+		job.OrganizationID,
+		job.ResourceID,
+		run.ID,
+		artifactID,
+	)
+	if streamErr != nil {
+		return streamErr
+	}
+
+	// 7. Insert unverified polymorphic artifact record
+	engineMeta, metaErr := json.Marshal(map[string]any{
+		"snapshot_id": saveRes.SnapshotID,
+	})
+	if metaErr != nil {
+		return fmt.Errorf("failed marshaling engine metadata: %w", metaErr)
+	}
+
+	artRecord := &domain.BackupArtifact{
+		ID:                 artifactID,
+		OrganizationID:     job.OrganizationID,
+		RunID:              run.ID,
+		ResourceID:         job.ResourceID,
+		StorageTargetID:    storageTarget.ID,
+		ArtifactType:       domain.ArtifactTypeFilesArchive,
+		Format:             domain.ArtifactFormatResticSnapshot,
+		TargetName:         sourcePath,
+		StorageReference:   "",
+		SizeBytes:          0,
+		ChecksumAlgorithm:  domain.ChecksumAlgorithmSHA256,
+		ChecksumHash:       "",
+		RepositoryID:       &repo.ID,
+		SnapshotID:         saveRes.SnapshotID,
+		LogicalSizeBytes:   &saveRes.LogicalSizeBytes,
+		EngineMetadata:     engineMeta,
+		VerificationStatus: domain.VerificationStatusUnverified,
+	}
+
+	_, createArtErr := p.repo.CreateArtifact(ctx, artRecord)
+	if createArtErr != nil {
+		return createArtErr
+	}
+
+	// 8. Level-1 Verification Phase
+	targetToken := engine.BuildDeterministicTargetToken(domain.BackupTypeWebsiteFiles, sourcePath)
+	internalFilename := targetToken + ".tar"
+
+	verDetails, verErr := p.verifier.VerifyResticSnapshot(
+		ctx,
+		p.resticRunner,
+		repoTarget,
+		repoKey,
+		saveRes.SnapshotID,
+		job.OrganizationID,
+		job.ResourceID,
+		run.ID,
+		artifactID,
+		targetToken,
+		internalFilename,
+		saveRes.LogicalSizeBytes,
+	)
+	if verErr != nil {
+		if errors.Is(verErr, context.Canceled) || errors.Is(verErr, context.DeadlineExceeded) {
+			return verErr
+		}
+		if errors.Is(verErr, domain.ErrVerificationFailed) {
+			failMsg := "level-1 restic snapshot verification failed"
+			_ = p.repo.UpdateArtifactVerification(ctx, job.OrganizationID, artifactID, domain.VerificationStatusFailed, &failMsg)
+			return domain.ErrVerificationFailed
+		}
+		p.logger.Error("restic verification infrastructure error",
+			slog.String("run_id", run.ID.String()),
+			slog.String("artifact_id", artifactID.String()),
+			slog.String("error", verErr.Error()),
+		)
+		return fmt.Errorf("restic verification infrastructure error: %w", verErr)
+	}
+
+	// 9. Mark verified
+	if updateErr := p.repo.UpdateArtifactVerification(ctx, job.OrganizationID, artifactID, domain.VerificationStatusVerified, &verDetails); updateErr != nil {
+		return updateErr
+	}
+
+	return nil
 }

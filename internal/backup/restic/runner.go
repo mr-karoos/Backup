@@ -1,14 +1,19 @@
 package restic
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 
 	"backup-platform/internal/credential/secretcrypto"
 )
@@ -22,6 +27,38 @@ type CommandRunner interface {
 	Probe(ctx context.Context, target RepositoryTarget, password []byte) error
 	Version(ctx context.Context) (string, error)
 	ValidateVersion(ctx context.Context) error
+	GetSnapshot(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) (*SnapshotItem, error)
+	ListSnapshotNodes(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) ([]SnapshotNode, error)
+	DumpSample(ctx context.Context, target RepositoryTarget, password []byte, snapshotID, internalFilename string, maxBytes int) ([]byte, error)
+	DumpStream(ctx context.Context, target RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error)
+}
+
+// SnapshotSummary represents the summary metrics of a snapshot.
+type SnapshotSummary struct {
+	TotalBytesProcessed int64 `json:"total_bytes_processed"`
+	FilesNew            int   `json:"files_new"`
+	DataAdded           int64 `json:"data_added"`
+}
+
+// SnapshotItem represents the JSON metadata of a snapshot from "restic snapshots --json".
+type SnapshotItem struct {
+	ID             string           `json:"id"`
+	ShortID        string           `json:"short_id"`
+	Time           time.Time        `json:"time"`
+	Paths          []string         `json:"paths"`
+	Tags           []string         `json:"tags"`
+	Hostname       string           `json:"hostname"`
+	Username       string           `json:"username"`
+	ProgramVersion string           `json:"program_version"`
+	Summary        *SnapshotSummary `json:"summary,omitempty"`
+}
+
+// SnapshotNode represents a file or directory node from "restic ls --json".
+type SnapshotNode struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+	Path string `json:"path"`
+	Size int64  `json:"size"`
 }
 
 // ResticRunner implements CommandRunner by safely invoking the official Restic binary via exec.CommandContext.
@@ -114,6 +151,239 @@ func (r *ResticRunner) ValidateVersion(ctx context.Context) error {
 		return fmt.Errorf("restic binary validation failed: %w", err)
 	}
 	return parseAndValidateResticVersion(v)
+}
+
+var (
+	ErrSnapshotNotFound = errors.New("snapshot not found in repository")
+)
+
+// GetSnapshot retrieves the metadata for a specific snapshot by its ID.
+func (r *ResticRunner) GetSnapshot(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) (*SnapshotItem, error) {
+	if target == nil {
+		return nil, errors.New("repository target is required")
+	}
+	if len(password) == 0 {
+		return nil, errors.New("repository password cannot be empty")
+	}
+	cleanID := strings.TrimSpace(snapshotID)
+	if cleanID == "" || strings.HasPrefix(cleanID, "-") {
+		return nil, errors.New("invalid snapshot ID")
+	}
+
+	args := []string{"snapshots", cleanID, "--json"}
+	out, err := r.runCommand(ctx, target, password, args)
+	if err != nil {
+		return nil, fmt.Errorf("failed retrieving snapshot: %w", err)
+	}
+
+	var snapshots []SnapshotItem
+	if err := json.Unmarshal([]byte(out), &snapshots); err != nil {
+		return nil, fmt.Errorf("malformed snapshot JSON: %w", err)
+	}
+
+	if len(snapshots) == 0 {
+		return nil, ErrSnapshotNotFound
+	}
+
+	for _, s := range snapshots {
+		if s.ID == cleanID || strings.HasPrefix(s.ID, cleanID) || s.ShortID == cleanID {
+			return &s, nil
+		}
+	}
+
+	return &snapshots[0], nil
+}
+
+// ListSnapshotNodes lists the files and directories inside a snapshot.
+func (r *ResticRunner) ListSnapshotNodes(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) ([]SnapshotNode, error) {
+	if target == nil {
+		return nil, errors.New("repository target is required")
+	}
+	if len(password) == 0 {
+		return nil, errors.New("repository password cannot be empty")
+	}
+	cleanID := strings.TrimSpace(snapshotID)
+	if cleanID == "" || strings.HasPrefix(cleanID, "-") {
+		return nil, errors.New("invalid snapshot ID")
+	}
+
+	args := []string{"ls", cleanID, "--json"}
+	out, err := r.runCommand(ctx, target, password, args)
+	if err != nil {
+		return nil, fmt.Errorf("failed listing snapshot files: %w", err)
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(out))
+	var nodes []SnapshotNode
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || !strings.HasPrefix(line, "{") {
+			continue
+		}
+		var node SnapshotNode
+		if err := json.Unmarshal([]byte(line), &node); err == nil && node.Name != "" {
+			nodes = append(nodes, node)
+		}
+	}
+	return nodes, nil
+}
+
+// DumpSample reads up to maxBytes from the specified file inside the snapshot using restic dump.
+func (r *ResticRunner) DumpSample(ctx context.Context, target RepositoryTarget, password []byte, snapshotID, internalFilename string, maxBytes int) ([]byte, error) {
+	if target == nil {
+		return nil, errors.New("repository target is required")
+	}
+	if len(password) == 0 {
+		return nil, errors.New("repository password cannot be empty")
+	}
+	cleanID := strings.TrimSpace(snapshotID)
+	if cleanID == "" || strings.HasPrefix(cleanID, "-") {
+		return nil, errors.New("invalid snapshot ID")
+	}
+	cleanFile := strings.TrimSpace(internalFilename)
+	if cleanFile == "" || strings.HasPrefix(cleanFile, "-") {
+		return nil, errors.New("invalid internal filename")
+	}
+	if maxBytes <= 0 {
+		maxBytes = 64 * 1024
+	}
+
+	stream, err := r.DumpStream(ctx, target, password, cleanID, cleanFile)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+
+	buf := make([]byte, maxBytes)
+	n, err := io.ReadFull(stream, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return nil, fmt.Errorf("failed reading dump sample: %w", err)
+	}
+	return buf[:n], nil
+}
+
+// dumpReadCloser wraps restic dump stdout and guarantees child process termination and cleanup on Close().
+type dumpReadCloser struct {
+	stdout    io.ReadCloser
+	cmd       *exec.Cmd
+	cancel    context.CancelFunc
+	target    RepositoryTarget
+	password  []byte
+	waitDone  chan struct{}
+	waitErr   error
+	closeOnce sync.Once
+}
+
+func (d *dumpReadCloser) Read(p []byte) (int, error) {
+	return d.stdout.Read(p)
+}
+
+func (d *dumpReadCloser) Close() error {
+	var retErr error
+	d.closeOnce.Do(func() {
+		_ = d.stdout.Close()
+		select {
+		case <-d.waitDone:
+			// Process already completed on its own
+		default:
+			d.cancel()
+			if d.cmd.Process != nil {
+				_ = d.cmd.Process.Kill()
+			}
+			<-d.waitDone
+		}
+		if d.waitErr != nil {
+			errStr := d.waitErr.Error()
+			if !errors.Is(d.waitErr, context.Canceled) &&
+				!strings.Contains(errStr, "signal: killed") &&
+				!strings.Contains(errStr, "Access is denied") {
+				retErr = d.waitErr
+			}
+		}
+		secretcrypto.ZeroBytes(d.password)
+		if d.target != nil {
+			d.target.Cleanup()
+		}
+	})
+	return retErr
+}
+
+// DumpStream opens a streaming reader for the specified file inside the snapshot using restic dump.
+func (r *ResticRunner) DumpStream(ctx context.Context, target RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error) {
+	if target == nil {
+		return nil, errors.New("repository target is required")
+	}
+	if len(password) == 0 {
+		return nil, errors.New("repository password cannot be empty")
+	}
+	cleanID := strings.TrimSpace(snapshotID)
+	if cleanID == "" || strings.HasPrefix(cleanID, "-") {
+		return nil, errors.New("invalid snapshot ID")
+	}
+	cleanFile := strings.TrimSpace(internalFilename)
+	if cleanFile == "" || strings.HasPrefix(cleanFile, "-") {
+		return nil, errors.New("invalid internal filename")
+	}
+
+	passwordCopy := make([]byte, len(password))
+	copy(passwordCopy, password)
+
+	baseEnv := filterCleanEnv(os.Environ())
+	targetEnv := target.Env()
+	repoURL := target.ResticRepositoryURL()
+
+	childEnv := append(baseEnv,
+		"RESTIC_REPOSITORY="+repoURL,
+		"RESTIC_PASSWORD="+string(passwordCopy),
+	)
+	if len(targetEnv) > 0 {
+		childEnv = append(childEnv, targetEnv...)
+	}
+
+	childCtx, childCancel := context.WithCancel(ctx)
+	args := []string{"dump", cleanID, cleanFile}
+	cmd := exec.CommandContext(childCtx, r.binaryPath, args...)
+	cmd.Env = childEnv
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		childCancel()
+		secretcrypto.ZeroBytes(passwordCopy)
+		target.Cleanup()
+		return nil, fmt.Errorf("failed creating dump stdout pipe: %w", err)
+	}
+
+	stderrBuf := newBoundedBuffer(MaxOutputBytes)
+	cmd.Stderr = stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		childCancel()
+		_ = stdoutPipe.Close()
+		secretcrypto.ZeroBytes(passwordCopy)
+		target.Cleanup()
+		sanitizedErr := sanitizeSecrets(err.Error(), string(password), targetEnv)
+		return nil, fmt.Errorf("failed starting restic dump: %s", sanitizedErr)
+	}
+
+	waitDone := make(chan struct{})
+	d := &dumpReadCloser{
+		stdout:   stdoutPipe,
+		cmd:      cmd,
+		cancel:   childCancel,
+		target:   target,
+		password: passwordCopy,
+		waitDone: waitDone,
+	}
+
+	go func() {
+		wErr := cmd.Wait()
+		if wErr != nil {
+			d.waitErr = wErr
+		}
+		close(waitDone)
+	}()
+
+	return d, nil
 }
 
 // runCommand handles safe subprocess dispatch with child-only secret environment and sanitized output.
