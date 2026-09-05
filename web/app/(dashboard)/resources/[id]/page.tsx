@@ -1,30 +1,91 @@
 'use client';
 
+import * as React from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
-import { type ResourceResponse } from '@/types/domain';
+import { usePermissions } from '@/lib/auth/permissions';
+import {
+  useTestResourceConnection,
+  useDiscoverDatabases,
+  useArchiveResource,
+} from '@/lib/api/mutations';
+import { type ResourceResponse, type DiscoveredDatabaseResponse } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
-import { formatDate, formatResourceType, getStatusBadgeVariant } from '@/lib/format/formatters';
-import { ArrowLeft, Server, Shield, Network } from 'lucide-react';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { ManualBackupDialog } from '@/components/backup/manual-backup-dialog';
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from '@/components/ui/table';
+import { formatDate, formatBytes, formatResourceType, getStatusBadgeVariant } from '@/lib/format/formatters';
+import {
+  ArrowLeft,
+  Server,
+  Shield,
+  Network,
+  Activity,
+  Database,
+  Play,
+  Pencil,
+  Archive,
+  CheckCircle2,
+  XCircle,
+} from 'lucide-react';
 
 export default function ResourceDetailPage() {
   const params = useParams();
   const id = params?.id as string;
+  const router = useRouter();
   const { activeOrgId } = useAuth();
+  const {
+    canTestConnection,
+    canDiscoverDatabases,
+    canExecuteAdHocBackup,
+    canEditResource,
+    canArchiveResource,
+  } = usePermissions();
+
+  const [backupDialogOpen, setBackupDialogOpen] = React.useState(false);
+  const [archiveDialogOpen, setArchiveDialogOpen] = React.useState(false);
+  const [discoveredDbs, setDiscoveredDbs] = React.useState<DiscoveredDatabaseResponse[] | null>(null);
+
+  const testConn = useTestResourceConnection();
+  const discoverDbs = useDiscoverDatabases();
+  const archiveResource = useArchiveResource();
 
   const { data, isLoading, isError, error, refetch } = useQuery<ResourceResponse>({
     queryKey: activeOrgId && id ? queryKeys.org(activeOrgId).resources.detail(id) : ['disabled'],
     queryFn: () => apiClient.get<ResourceResponse>(`/resources/${id}`),
     enabled: !!activeOrgId && !!id,
   });
+
+  const handleTestConnection = async () => {
+    await testConn.mutateAsync(id);
+    refetch();
+  };
+
+  const handleDiscoverDatabases = async () => {
+    const dbs = await discoverDbs.mutateAsync(id);
+    setDiscoveredDbs(dbs);
+  };
+
+  const handleArchive = async () => {
+    await archiveResource.mutateAsync(id);
+    setArchiveDialogOpen(false);
+    router.push('/resources');
+  };
 
   if (isLoading) {
     return (
@@ -66,21 +127,113 @@ export default function ResourceDetailPage() {
             Back to Resources
           </Button>
         </Link>
-        <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
               <Server className="h-5 w-5" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight text-foreground">{data.name}</h1>
-              <p className="text-xs font-mono text-muted-foreground">ID: {data.id}</p>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-bold tracking-tight text-foreground">{data.name}</h1>
+                <Badge variant={variant} className="capitalize text-xs px-2.5 py-0.5">
+                  {label}
+                </Badge>
+              </div>
+              <p className="text-xs font-mono text-muted-foreground mt-0.5">ID: {data.id}</p>
             </div>
           </div>
-          <Badge variant={variant} className="capitalize text-sm px-3 py-1">
-            {label}
-          </Badge>
+
+          {/* Action Buttons */}
+          <div className="flex flex-wrap items-center gap-2">
+            {canTestConnection && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleTestConnection}
+                disabled={testConn.isPending}
+                className="gap-1.5"
+              >
+                <Activity className="h-4 w-4 text-emerald-500" />
+                {testConn.isPending ? 'Testing...' : 'Test Connection'}
+              </Button>
+            )}
+
+            {canDiscoverDatabases && data.type === 'ubuntu_ssh' && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleDiscoverDatabases}
+                disabled={discoverDbs.isPending}
+                className="gap-1.5"
+              >
+                <Database className="h-4 w-4 text-sky-500" />
+                {discoverDbs.isPending ? 'Scanning...' : 'Discover Databases'}
+              </Button>
+            )}
+
+            {canExecuteAdHocBackup && (
+              <Button
+                size="sm"
+                onClick={() => setBackupDialogOpen(true)}
+                className="gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white"
+              >
+                <Play className="h-4 w-4 fill-current" />
+                Run Backup
+              </Button>
+            )}
+
+            {canEditResource && (
+              <Link href={`/resources/${data.id}/edit`}>
+                <Button variant="outline" size="sm" className="gap-1.5">
+                  <Pencil className="h-4 w-4" />
+                  Edit
+                </Button>
+              </Link>
+            )}
+
+            {canArchiveResource && data.status !== 'archived' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setArchiveDialogOpen(true)}
+                className="gap-1.5 text-rose-500 hover:text-rose-400 hover:bg-rose-950/20"
+              >
+                <Archive className="h-4 w-4" />
+                Archive
+              </Button>
+            )}
+          </div>
         </div>
       </div>
+
+      {/* Connection Test Live Result Banner */}
+      {testConn.data && (
+        <div
+          className={`rounded-lg border p-4 text-sm flex items-center justify-between ${
+            testConn.data.status === 'success'
+              ? 'border-emerald-800/50 bg-emerald-950/20 text-emerald-300'
+              : 'border-rose-800/50 bg-rose-950/20 text-rose-300'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {testConn.data.status === 'success' ? (
+              <CheckCircle2 className="h-5 w-5 text-emerald-400 shrink-0" />
+            ) : (
+              <XCircle className="h-5 w-5 text-rose-400 shrink-0" />
+            )}
+            <div>
+              <p className="font-semibold">
+                {testConn.data.status === 'success'
+                  ? 'Connection Test Successful'
+                  : 'Connection Test Failed'}
+              </p>
+              <p className="text-xs opacity-80">
+                Latency: {testConn.data.latency_ms}ms • Checked: {formatDate(testConn.data.checked_at)}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Grid Content */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -179,6 +332,76 @@ export default function ResourceDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Discovered Databases Section (if scanned) */}
+      {discoveredDbs && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              <Database className="h-4 w-4 text-primary" />
+              Discovered Databases ({discoveredDbs.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            {discoveredDbs.length === 0 ? (
+              <div className="p-6 text-center text-sm text-muted-foreground">
+                No active MySQL databases discovered on this host.
+              </div>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Database Name</TableHead>
+                    <TableHead>Approximate Size</TableHead>
+                    <TableHead>Tables Count</TableHead>
+                    <TableHead>Status</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {discoveredDbs.map((db) => (
+                    <TableRow key={db.name}>
+                      <TableCell className="font-mono font-medium text-foreground">
+                        {db.name}
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {formatBytes(db.size_bytes)}
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {db.tables_count !== null ? db.tables_count : '—'}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-[10px] capitalize">
+                          {db.status}
+                        </Badge>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Manual Ad-Hoc Backup Dialog */}
+      <ManualBackupDialog
+        open={backupDialogOpen}
+        onOpenChange={setBackupDialogOpen}
+        resource={{ id: data.id, name: data.name }}
+      />
+
+      {/* Archive Resource Confirmation Dialog */}
+      <ConfirmDialog
+        open={archiveDialogOpen}
+        onOpenChange={setArchiveDialogOpen}
+        title="Archive Resource"
+        description="Are you sure you want to archive this resource? Existing backups and plans will remain intact, but new backups cannot be scheduled."
+        objectName={data.name}
+        confirmText="Archive Resource"
+        destructive
+        isLoading={archiveResource.isPending}
+        onConfirm={handleArchive}
+      />
     </div>
   );
 }

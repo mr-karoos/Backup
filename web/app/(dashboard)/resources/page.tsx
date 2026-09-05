@@ -22,10 +22,12 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
 import { EmptyState } from '@/components/ui/empty-state';
 import { formatDate, formatResourceType, getStatusBadgeVariant } from '@/lib/format/formatters';
-import { Server, Search, ChevronRight } from 'lucide-react';
+import { usePermissions } from '@/lib/auth/permissions';
+import { Server, Search, ChevronRight, Plus } from 'lucide-react';
 
 export default function ResourcesPage() {
   const { activeOrgId } = useAuth();
+  const { canCreateResource } = usePermissions();
   const [search, setSearch] = useState('');
 
   const { data, isLoading, isError, error, refetch } = useQuery<ResourceResponse[]>({
@@ -50,14 +52,24 @@ export default function ResourcesPage() {
             Servers, databases, and assets registered for backup operations
           </p>
         </div>
-        <div className="relative w-full sm:w-64">
-          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search resources..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9 h-9"
-          />
+        <div className="flex flex-col sm:flex-row items-center gap-3">
+          <div className="relative w-full sm:w-64">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search resources..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-9 h-9"
+            />
+          </div>
+          {canCreateResource && (
+            <Link
+              href="/resources/new"
+              className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors w-full sm:w-auto shrink-0"
+            >
+              <Plus className="h-4 w-4" /> Add Resource
+            </Link>
+          )}
         </div>
       </div>
 

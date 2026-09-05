@@ -1,30 +1,45 @@
 'use client';
 
+import * as React from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
+import { usePermissions } from '@/lib/auth/permissions';
+import { useDeleteBackupArtifact } from '@/lib/api/mutations';
 import { type BackupArtifactResponse } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { formatDate, formatBytes, getStatusBadgeVariant } from '@/lib/format/formatters';
-import { ArrowLeft, Archive, ShieldCheck, FileArchive } from 'lucide-react';
+import { ArrowLeft, Archive, ShieldCheck, FileArchive, Trash2 } from 'lucide-react';
 
 export default function BackupArtifactDetailPage() {
   const params = useParams();
   const id = params?.id as string;
+  const router = useRouter();
   const { activeOrgId } = useAuth();
+  const { canDeleteArtifact } = usePermissions();
+
+  const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
+  const deleteArtifact = useDeleteBackupArtifact();
 
   const { data, isLoading, isError, error, refetch } = useQuery<BackupArtifactResponse>({
     queryKey: activeOrgId && id ? queryKeys.org(activeOrgId).artifacts.detail(id) : ['disabled'],
     queryFn: () => apiClient.get<BackupArtifactResponse>(`/backup-artifacts/${id}`),
     enabled: !!activeOrgId && !!id,
   });
+
+  const handleDelete = async () => {
+    await deleteArtifact.mutateAsync(id);
+    setDeleteDialogOpen(false);
+    router.push('/artifacts');
+  };
 
   if (isLoading) {
     return (
@@ -66,21 +81,36 @@ export default function BackupArtifactDetailPage() {
             Back to Artifacts
           </Button>
         </Link>
-        <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
               <Archive className="h-5 w-5" />
             </div>
             <div>
-              <h1 className="text-xl md:text-2xl font-bold tracking-tight text-foreground font-mono truncate max-w-xl">
-                {data.artifact_name}
-              </h1>
-              <p className="text-xs font-mono text-muted-foreground">ID: {data.id}</p>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl md:text-2xl font-bold tracking-tight text-foreground font-mono truncate max-w-xl">
+                  {data.artifact_name}
+                </h1>
+                <Badge variant={variant} className="capitalize text-xs px-2.5 py-0.5 shrink-0">
+                  {label}
+                </Badge>
+              </div>
+              <p className="text-xs font-mono text-muted-foreground mt-0.5">ID: {data.id}</p>
             </div>
           </div>
-          <Badge variant={variant} className="capitalize text-sm px-3 py-1">
-            Verification: {label}
-          </Badge>
+
+          {/* Action Buttons */}
+          {canDeleteArtifact && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setDeleteDialogOpen(true)}
+              className="gap-1.5 text-rose-500 hover:text-rose-400 hover:bg-rose-950/20"
+            >
+              <Trash2 className="h-4 w-4" />
+              Delete Artifact
+            </Button>
+          )}
         </div>
       </div>
 
@@ -175,6 +205,19 @@ export default function BackupArtifactDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title="Delete Backup Artifact"
+        description="Are you sure you want to permanently delete this backup artifact from storage? This action cannot be reversed and data cannot be recovered."
+        objectName={data.artifact_name}
+        confirmText="Delete Artifact"
+        destructive
+        isLoading={deleteArtifact.isPending}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }

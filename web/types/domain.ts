@@ -157,6 +157,214 @@ export interface CredentialListItemResponse {
   created_at: string;
 }
 
+export interface CreateCredentialRequest {
+  name: string;
+  type: CredentialType;
+  secret?: string;
+  passphrase?: string;
+  access_key_id?: string;
+  secret_access_key?: string;
+  session_token?: string;
+}
+
+export interface UpdateCredentialRequest {
+  name?: string;
+  secret?: string;
+  passphrase?: string;
+  access_key_id?: string;
+  secret_access_key?: string;
+  session_token?: string;
+}
+
+export interface CredentialCreateResponse {
+  id: string;
+  name: string;
+  type: CredentialType;
+  fingerprint?: string | null;
+  created_at: string;
+}
+
+export interface CredentialUpdateResponse {
+  id: string;
+  name: string;
+  type: CredentialType;
+  fingerprint?: string | null;
+  key_version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+// -------------------------------------------------------------
+// Resource Mutation DTOs
+// -------------------------------------------------------------
+export interface ConnectorConfigRequest {
+  connection_timeout_seconds?: number;
+  use_https?: boolean;
+}
+
+export interface CreateConnectorRequest {
+  host: string;
+  port: number;
+  auth_type: string;
+  username: string;
+  credential_id: string;
+  host_key_fingerprint?: string;
+  config?: ConnectorConfigRequest;
+}
+
+export interface CreateResourceRequest {
+  name: string;
+  type: ResourceType;
+  connector: CreateConnectorRequest;
+}
+
+export interface UpdateResourceRequest {
+  name: string;
+  connector: CreateConnectorRequest;
+}
+
+export interface ResourceCreateResponse {
+  id: string;
+  name: string;
+  type: ResourceType;
+  status: ResourceStatus;
+  created_at: string;
+}
+
+export interface ResourceUpdateResponse {
+  id: string;
+  name: string;
+  type: ResourceType;
+  status: ResourceStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConnectionTestResponse {
+  status: 'success' | 'failed';
+  latency_ms: number;
+  checked_at: string;
+  details: Record<string, unknown>;
+}
+
+export interface DiscoveredDatabaseResponse {
+  name: string;
+  size_bytes: number;
+  tables_count: number | null;
+  status: string;
+}
+
+// -------------------------------------------------------------
+// Storage Target Mutation DTOs
+// -------------------------------------------------------------
+export interface CreateStorageTargetRequest {
+  name: string;
+  type: StorageTargetType;
+  s3_config?: S3TargetConfigDTO;
+  credential_id?: string;
+}
+
+export interface UpdateStorageTargetRequest {
+  name?: string;
+  s3_config?: S3TargetConfigDTO;
+  credential_id?: string;
+  status?: StorageTargetStatus;
+}
+
+// -------------------------------------------------------------
+// Backup Plan Mutation DTOs
+// -------------------------------------------------------------
+export interface CreateBackupPlanRequest {
+  name: string;
+  resource_id: string;
+  backup_type: BackupType;
+  engine_type?: EngineType;
+  storage_target_id?: string;
+  database_selection?: DatabaseSelectionDTO;
+  file_selection?: FileSelectionDTO;
+  schedule: ScheduleDTO;
+  retention_policy?: RetentionPolicyDTO;
+}
+
+export interface UpdateBackupPlanRequest {
+  name: string;
+  engine_type?: EngineType;
+  storage_target_id?: string;
+  database_selection?: DatabaseSelectionDTO;
+  file_selection?: FileSelectionDTO;
+  schedule: ScheduleDTO;
+  retention_policy?: RetentionPolicyDTO;
+  status: PlanStatus;
+}
+
+export interface CreateBackupPlanResponse {
+  id: string;
+  name: string;
+  resource_id: string;
+  engine_type: EngineType;
+  storage_target_id: string;
+  status: PlanStatus;
+  created_at: string;
+}
+
+// -------------------------------------------------------------
+// Backup Job & Execution DTOs
+// -------------------------------------------------------------
+export interface CreateBackupJobRequest {
+  backup_plan_id?: string;
+  resource_id?: string;
+  backup_type?: BackupType;
+  engine_type?: EngineType;
+  storage_target_id?: string;
+  target_spec?: {
+    databases?: string[];
+    paths?: string[];
+    exclude_patterns?: string[];
+  };
+}
+
+export interface BackupJobResponse {
+  id: string;
+  resource_id: string;
+  backup_plan_id?: string | null;
+  backup_type: BackupType;
+  engine_type: EngineType;
+  storage_target_id: string;
+  target_spec: {
+    databases?: string[];
+    paths?: string[];
+    exclude_patterns?: string[];
+  };
+  status: string;
+  trigger_type: string;
+  created_at: string;
+}
+
+// -------------------------------------------------------------
+// Backup Run Verification DTOs
+// -------------------------------------------------------------
+export interface VerificationDetails {
+  checksum_matched: boolean;
+  archive_integrity: string;
+  compression_valid: boolean;
+  extracted_sample_check: string;
+}
+
+export interface VerifyBackupRunResponse {
+  run_id: string;
+  verification_status: VerificationStatus;
+  verified_at: string;
+  details: VerificationDetails;
+}
+
+// -------------------------------------------------------------
+// Organization Update DTOs
+// -------------------------------------------------------------
+export interface UpdateOrganizationRequest {
+  name: string;
+  metadata: Record<string, unknown>;
+}
+
 // -------------------------------------------------------------
 // System Health
 // -------------------------------------------------------------

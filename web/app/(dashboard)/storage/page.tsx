@@ -20,10 +20,12 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
 import { EmptyState } from '@/components/ui/empty-state';
 import { formatDate, getStatusBadgeVariant, formatStorageTargetType } from '@/lib/format/formatters';
-import { HardDrive, Cloud, Server, ChevronRight, Check } from 'lucide-react';
+import { usePermissions } from '@/lib/auth/permissions';
+import { HardDrive, Cloud, Server, ChevronRight, Check, Plus } from 'lucide-react';
 
 export default function StorageTargetsPage() {
   const { activeOrgId } = useAuth();
+  const { canManageStorage } = usePermissions();
 
   const { data, isLoading, isError, error, refetch } = useQuery<StorageTargetResponse[]>({
     queryKey: activeOrgId ? queryKeys.org(activeOrgId).storageTargets.all() : ['disabled'],
@@ -36,11 +38,21 @@ export default function StorageTargetsPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight text-foreground">Storage Destinations</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          Local volumes and S3-compatible cloud targets configured for backup retention
-        </p>
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">Storage Destinations</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Local volumes and S3-compatible cloud targets configured for backup retention
+          </p>
+        </div>
+        {canManageStorage && (
+          <Link
+            href="/storage/new"
+            className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors shrink-0"
+          >
+            <Plus className="h-4 w-4" /> Add Storage Target
+          </Link>
+        )}
       </div>
 
       {/* Main Content */}

@@ -13,6 +13,7 @@ export const queryKeys = {
     resources: {
       all: () => ['org', orgId, 'resources'] as const,
       detail: (id: string) => ['org', orgId, 'resources', id] as const,
+      databases: (id: string) => ['org', orgId, 'resources', id, 'databases'] as const,
     },
     plans: {
       all: (filters?: Record<string, unknown>) => ['org', orgId, 'plans', filters ?? {}] as const,
@@ -30,8 +31,14 @@ export const queryKeys = {
       all: () => ['org', orgId, 'storage-targets'] as const,
       detail: (id: string) => ['org', orgId, 'storage-targets', id] as const,
     },
+    storage: {
+      all: () => ['org', orgId, 'storage-targets'] as const,
+      detail: (id: string) => ['org', orgId, 'storage-targets', id] as const,
+    },
+    overview: () => ['org', orgId, 'overview'] as const,
     credentials: {
       all: () => ['org', orgId, 'credentials'] as const,
+      detail: (id: string) => ['org', orgId, 'credentials', id] as const,
     },
   }),
 };
@@ -59,6 +66,10 @@ export function createQueryClient(): QueryClient {
           // Max 1 retry for transient network/5xx failures
           return failureCount < 1;
         },
+      },
+      mutations: {
+        // Zero auto-retry for operational safety; 401 single-flight replay is handled by apiClient
+        retry: 0,
       },
     },
   });

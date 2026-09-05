@@ -1,35 +1,53 @@
 'use client';
 
+import * as React from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
+import { usePermissions } from '@/lib/auth/permissions';
+import { useArchiveBackupPlan } from '@/lib/api/mutations';
 import { type BackupPlanResponse } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { ManualBackupDialog } from '@/components/backup/manual-backup-dialog';
 import {
   formatDate,
   formatCronSchedule,
   formatBackupType,
   getStatusBadgeVariant,
 } from '@/lib/format/formatters';
-import { ArrowLeft, Calendar, Clock, Database, FolderArchive } from 'lucide-react';
+import { ArrowLeft, Calendar, Clock, Database, FolderArchive, Play, Pencil, Archive } from 'lucide-react';
 
 export default function BackupPlanDetailPage() {
   const params = useParams();
   const id = params?.id as string;
+  const router = useRouter();
   const { activeOrgId } = useAuth();
+  const { canExecutePlanBackup, canEditPlan, canArchivePlan } = usePermissions();
+
+  const [backupDialogOpen, setBackupDialogOpen] = React.useState(false);
+  const [archiveDialogOpen, setArchiveDialogOpen] = React.useState(false);
+
+  const archivePlan = useArchiveBackupPlan();
 
   const { data, isLoading, isError, error, refetch } = useQuery<BackupPlanResponse>({
     queryKey: activeOrgId && id ? queryKeys.org(activeOrgId).plans.detail(id) : ['disabled'],
     queryFn: () => apiClient.get<BackupPlanResponse>(`/backup-plans/${id}`),
     enabled: !!activeOrgId && !!id,
   });
+
+  const handleArchive = async () => {
+    await archivePlan.mutateAsync(id);
+    setArchiveDialogOpen(false);
+    router.push('/plans');
+  };
 
   if (isLoading) {
     return (
@@ -71,19 +89,56 @@ export default function BackupPlanDetailPage() {
             Back to Backup Plans
           </Button>
         </Link>
-        <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
               <Calendar className="h-5 w-5" />
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight text-foreground">{data.name}</h1>
-              <p className="text-xs font-mono text-muted-foreground">ID: {data.id}</p>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-bold tracking-tight text-foreground">{data.name}</h1>
+                <Badge variant={variant} className="capitalize text-xs px-2.5 py-0.5">
+                  {label}
+                </Badge>
+              </div>
+              <p className="text-xs font-mono text-muted-foreground mt-0.5">ID: {data.id}</p>
             </div>
           </div>
-          <Badge variant={variant} className="capitalize text-sm px-3 py-1">
-            {label}
-          </Badge>
+
+          {/* Action Buttons */}
+          <div className="flex items-center gap-2">
+            {canExecutePlanBackup && (
+              <Button
+                size="sm"
+                onClick={() => setBackupDialogOpen(true)}
+                className="gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white"
+              >
+                <Play className="h-4 w-4 fill-current" />
+                Run Now
+              </Button>
+            )}
+
+            {canEditPlan && (
+              <Link href={`/plans/${data.id}/edit`}>
+                <Button variant="outline" size="sm" className="gap-1.5">
+                  <Pencil className="h-4 w-4" />
+                  Edit
+                </Button>
+              </Link>
+            )}
+
+            {canArchivePlan && data.status !== 'archived' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setArchiveDialogOpen(true)}
+                className="gap-1.5 text-rose-500 hover:text-rose-400 hover:bg-rose-950/20"
+              >
+                <Archive className="h-4 w-4" />
+                Archive
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -241,6 +296,31 @@ export default function BackupPlanDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Manual Backup Execution Dialog */}
+      <ManualBackupDialog
+        open={backupDialogOpen}
+        onOpenChange={setBackupDialogOpen}
+        plan={{
+          id: data.id,
+          name: data.name,
+          resourceName: data.resource_name || 'Attached Resource',
+          backupType: data.backup_type,
+        }}
+      />
+
+      {/* Archive Plan Confirmation Dialog */}
+      <ConfirmDialog
+        open={archiveDialogOpen}
+        onOpenChange={setArchiveDialogOpen}
+        title="Archive Backup Plan"
+        description="Are you sure you want to archive this backup plan? Scheduled backup runs will stop executing, but previous backup runs and artifacts will remain preserved."
+        objectName={data.name}
+        confirmText="Archive Plan"
+        destructive
+        isLoading={archivePlan.isPending}
+        onConfirm={handleArchive}
+      />
     </div>
   );
 }

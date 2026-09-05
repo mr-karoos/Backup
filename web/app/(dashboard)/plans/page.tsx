@@ -27,10 +27,12 @@ import {
   formatBackupType,
   getStatusBadgeVariant,
 } from '@/lib/format/formatters';
-import { Calendar, Search, ChevronRight, Clock } from 'lucide-react';
+import { usePermissions } from '@/lib/auth/permissions';
+import { Calendar, Search, ChevronRight, Clock, Plus } from 'lucide-react';
 
 export default function BackupPlansPage() {
   const { activeOrgId } = useAuth();
+  const { canCreatePlan } = usePermissions();
   const [search, setSearch] = useState('');
 
   const { data, isLoading, isError, error, refetch } = useQuery<BackupPlanResponse[]>({
@@ -57,14 +59,24 @@ export default function BackupPlansPage() {
             Automated schedules, targets, and retention policies
           </p>
         </div>
-        <div className="relative w-full sm:w-64">
-          <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
-          <Input
-            placeholder="Search plans..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="pl-9 h-9"
-          />
+        <div className="flex flex-col sm:flex-row items-center gap-3">
+          <div className="relative w-full sm:w-64">
+            <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
+            <Input
+              placeholder="Search plans..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="pl-9 h-9"
+            />
+          </div>
+          {canCreatePlan && (
+            <Link
+              href="/plans/new"
+              className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 transition-colors w-full sm:w-auto shrink-0"
+            >
+              <Plus className="h-4 w-4" /> Create Plan
+            </Link>
+          )}
         </div>
       </div>
 

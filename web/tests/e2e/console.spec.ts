@@ -39,7 +39,20 @@ const mockMemberships = [
     is_default_internal: true,
     role: 'admin',
     status: 'active',
-    permissions: ['resource:read', 'resource:write', 'credential:read'],
+    permissions: [
+      'resource:read',
+      'resource:write',
+      'credential:read',
+      'credential:write',
+      'storage_target:read',
+      'storage_target:write',
+      'backup_plan:read',
+      'backup_plan:write',
+      'backup_job:execute',
+      'backup_run:verify',
+      'backup_artifact:delete',
+      'organization:update',
+    ],
   },
   {
     organization_id: ORG_2_ID,
@@ -258,15 +271,177 @@ async function setupApiMocks(page: any, userRole: 'admin' | 'viewer' = 'admin') 
 
     // Me
     if (url.includes('/api/v1/auth/me')) {
+      const activeRole = userRole === 'admin' ? 'admin' : 'viewer';
+      const viewerPermissions = [
+        'resource:read',
+        'storage_target:read',
+        'backup_plan:read',
+        'backup_run:read',
+        'backup_artifact:read',
+      ];
+      const memberships = [
+        {
+          ...mockMemberships[0],
+          role: activeRole,
+          permissions: userRole === 'admin' ? (mockMemberships[0]?.permissions ?? []) : viewerPermissions,
+        },
+        mockMemberships[1],
+      ];
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
           data: {
             user: userRole === 'admin' ? mockUser : mockViewerUser,
-            memberships: mockMemberships,
+            memberships,
           },
         }),
+      });
+    }
+
+    // Mutation Handlers
+    const method = route.request().method();
+
+    // Resource Actions
+    if (url.includes('/test-connection') && method === 'POST') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            status: 'success',
+            latency_ms: 32,
+            checked_at: new Date().toISOString(),
+            details: { os: 'Ubuntu 24.04', ssh: 'OpenSSH_9.6' },
+          },
+        }),
+      });
+    }
+    if (url.includes('/databases') && method === 'GET') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: [
+            { name: 'app_production', size_bytes: 52428800, tables_count: 34, status: 'available' },
+            { name: 'app_analytics', size_bytes: 104857600, tables_count: 8, status: 'available' },
+          ],
+        }),
+      });
+    }
+    if (url.includes('/verify') && method === 'POST') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            run_id: RUN_1_ID,
+            verification_status: 'verified',
+            verified_at: new Date().toISOString(),
+            details: {
+              checksum_matched: true,
+              archive_integrity: 'tar valid',
+              compression_valid: true,
+              extracted_sample_check: 'header verified',
+            },
+          },
+        }),
+      });
+    }
+    if (url.includes('/api/v1/backup-jobs') && method === 'POST') {
+      return route.fulfill({
+        status: 202,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            id: 'job-new-001',
+            status: 'pending',
+            created_at: new Date().toISOString(),
+          },
+        }),
+      });
+    }
+    if (url.includes('/api/v1/credentials') && method === 'POST') {
+      const body = route.request().postDataJSON?.() || {};
+      return route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            id: 'cred-new-001',
+            name: body.name || 'New Credential',
+            type: body.type,
+            fingerprint: 'SHA256:mockfingerprint',
+            key_version: 1,
+            created_at: new Date().toISOString(),
+          },
+        }),
+      });
+    }
+    if (url.includes('/api/v1/resources') && method === 'POST') {
+      const body = route.request().postDataJSON?.() || {};
+      return route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            id: 'res-new-001',
+            name: body.name || 'New Resource',
+            type: body.type,
+            status: 'active',
+            created_at: new Date().toISOString(),
+          },
+        }),
+      });
+    }
+    if (url.includes('/api/v1/backup-plans') && method === 'POST') {
+      const body = route.request().postDataJSON?.() || {};
+      return route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            id: 'plan-new-001',
+            name: body.name,
+            resource_id: body.resource_id,
+            engine_type: body.engine_type || 'direct_stream',
+            storage_target_id: body.storage_target_id || TARGET_1_ID,
+            status: 'active',
+            created_at: new Date().toISOString(),
+          },
+        }),
+      });
+    }
+    if (url.includes('/api/v1/storage-targets') && method === 'POST') {
+      const body = route.request().postDataJSON?.() || {};
+      return route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            id: 'target-new-001',
+            name: body.name,
+            type: body.type,
+            status: 'active',
+            is_default: false,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        }),
+      });
+    }
+    if (method === 'DELETE') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ data: null }),
+      });
+    }
+    if (method === 'PUT' || method === 'PATCH') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ data: { id: 'updated' } }),
       });
     }
 
@@ -678,5 +853,177 @@ test.describe('Backup Platform Frontend E2E Suite', () => {
     await expect(page).toHaveURL(`/storage/${TARGET_2_ID}`);
     await expect(page.getByRole('heading', { name: 'MinIO Secondary Target' })).toBeVisible();
     await expect(page.getByText('S3 Compatible')).toBeVisible();
+  });
+
+  test('13. Create Credential flow with write-only SecretInput', async ({ page }) => {
+    await setupApiMocks(page, 'admin');
+    await page.goto('/credentials/new');
+
+    await expect(page.getByRole('heading', { name: 'Add New Credential' })).toBeVisible();
+
+    // Fill form
+    await page.locator('#cred-name').fill('Staging Key');
+    await page.locator('#cred-type').selectOption('ssh_password');
+
+    const secretInput = page.locator('#ssh-password');
+    await expect(secretInput).toBeVisible();
+    await expect(secretInput).toHaveAttribute('type', 'password');
+
+    await secretInput.fill('MySecretPassword123!');
+
+    // Toggle reveal button
+    const toggleBtn = page.getByRole('button', { name: /show secret/i });
+    await expect(toggleBtn).toBeVisible();
+    await toggleBtn.click();
+    await expect(secretInput).toHaveAttribute('type', 'text');
+
+    // Submit
+    await page.getByRole('button', { name: /save credential/i }).click();
+    await expect(page).toHaveURL('/credentials');
+  });
+
+  test('14. Register Resource flow and Test Connection trigger on Resource Detail', async ({ page }) => {
+    await setupApiMocks(page, 'admin');
+    await page.goto('/resources/new');
+
+    await expect(page.getByRole('heading', { name: 'Register Resource' })).toBeVisible();
+
+    await page.locator('#res-name').fill('App Server 02');
+    await page.locator('#res-host').fill('192.168.1.50');
+    await page.locator('#res-cred').selectOption(CREDENTIAL_1_ID);
+
+    await page.getByRole('button', { name: /register resource/i }).click();
+    await expect(page).toHaveURL('/resources');
+
+    // Go to Resource Detail and test connection
+    await page.goto(`/resources/${RESOURCE_1_ID}`);
+    await expect(page.getByRole('heading', { name: 'Primary Database Server' })).toBeVisible();
+
+    const testBtn = page.getByRole('button', { name: /test connection/i });
+    await expect(testBtn).toBeVisible();
+    await testBtn.click();
+
+    // Verify test connection result appears
+    await expect(page.getByText(/connection test successful/i)).toBeVisible();
+    await expect(page.getByText(/connected successfully in 32ms/i)).toBeVisible();
+  });
+
+  test('15. Create Backup Plan wizard 6-step flow', async ({ page }) => {
+    await setupApiMocks(page, 'admin');
+    await page.goto('/plans/new');
+
+    await expect(page.getByRole('heading', { name: 'Create Backup Plan' })).toBeVisible();
+
+    // Step 0: Plan Name & Resource
+    await page.locator('#plan-name').fill('Production MySQL Daily');
+    await page.locator('#plan-resource').selectOption(RESOURCE_1_ID);
+    await page.getByRole('button', { name: /^next/i }).click();
+
+    // Step 1: Backup Type
+    await expect(page.getByText('Step 2: Backup Type')).toBeVisible();
+    await page.getByRole('button', { name: /^next/i }).click();
+
+    // Step 2: Content Selection
+    await expect(page.getByText('Step 3: Content Selection')).toBeVisible();
+    await page.getByRole('button', { name: /^next/i }).click();
+
+    // Step 3: Schedule
+    await expect(page.getByText('Step 4: Schedule')).toBeVisible();
+    await page.getByRole('button', { name: /^next/i }).click();
+
+    // Step 4: Storage & Retention
+    await expect(page.getByText('Step 5: Storage & Retention')).toBeVisible();
+    await page.getByRole('button', { name: /^next/i }).click();
+
+    // Step 5: Review & Submit
+    await expect(page.getByText('Step 6: Review')).toBeVisible();
+    await expect(page.getByText('Production MySQL Daily')).toBeVisible();
+
+    await page.getByRole('button', { name: /create backup plan/i }).click();
+    await expect(page).toHaveURL('/plans');
+  });
+
+  test('16. Trigger Manual Backup ("Run Now") on Plan Detail', async ({ page }) => {
+    await setupApiMocks(page, 'admin');
+    await page.goto(`/plans/${PLAN_1_ID}`);
+
+    await expect(page.getByRole('heading', { name: 'Nightly Database Backup' })).toBeVisible();
+
+    const runNowBtn = page.getByRole('button', { name: /run now/i });
+    await expect(runNowBtn).toBeVisible();
+    await runNowBtn.click();
+
+    // Dialog opens
+    await expect(page.getByRole('heading', { name: 'Execute Backup Plan' })).toBeVisible();
+    await expect(page.getByRole('dialog').getByText('Nightly Database Backup', { exact: true })).toBeVisible();
+
+    // Confirm execution
+    const confirmBtn = page.getByRole('button', { name: /run backup now/i });
+    await expect(confirmBtn).toBeVisible();
+    await confirmBtn.click();
+
+    // Navigates to /runs
+    await expect(page).toHaveURL('/runs');
+  });
+
+  test('17. Verify Backup Run action on Run Detail', async ({ page }) => {
+    await setupApiMocks(page, 'admin');
+    await page.goto(`/runs/${RUN_1_ID}`);
+
+    await expect(page.getByRole('heading', { name: new RegExp(`Run ${RUN_1_ID}`) })).toBeVisible();
+
+    const verifyBtn = page.getByRole('button', { name: /verify backup/i });
+    await expect(verifyBtn).toBeVisible();
+    await verifyBtn.click();
+
+    // Verification result card updates
+    await expect(page.getByText(/verification result: verified/i)).toBeVisible();
+    await expect(page.getByText('tar valid')).toBeVisible();
+  });
+
+  test('18. Delete Backup Artifact with confirmation dialog', async ({ page }) => {
+    await setupApiMocks(page, 'admin');
+    await page.goto(`/artifacts/${ARTIFACT_1_ID}`);
+
+    await expect(page.getByRole('heading', { name: 'production_db.sql.gz' })).toBeVisible();
+
+    // Download button must NOT be present per GAP-11
+    await expect(page.getByRole('button', { name: /download/i })).not.toBeVisible();
+
+    // Delete button
+    const deleteBtn = page.getByRole('button', { name: /delete artifact/i });
+    await expect(deleteBtn).toBeVisible();
+    await deleteBtn.click();
+
+    // Confirm dialog
+    await expect(page.getByRole('heading', { name: 'Delete Backup Artifact' })).toBeVisible();
+    const confirmDeleteBtn = page.getByRole('dialog').getByRole('button', { name: 'Delete Artifact' });
+    await expect(confirmDeleteBtn).toBeVisible();
+    await confirmDeleteBtn.click();
+
+    // Redirects to /artifacts
+    await expect(page).toHaveURL('/artifacts');
+  });
+
+  test('19. RBAC Enforcement: Viewer cannot access or trigger operational actions', async ({ page }) => {
+    await setupApiMocks(page, 'viewer');
+
+    // On /resources: "Add Resource" button is hidden
+    await page.goto('/resources');
+    await expect(page.getByRole('heading', { name: 'Protected Resources' })).toBeVisible();
+    await expect(page.getByRole('link', { name: /add resource/i })).not.toBeVisible();
+
+    // On /plans: "Create Plan" button is hidden
+    await page.goto('/plans');
+    await expect(page.getByRole('heading', { name: 'Backup Plans' })).toBeVisible();
+    await expect(page.getByRole('link', { name: /create plan/i })).not.toBeVisible();
+
+    // On /runs/[id]: "Verify Backup" button is hidden
+    await page.goto(`/runs/${RUN_1_ID}`);
+    await expect(page.getByRole('button', { name: /verify backup/i })).not.toBeVisible();
+
+    // On /artifacts/[id]: "Delete Artifact" button is hidden
+    await page.goto(`/artifacts/${ARTIFACT_1_ID}`);
+    await expect(page.getByRole('button', { name: /delete artifact/i })).not.toBeVisible();
   });
 });

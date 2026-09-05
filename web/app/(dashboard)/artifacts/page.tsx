@@ -6,10 +6,14 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
+import { usePermissions } from '@/lib/auth/permissions';
+import { useDeleteBackupArtifact } from '@/lib/api/mutations';
 import { type BackupArtifactResponse } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import {
   Table,
   TableHeader,
@@ -26,11 +30,15 @@ import {
   formatBytes,
   getStatusBadgeVariant,
 } from '@/lib/format/formatters';
-import { Archive, Search, ChevronRight, FileArchive } from 'lucide-react';
+import { Archive, Search, ChevronRight, FileArchive, Trash2 } from 'lucide-react';
 
 export default function BackupArtifactsPage() {
   const { activeOrgId } = useAuth();
+  const { canDeleteArtifact } = usePermissions();
   const [search, setSearch] = useState('');
+  const [deletingArtifact, setDeletingArtifact] = useState<BackupArtifactResponse | null>(null);
+
+  const deleteArtifact = useDeleteBackupArtifact();
 
   // Critical: Send NO query parameters to /backup-artifacts
   const { data, isLoading, isError, error, refetch } = useQuery<BackupArtifactResponse[]>({
@@ -45,6 +53,12 @@ export default function BackupArtifactsPage() {
       a.artifact_name.toLowerCase().includes(search.toLowerCase()) ||
       a.id.toLowerCase().includes(search.toLowerCase())
   );
+
+  const handleDelete = async () => {
+    if (!deletingArtifact) return;
+    await deleteArtifact.mutateAsync(deletingArtifact.id);
+    setDeletingArtifact(null);
+  };
 
   return (
     <div className="space-y-6">
@@ -112,7 +126,7 @@ export default function BackupArtifactsPage() {
                       <TableHead>Verification</TableHead>
                       <TableHead>Verified At</TableHead>
                       <TableHead>Created</TableHead>
-                      <TableHead className="w-[80px]"></TableHead>
+                      <TableHead className="w-[100px] text-right"></TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -147,13 +161,26 @@ export default function BackupArtifactsPage() {
                             {formatDate(art.created_at)}
                           </TableCell>
                           <TableCell className="text-right">
-                            <Link
-                              href={`/artifacts/${art.id}`}
-                              className="text-muted-foreground hover:text-foreground inline-flex p-1"
-                              aria-label={`View artifact ${art.artifact_name}`}
-                            >
-                              <ChevronRight className="h-4 w-4" />
-                            </Link>
+                            <div className="flex items-center justify-end gap-1">
+                              {canDeleteArtifact && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => setDeletingArtifact(art)}
+                                  className="h-8 w-8 text-rose-500 hover:text-rose-400 hover:bg-rose-950/20"
+                                  aria-label={`Delete ${art.artifact_name}`}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              )}
+                              <Link
+                                href={`/artifacts/${art.id}`}
+                                className="text-muted-foreground hover:text-foreground inline-flex p-1"
+                                aria-label={`View artifact ${art.artifact_name}`}
+                              >
+                                <ChevronRight className="h-4 w-4" />
+                              </Link>
+                            </div>
                           </TableCell>
                         </TableRow>
                       );
@@ -167,21 +194,23 @@ export default function BackupArtifactsPage() {
                 {filtered.map((art) => {
                   const { label, variant } = getStatusBadgeVariant(art.verification_status);
                   return (
-                    <Link
+                    <div
                       key={art.id}
-                      href={`/artifacts/${art.id}`}
-                      className="block p-4 hover:bg-muted/30 transition-colors"
+                      className="p-4 hover:bg-muted/30 transition-colors space-y-2"
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-2 font-mono text-xs font-medium truncate">
+                        <Link
+                          href={`/artifacts/${art.id}`}
+                          className="flex items-center gap-2 font-mono text-xs font-medium truncate hover:underline"
+                        >
                           <FileArchive className="h-4 w-4 text-muted-foreground shrink-0" />
                           <span className="truncate text-foreground">{art.artifact_name}</span>
-                        </div>
+                        </Link>
                         <Badge variant={variant} className="capitalize shrink-0">
                           {label}
                         </Badge>
                       </div>
-                      <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-muted-foreground font-mono">
+                      <div className="grid grid-cols-2 gap-1 text-xs text-muted-foreground font-mono">
                         <div>
                           <span>Size: {formatBytes(art.size_bytes)}</span>
                         </div>
@@ -189,7 +218,19 @@ export default function BackupArtifactsPage() {
                           <span>{formatDate(art.created_at)}</span>
                         </div>
                       </div>
-                    </Link>
+                      {canDeleteArtifact && (
+                        <div className="flex justify-end pt-1">
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            onClick={() => setDeletingArtifact(art)}
+                            className="h-7 text-xs"
+                          >
+                            Delete
+                          </Button>
+                        </div>
+                      )}
+                    </div>
                   );
                 })}
               </div>
@@ -197,6 +238,19 @@ export default function BackupArtifactsPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        open={!!deletingArtifact}
+        onOpenChange={(open) => !open && setDeletingArtifact(null)}
+        title="Delete Backup Artifact"
+        description="Are you sure you want to permanently delete this backup artifact from storage? This action cannot be reversed."
+        objectName={deletingArtifact?.artifact_name}
+        confirmText="Delete Artifact"
+        destructive
+        isLoading={deleteArtifact.isPending}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }

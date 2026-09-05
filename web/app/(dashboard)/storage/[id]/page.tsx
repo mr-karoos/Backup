@@ -1,30 +1,97 @@
 'use client';
 
+import * as React from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
-import { type StorageTargetResponse } from '@/types/domain';
+import { usePermissions } from '@/lib/auth/permissions';
+import { useUpdateStorageTarget, useDeleteStorageTarget } from '@/lib/api/mutations';
+import { type StorageTargetResponse, type UpdateStorageTargetRequest } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { FormField } from '@/components/ui/form-field';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog';
 import { formatDate, getStatusBadgeVariant, formatStorageTargetType } from '@/lib/format/formatters';
-import { ArrowLeft, HardDrive, Cloud, Server, ShieldCheck, Check } from 'lucide-react';
+import { ArrowLeft, HardDrive, Cloud, Server, ShieldCheck, Check, Pencil, Trash2 } from 'lucide-react';
 
 export default function StorageTargetDetailPage() {
   const params = useParams();
   const id = params?.id as string;
+  const router = useRouter();
   const { activeOrgId } = useAuth();
+  const { canManageStorage } = usePermissions();
+
+  const [editDialogOpen, setEditDialogOpen] = React.useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
+
+  // Edit form state
+  const [editName, setEditName] = React.useState('');
+  const [editBucket, setEditBucket] = React.useState('');
+  const [editRegion, setEditRegion] = React.useState('');
+  const [editEndpoint, setEditEndpoint] = React.useState('');
+  const [editForcePathStyle, setEditForcePathStyle] = React.useState(false);
+
+  const updateTarget = useUpdateStorageTarget();
+  const deleteTarget = useDeleteStorageTarget();
 
   const { data, isLoading, isError, error, refetch } = useQuery<StorageTargetResponse>({
     queryKey: activeOrgId && id ? queryKeys.org(activeOrgId).storageTargets.detail(id) : ['disabled'],
     queryFn: () => apiClient.get<StorageTargetResponse>(`/storage-targets/${id}`),
     enabled: !!activeOrgId && !!id,
   });
+
+  const handleOpenEdit = () => {
+    if (!data) return;
+    setEditName(data.name);
+    if (data.s3_config) {
+      setEditBucket(data.s3_config.bucket);
+      setEditRegion(data.s3_config.region || '');
+      setEditEndpoint(data.s3_config.endpoint || '');
+      setEditForcePathStyle(data.s3_config.force_path_style ?? false);
+    }
+    setEditDialogOpen(true);
+  };
+
+  const handleUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!data) return;
+
+    const payload: UpdateStorageTargetRequest = {
+      name: editName.trim() || undefined,
+    };
+
+    if (data.type === 's3' || data.type === 's3_compatible') {
+      payload.s3_config = {
+        bucket: editBucket.trim(),
+        region: editRegion.trim(),
+        endpoint: editEndpoint.trim(),
+        force_path_style: editForcePathStyle,
+      };
+    }
+
+    await updateTarget.mutateAsync({ id, data: payload });
+    setEditDialogOpen(false);
+    refetch();
+  };
+
+  const handleDelete = async () => {
+    await deleteTarget.mutateAsync(id);
+    setDeleteDialogOpen(false);
+    router.push('/storage');
+  };
 
   if (isLoading) {
     return (
@@ -72,21 +139,50 @@ export default function StorageTargetDetailPage() {
               {isCloud ? <Cloud className="h-5 w-5 text-sky-500" /> : <HardDrive className="h-5 w-5" />}
             </div>
             <div>
-              <h1 className="text-2xl font-bold tracking-tight text-foreground">{data.name}</h1>
-              <p className="text-xs font-mono text-muted-foreground">ID: {data.id}</p>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-bold tracking-tight text-foreground">{data.name}</h1>
+                {data.is_default && (
+                  <Badge variant="secondary" className="gap-1 text-xs">
+                    <Check className="h-3 w-3" />
+                    Default Destination
+                  </Badge>
+                )}
+                <Badge variant={variant} className="capitalize text-sm px-2.5 py-0.5">
+                  {label}
+                </Badge>
+              </div>
+              <p className="text-xs font-mono text-muted-foreground mt-0.5">ID: {data.id}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2">
-            {data.is_default && (
-              <Badge variant="secondary" className="gap-1 text-xs">
-                <Check className="h-3 w-3" />
-                Default Destination
-              </Badge>
-            )}
-            <Badge variant={variant} className="capitalize text-sm px-3 py-1">
-              {label}
-            </Badge>
-          </div>
+
+          {/* Action Buttons */}
+          {canManageStorage && (
+            <div className="flex items-center gap-2">
+              {data.type !== 'local' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleOpenEdit}
+                  className="gap-1.5"
+                >
+                  <Pencil className="h-4 w-4" />
+                  Edit Target
+                </Button>
+              )}
+
+              {!data.is_default && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setDeleteDialogOpen(true)}
+                  className="gap-1.5 text-rose-500 hover:text-rose-400 hover:bg-rose-950/20"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete
+                </Button>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -174,6 +270,111 @@ export default function StorageTargetDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Edit Storage Target Modal */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="h-5 w-5 text-primary" />
+              Edit Storage Target
+            </DialogTitle>
+            <DialogDescription>
+              Update configuration parameters for {data.name}.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={handleUpdate} className="space-y-4 py-2">
+            <FormField label="Target Name" htmlFor="edit-target-name" required>
+              <input
+                id="edit-target-name"
+                type="text"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+              />
+            </FormField>
+
+            {isCloud && (
+              <>
+                <FormField label="Bucket Name" htmlFor="edit-bucket" required>
+                  <input
+                    id="edit-bucket"
+                    type="text"
+                    value={editBucket}
+                    onChange={(e) => setEditBucket(e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </FormField>
+
+                <FormField label="Region" htmlFor="edit-region" required>
+                  <input
+                    id="edit-region"
+                    type="text"
+                    value={editRegion}
+                    onChange={(e) => setEditRegion(e.target.value)}
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </FormField>
+
+                {data.type === 's3_compatible' && (
+                  <FormField label="Endpoint URL" htmlFor="edit-endpoint">
+                    <input
+                      id="edit-endpoint"
+                      type="text"
+                      value={editEndpoint}
+                      onChange={(e) => setEditEndpoint(e.target.value)}
+                      placeholder="https://..."
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </FormField>
+                )}
+
+                <div className="pt-2">
+                  <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editForcePathStyle}
+                      onChange={(e) => setEditForcePathStyle(e.target.checked)}
+                      className="rounded border-input text-primary focus:ring-ring"
+                    />
+                    <span>Force Path Style</span>
+                  </label>
+                </div>
+              </>
+            )}
+
+            <div className="flex justify-end gap-3 pt-4 border-t">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setEditDialogOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={updateTarget.isPending}
+              >
+                {updateTarget.isPending ? 'Saving...' : 'Save Changes'}
+              </Button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title="Delete Storage Target"
+        description="Are you sure you want to delete this storage destination? Any active plans using this target must be updated before deletion."
+        objectName={data.name}
+        confirmText="Delete Target"
+        destructive
+        isLoading={deleteTarget.isPending}
+        onConfirm={handleDelete}
+      />
     </div>
   );
 }
