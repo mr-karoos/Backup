@@ -1,7 +1,7 @@
-﻿import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { buildCspHeader } from '@/lib/security/csp';
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   // Generate cryptographically random per-request nonce
   const nonce = Buffer.from(crypto.randomUUID()).toString('base64');
   const isProduction = process.env.NODE_ENV === 'production';

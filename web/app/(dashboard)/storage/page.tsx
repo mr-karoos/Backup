@@ -155,7 +155,7 @@ export default function StorageTargetsPage() {
               <div className="md:hidden divide-y">
                 {targets.map((target) => {
                   const { label, variant } = getStatusBadgeVariant(target.status);
-                  const isS3 = target.type === 's3';
+                  const isCloud = target.type === 's3' || target.type === 's3_compatible';
 
                   return (
                     <Link
@@ -165,7 +165,7 @@ export default function StorageTargetsPage() {
                     >
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex items-center gap-2 font-medium">
-                          {isS3 ? (
+                          {isCloud ? (
                             <Cloud className="h-4 w-4 text-sky-500 shrink-0" />
                           ) : (
                             <Server className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -179,16 +179,20 @@ export default function StorageTargetsPage() {
 
                       <div className="mt-2 text-xs text-muted-foreground space-y-1">
                         <div className="flex items-center justify-between">
-                          <span className="uppercase font-mono">{target.type}</span>
+                          <span className="font-medium text-foreground">
+                            {formatStorageTargetType(target.type)}
+                          </span>
                           {target.is_default && (
                             <span className="text-primary font-medium">Default Target</span>
                           )}
                         </div>
-                        {isS3 && target.s3_config && (
-                          <div className="font-mono truncate">
-                            bucket: {target.s3_config.bucket}
-                          </div>
-                        )}
+                        <div className="font-mono text-muted-foreground truncate">
+                          {target.s3_config
+                            ? `bucket: ${target.s3_config.bucket}`
+                            : isCloud
+                            ? 'S3-compatible target'
+                            : 'Platform Managed Volume'}
+                        </div>
                       </div>
                     </Link>
                   );

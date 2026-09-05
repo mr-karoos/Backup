@@ -606,4 +606,77 @@ test.describe('Backup Platform Frontend E2E Suite', () => {
     );
     expect(dashboardViolations).toEqual([]);
   });
+
+  test('11. Runtime CSP verification on real Next.js document response', async ({ page }) => {
+    // Intercept refresh so page stays on login
+    await page.route('**/api/v1/auth/refresh', async (route) => {
+      route.fulfill({ status: 401, json: { error: { code: 'UNAUTHORIZED' } } });
+    });
+
+    const response = await page.goto('/login');
+    expect(response).not.toBeNull();
+    expect(response!.status()).toBe(200);
+
+    const headers = response!.headers();
+    const csp = headers['content-security-policy'] || '';
+
+    // Verify required directives
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("object-src 'none'");
+    expect(csp).toContain("base-uri 'self'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("form-action 'self'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).toContain("'strict-dynamic'");
+
+    // Verify dynamic nonce is present
+    const nonceMatch = csp.match(/'nonce-([A-Za-z0-9+/=_-]+)'/);
+    expect(nonceMatch).not.toBeNull();
+    const nonce = nonceMatch?.[1] ?? '';
+    expect(nonce.length).toBeGreaterThan(0);
+
+    // Verify script-src does not allow unsafe-inline
+    expect(csp).not.toMatch(/script-src[^;]*'unsafe-inline'/);
+
+    // Verify page hydration succeeds under this CSP
+    await expect(page.getByRole('heading', { name: 'Backup Platform' })).toBeVisible();
+    await expect(page.locator('#email')).toBeVisible();
+    await expect(page.locator('#password')).toBeVisible();
+  });
+
+  test('12. Mobile Storage Viewport (390x844) renders accurate S3 and S3-compatible cloud semantics', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await setupApiMocks(page);
+
+    await page.goto('/storage');
+
+    await expect(page.getByRole('heading', { name: 'Storage Targets' })).toBeVisible();
+
+    const mobileContainer = page.locator('div.md\\:hidden.divide-y');
+    await expect(mobileContainer).toBeVisible();
+
+    // Verify Primary S3 Bucket card contents
+    const s3Card = mobileContainer.locator(`a[href="/storage/${TARGET_1_ID}"]`);
+    await expect(s3Card).toBeVisible();
+    await expect(s3Card.getByText('Primary S3 Bucket')).toBeVisible();
+    await expect(s3Card.getByText('Amazon / Standard S3')).toBeVisible();
+    await expect(s3Card.getByText('bucket: corporate-backups')).toBeVisible();
+    await expect(s3Card.getByText('Platform Managed Volume')).not.toBeVisible();
+
+    // Verify MinIO Secondary Target card contents
+    const minioCard = mobileContainer.locator(`a[href="/storage/${TARGET_2_ID}"]`);
+    await expect(minioCard).toBeVisible();
+    await expect(minioCard.getByText('MinIO Secondary Target')).toBeVisible();
+    await expect(minioCard.getByText('S3 Compatible')).toBeVisible();
+    await expect(minioCard.getByText('S3-compatible target')).toBeVisible();
+    await expect(minioCard.getByText('Platform Managed Volume')).not.toBeVisible();
+
+    // Click MinIO card and verify navigation to detail page
+    await minioCard.click();
+    await expect(page).toHaveURL(`/storage/${TARGET_2_ID}`);
+    await expect(page.getByRole('heading', { name: 'MinIO Secondary Target' })).toBeVisible();
+    await expect(page.getByText('S3 Compatible')).toBeVisible();
+  });
 });

@@ -106,4 +106,19 @@ describe('Security & Anti-XSS Verification', () => {
     expect(headersMap.get('X-Frame-Options')).toBe('DENY');
     expect(headersMap.get('Permissions-Policy')).toBe('camera=(), microphone=(), geolocation=()');
   });
+
+  describe('Next.js 16 Proxy & Security Architecture', () => {
+    it('verifies web/proxy.ts exists and implements export function proxy', () => {
+      const proxyPath = path.resolve(__dirname, '../../proxy.ts');
+      expect(fs.existsSync(proxyPath)).toBe(true);
+
+      const content = fs.readFileSync(proxyPath, 'utf8');
+      expect(content).toContain('export function proxy(');
+    });
+
+    it('verifies web/middleware.ts is deleted in accordance with Next.js 16 conventions', () => {
+      const middlewarePath = path.resolve(__dirname, '../../middleware.ts');
+      expect(fs.existsSync(middlewarePath)).toBe(false);
+    });
+  });
 });

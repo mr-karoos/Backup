@@ -4,6 +4,7 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider, useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
+import { tokenRefreshManager } from '@/lib/auth/token-refresh';
 
 function createWrapper() {
   const queryClient = new QueryClient({
@@ -23,10 +24,12 @@ describe('AuthProvider & useAuth', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    tokenRefreshManager.reset();
   });
 
   afterEach(() => {
     global.fetch = originalFetch;
+    tokenRefreshManager.reset();
   });
 
   it('handles bootstrap session refresh success', async () => {
@@ -351,5 +354,134 @@ describe('AuthProvider & useAuth', () => {
     });
     expect((apiClient as unknown as { tokenProvider: () => string | null }).tokenProvider()).toBeNull();
     expect(result.current.user).toBeNull();
+  });
+
+  it('real AuthProvider 401 -> refresh -> onTokenUpdate -> immediate replay sequence', async () => {
+    let bootstrapRefreshDone = false;
+    let operationalRefreshCount = 0;
+    const requestTokens: (string | null)[] = [];
+
+    global.fetch = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const headers = init?.headers instanceof Headers ? init.headers : new Headers(init?.headers);
+
+      if (url === '/api/v1/auth/refresh') {
+        if (!bootstrapRefreshDone) {
+          bootstrapRefreshDone = true;
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                data: {
+                  tokens: {
+                    access_token: 'expired-token',
+                    token_type: 'Bearer',
+                    expires_in: 900,
+                  },
+                },
+              }),
+          });
+        }
+
+        operationalRefreshCount++;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              data: {
+                tokens: {
+                  access_token: 'new-refreshed-token',
+                  token_type: 'Bearer',
+                  expires_in: 900,
+                },
+              },
+            }),
+        });
+      }
+
+      if (url === '/api/v1/auth/me') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              data: {
+                user: {
+                  id: 'u-1',
+                  email: 'admin@domain.com',
+                  full_name: 'Admin User',
+                  is_system_admin: true,
+                },
+                memberships: [
+                  {
+                    organization_id: 'org-1',
+                    organization_name: 'Acme Corp',
+                    organization_slug: 'acme',
+                    is_default_internal: true,
+                    role: 'admin',
+                    status: 'active',
+                    permissions: ['resource:read', 'resource:write'],
+                  },
+                ],
+              },
+            }),
+        });
+      }
+
+      if (url === '/api/v1/resources') {
+        const authHeader = headers.get('authorization');
+        requestTokens.push(authHeader);
+
+        if (authHeader === 'Bearer expired-token') {
+          return Promise.resolve({
+            ok: false,
+            status: 401,
+            json: () =>
+              Promise.resolve({
+                error: { code: 'UNAUTHORIZED', message: 'Token expired' },
+              }),
+          });
+        }
+
+        if (authHeader === 'Bearer new-refreshed-token') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                data: [{ id: 'res-1', name: 'Production Database' }],
+              }),
+          });
+        }
+
+        return Promise.resolve({
+          ok: false,
+          status: 403,
+          json: () => Promise.resolve({ error: { code: 'FORBIDDEN' } }),
+        });
+      }
+
+      return Promise.reject(new Error(`Unexpected ${url}`));
+    });
+
+    const { result } = renderHook(() => useAuth(), { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(result.current.status).toBe('authenticated');
+    });
+
+    // Invoke operational request through apiClient while AuthProvider is active
+    let resources: Array<{ id: string; name: string }> | undefined;
+    await act(async () => {
+      resources = await apiClient.get<Array<{ id: string; name: string }>>('/resources');
+    });
+
+    expect(resources).toEqual([{ id: 'res-1', name: 'Production Database' }]);
+    expect(operationalRefreshCount).toBe(1);
+    expect(requestTokens.length).toBe(2);
+    expect(requestTokens[0]).toBe('Bearer expired-token');
+    expect(requestTokens[1]).toBe('Bearer new-refreshed-token');
+    expect(result.current.status).toBe('authenticated');
   });
 });
