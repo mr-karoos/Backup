@@ -355,12 +355,17 @@
 | `resource_id` | `UUID` | کلید خارجی به جدول `resources.id` (جهت دسترسی و فیلتر سریع بر اساس منبع). |
 | `storage_target_id` | `UUID` | کلید خارجی به جدول `storage_targets.id` (اجباری، حذف RESTRICT). مشخص‌کننده مقصد ذخیره‌سازی این آرتیفکت. |
 | `artifact_type` | `VARCHAR(50)` | نوع آرتیفکت خروجی (`database_dump`، `files_archive`). |
-| `format` | `VARCHAR(30)` | فرمت بسته‌بندی فایل (`sql_gzip`، `tar_gzip`). |
+| `format` | `VARCHAR(30)` | فرمت بسته‌بندی فایل (`sql_gzip`، `tar_gzip`، `restic_snapshot`). |
 | `target_name` | `VARCHAR(255)` | نام موجودیت پشتیبان‌گیری‌شده (مثال: نام دیتابیس "app_db" یا شناسه مسیر "public_html"). |
-| `storage_reference` | `VARCHAR(500)` | شناسه و ارجاع داخلی ذخیره‌سازی (مثال: `organizations/{org_id}/resources/{res_id}/artifacts/{artifact_id}.sql.gz`). این مقدار یک شناسه انتزاعی داخلی است و هرگز مسیر مطلق سرور به کاربر افشا نمی‌شود. |
-| `size_bytes` | `BIGINT` | حجم دقیق فایل خروجی بر حسب بایت. |
-| `checksum_algorithm` | `VARCHAR(30)` | الگوریتم محاسبه هش یکپارچگی (پیش‌فرض: `sha256`). |
-| `checksum_hash` | `VARCHAR(128)` | مقدار هش هگزادسیمال محاسبه‌شده هم‌زمان با استریم فایل جهت بررسی عدم دستکاری و خرابی. |
+| `storage_reference` | `VARCHAR(500)` | شناسه و ارجاع داخلی ذخیره‌سازی برای Direct Stream (برای Restic تهی است). |
+| `size_bytes` | `BIGINT` | حجم دقیق فایل فیزیکی در Direct Stream (برای Restic تهی است). |
+| `checksum_algorithm` | `VARCHAR(30)` | الگوریتم محاسبه هش یکپارچگی (پیش‌فرض: `sha256`، برای Restic تهی است). |
+| `checksum_hash` | `VARCHAR(128)` | مقدار هش SHA-256 فایل Direct Stream (برای Restic تهی است). |
+| `stored_size_bytes` | `BIGINT` | حجم واقعی فایل رمزگذاری‌شده روی دیسک/S3 برای Direct Stream با فریمینگ BPAE. |
+| `engine_metadata` | `JSONB` | ابرداده موتور ذخیره‌سازی (برای Restic حاوی `internal_filename` و `target_token`). |
+| `repository_id` | `UUID` | کلید خارجی به جدول `backup_repositories.id` (برای Restic اجباری، برای Direct Stream تهی). |
+| `snapshot_id` | `VARCHAR(64)` | شناسه ۶۴ کاراکتری هگزادسیمال دقیق اسنپ‌شات Restic (برای Direct Stream تهی). |
+| `logical_size_bytes` | `BIGINT` | حجم منطقی داده‌های پشتیبان‌گیری‌شده Restic قبل از Deduplication (برای Direct Stream تهی). |
 | `verification_status` | `VARCHAR(30)` | وضعیت اعتبارسنجی سلامت فایل (`unverified`، `verified`، `failed` - پیش‌فرض: `unverified`). |
 | `verified_at` | `TIMESTAMPTZ` | زمان انجام عملیات بررسی صحت و اعتبارسنجی فایل (قابل تهی). |
 | `verification_details` | `TEXT` | جزئیات نتیجه تست اعتبارسنجی و خوانایی فایل پشتیبان. |
@@ -369,9 +374,13 @@
 | `created_at` | `TIMESTAMPTZ` | زمان تولید و ذخیره کامل آرتیفکت. |
 | `updated_at` | `TIMESTAMPTZ` | زمان به‌روزرسانی رکورد. |
 
-* **حفظ تاریخچه و کنترل دقیق حذف آرتیفکت‌ها**: کلید خارجی `run_id` دارای قید `ON DELETE RESTRICT` است تا متادیتا و فایل‌های فیزیکی بکاپ با حذف تصادفی یا ناخواسته رکورد Run یا Job از بین نروند؛ عملیات حذف آرتیفکت صرفاً بر اساس سیاست‌های نگهداری (Retention Policy) یا فرآیند کنترل‌شده حذف مجاز (`Authorized Backup Delete`) توسط ادمین مجاز صورت می‌گیرد.
+* **قیدهای مانعةالجمع چندریختی (Polymorphic Mutual Exclusivity Constraints)**:
+  * در فرمت‌های Direct Stream (`sql_gzip`، `tar_gzip`): فیلدهای `storage_reference`، `size_bytes`، `checksum_algorithm` و `checksum_hash` اجباری بوده و فیلدهای Restic (`repository_id`، `snapshot_id`، `logical_size_bytes`) باید کاملاً `NULL` باشند.
+  * در فرمت Restic (`restic_snapshot`): فیلدهای `repository_id`، `snapshot_id` (دقیقاً ۶۴ کاراکتر کوچک هگزادسیمال با عبارت منظم `^[0-9a-f]{64}$`) و `logical_size_bytes > 0` اجباری بوده و فیلدهای Direct Stream (`storage_reference`، `size_bytes`، `stored_size_bytes`، `checksum_algorithm`، `checksum_hash`) باید کاملاً `NULL` باشند.
+* **شاخص یکتایی ددابلیکاسیون**: شاخص یکتای `uq_backup_artifacts_repository_snapshot` بر روی ترکیب `(repository_id, snapshot_id, artifact_type)` مانع از ثبت تکراری اسنپ‌شات در همان مخزن می‌شود.
+* **حفظ تاریخچه و کنترل دقیق حذف آرتیفکت‌ها**: کلید خارجی `run_id` دارای قید `ON DELETE RESTRICT` است تا متادیتا و فایل‌های فیزیکی بکاپ با حذف تصادفی یا ناخواسته رکورد Run یا Job از بین نروند؛ عملیات حذف آرتیفکت صرفاً بر اساس سیاست‌های نگهداری (Retention Policy) یا فرآیند کنترل‌شده حذف مجاز (`Authorized Backup Delete`) توسط ادمین مجاز صورت می‌گیرد. حذف مستقیم آرتیفکت‌های `restic_snapshot` به صورت Fail-Closed رد می‌شود زیرا چرخه حیات اسنپ‌شات‌ها از طریق سیاست‌های نگهداری مخزن مدیریت می‌گردد.
 * **تضمین سازگاری شناسه منبع در زنجیره اجرا**: مقدار `backup_artifacts.resource_id` باید همواره و بدون استثنا با منبع (`Resource`) مربوط به زنجیره `BackupArtifact → BackupRun → BackupJob → Resource` یکسان باشد و این سازگاری در لایه دسترسی به داده (Data Layer) تضمین می‌شود.
-* **قیدهای سازمانی**: تضمین تطابق کامل `organization_id` میان `backup_artifacts`، `backup_runs`، `resources` و `storage_targets`.
+* **قیدهای سازمانی**: تضمین تطابق کامل `organization_id` میان `backup_artifacts`، `backup_runs`، `resources` و `storage_targets` و همچنین قید کلید خارجی سازمانی `(organization_id, repository_id)` به `backup_repositories(organization_id, id)`.
 * **روابط**:
   * متعلق به `backup_runs`.
   * منتسب به `resources`.

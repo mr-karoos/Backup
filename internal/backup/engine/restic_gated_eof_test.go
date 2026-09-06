@@ -70,6 +70,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -160,6 +161,52 @@ func main() {
 			}
 		}
 		time.Sleep(10 * time.Second)
+		os.Exit(0)
+
+	case "malformed_early_hang":
+		fmt.Println("{malformed-json-early")
+		buf := make([]byte, 1024)
+		for {
+			_, err := os.Stdin.Read(buf)
+			if err != nil {
+				break
+			}
+		}
+		os.Exit(0)
+
+	case "oversized_early_hang":
+		b := make([]byte, 70000)
+		for i := range b {
+			b[i] = 'a'
+		}
+		fmt.Println(string(b))
+		buf := make([]byte, 1024)
+		for {
+			_, err := os.Stdin.Read(buf)
+			if err != nil {
+				break
+			}
+		}
+		os.Exit(0)
+
+	case "large_valid_stream":
+		for i := 0; i < 300; i++ {
+			fmt.Printf("{\"message_type\":\"status\",\"percent_done\":%f,\"padding\":\"%s\"}\n", float64(i)/300.0, strings.Repeat("x", 250))
+		}
+		buf := make([]byte, 1024)
+		for {
+			_, err := os.Stdin.Read(buf)
+			if err != nil {
+				break
+			}
+		}
+		fmt.Println("{\"message_type\":\"summary\",\"files_new\":1,\"snapshot_id\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"total_bytes_processed\":1024}")
+		os.Exit(0)
+
+	case "malformed_then_summary":
+		fmt.Println("{\"message_type\":\"status\",\"percent_done\":0.1}")
+		fmt.Println("{malformed-json-middle")
+		fmt.Println("{\"message_type\":\"summary\",\"files_new\":1,\"snapshot_id\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\",\"total_bytes_processed\":1024}")
 		os.Exit(0)
 
 	default: // "success"
@@ -860,4 +907,180 @@ func TestGatedEOF_EarlyChildExit(t *testing.T) {
 	if !strings.Contains(err.Error(), "exit status 1") {
 		t.Logf("early exit error: %v", err)
 	}
+}
+
+func TestGatedEOFSupervisor_ParserDeadlockRegressions(t *testing.T) {
+	mockBin := buildMockResticBinary(t)
+	supervisor := NewGatedEOFSupervisor(mockBin, slog.Default())
+
+	validTarget := &mockTarget{
+		url:     "local:/tmp/test-repo",
+		env:     nil,
+		locator: "test-locator",
+	}
+	validPassword := []byte("top-secret-restic-password-123")
+	orgID := uuid.New()
+	resID := uuid.New()
+	runID := uuid.New()
+	artID := uuid.New()
+
+	baseReq := func() StdinBackupRequest {
+		return StdinBackupRequest{
+			Target:           validTarget,
+			Password:         validPassword,
+			OrgID:            orgID,
+			ResourceID:       resID,
+			RunID:            runID,
+			ArtifactID:       artID,
+			BackupType:       domain.BackupTypeMySQLDatabase,
+			TargetName:       "production_db",
+			InternalFilename: "production_db.sql",
+			StreamProducer: func(ctx context.Context, stdin io.Writer) error {
+				for {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					default:
+						_, err := stdin.Write([]byte("streaming chunk data...\n"))
+						if err != nil {
+							return err
+						}
+						time.Sleep(10 * time.Millisecond)
+					}
+				}
+			},
+		}
+	}
+
+	t.Run("A: Restic emits malformed JSON early while producer remains active", func(t *testing.T) {
+		t.Setenv("MOCK_RESTIC_MODE", "malformed_early_hang")
+		req := baseReq()
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := supervisor.ExecuteBackup(context.Background(), req)
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("expected error on malformed JSON, got nil")
+			}
+			if !strings.Contains(err.Error(), "failed parsing restic summary output") {
+				t.Errorf("expected failed parsing restic summary output error, got: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("DEADLOCK: ExecuteBackup did not return boundedly when malformed JSON was emitted early")
+		}
+	})
+
+	t.Run("B: Restic emits oversized JSON event while producer is blocked writing", func(t *testing.T) {
+		t.Setenv("MOCK_RESTIC_MODE", "oversized_early_hang")
+		req := baseReq()
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := supervisor.ExecuteBackup(context.Background(), req)
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("expected error on oversized JSON event, got nil")
+			}
+			if !strings.Contains(err.Error(), "exceeding") && !strings.Contains(err.Error(), "failed parsing restic summary output") {
+				t.Errorf("expected oversized line error, got: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("DEADLOCK: ExecuteBackup did not unblock writer on oversized JSON event")
+		}
+	})
+
+	t.Run("C: >64 KiB TOTAL valid events below per-line limit followed by valid summary passes", func(t *testing.T) {
+		t.Setenv("MOCK_RESTIC_MODE", "large_valid_stream")
+		req := baseReq()
+		req.StreamProducer = func(ctx context.Context, stdin io.Writer) error {
+			_, err := stdin.Write([]byte("small dump\n"))
+			return err
+		}
+
+		type result struct {
+			res *ResticExecutionResult
+			err error
+		}
+		done := make(chan result, 1)
+
+		go func() {
+			res, err := supervisor.ExecuteBackup(context.Background(), req)
+			done <- result{res: res, err: err}
+		}()
+
+		select {
+		case outcome := <-done:
+			if outcome.err != nil {
+				t.Fatalf("expected success for >64 KiB total valid output, got: %v", outcome.err)
+			}
+			if outcome.res == nil || outcome.res.SnapshotID == "" {
+				t.Fatalf("expected valid execution result, got: %+v", outcome.res)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("TIMEOUT: ExecuteBackup timed out on >64 KiB valid stream")
+		}
+	})
+
+	t.Run("D: malformed event followed by otherwise valid summary fails closed", func(t *testing.T) {
+		t.Setenv("MOCK_RESTIC_MODE", "malformed_then_summary")
+		req := baseReq()
+		req.StreamProducer = func(ctx context.Context, stdin io.Writer) error {
+			_, err := stdin.Write([]byte("dump\n"))
+			return err
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := supervisor.ExecuteBackup(context.Background(), req)
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("expected error on malformed event followed by summary, got nil")
+			}
+			if !strings.Contains(err.Error(), "failed parsing restic summary output") {
+				t.Errorf("expected parser failure, got: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("DEADLOCK/TIMEOUT on malformed event followed by summary")
+		}
+	})
+
+	t.Run("E: duplicate final summaries fails closed", func(t *testing.T) {
+		t.Setenv("MOCK_RESTIC_MODE", "duplicate_identical_summaries")
+		req := baseReq()
+		req.StreamProducer = func(ctx context.Context, stdin io.Writer) error {
+			_, err := stdin.Write([]byte("dump\n"))
+			return err
+		}
+
+		done := make(chan error, 1)
+		go func() {
+			_, err := supervisor.ExecuteBackup(context.Background(), req)
+			done <- err
+		}()
+
+		select {
+		case err := <-done:
+			if err == nil {
+				t.Fatalf("expected error on duplicate summaries, got nil")
+			}
+			if !strings.Contains(err.Error(), "duplicate snapshot summary events") && !strings.Contains(err.Error(), "failed parsing restic summary output") {
+				t.Errorf("expected duplicate summary events error, got: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("DEADLOCK/TIMEOUT on duplicate summaries")
+		}
+	})
 }

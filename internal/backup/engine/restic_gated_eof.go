@@ -343,119 +343,213 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 		prodChan <- prodOutcome{err: pErr, panicked: false}
 	}()
 
-	// 7. Concurrent State Machine: supervisor concurrently observes:
+	// 7. Concurrent State Machine: supervisor concurrently accounts for:
 	// - producer result (prodChan)
-	// - restic child result (childDoneChan)
-	// - parent ctx.Done()
-	select {
-	case outcome := <-prodChan:
-		// 8. Producer completed first:
-		if outcome.panicked || outcome.err != nil {
-			// Producer failure or panic:
-			// DO NOT SEND GRACEFUL EOF!
-			// 1. Hard kill Restic child immediately
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			// 2. Reap child
-			<-childDoneChan
-			// 3. Cancel producer context
-			prodCancel()
-			// 4. Close parent pipe only AFTER live child can no longer observe graceful EOF
-			_ = safeCloseStdin()
-			// 5. Drain stdout scanner
-			<-stdoutDoneChan
+	// - child process result (childDoneChan)
+	// - stdout parser result (stdoutDoneChan)
+	// - ctx.Done()
 
-			if outcome.panicked {
-				return nil, errors.New("backup stream producer panicked during execution")
-			}
-			return nil, fmt.Errorf("backup streaming failed: %w", outcome.err)
-		}
+	var (
+		parsedSummary *ResticBackupSummary
+		parserErr     error
+		prodDone      bool
+	)
 
-		// Producer succeeded (err == nil, no panic):
-		// Now and ONLY now, supervisor closes Restic STDIN pipe (Graceful EOF).
-		if closeErr := safeCloseStdin(); closeErr != nil {
-			prodCancel()
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			<-childDoneChan
-			<-stdoutDoneChan
-			return nil, fmt.Errorf("failed closing restic stdin: %w", closeErr)
-		}
-
-		// Wait for Restic child process to exit cleanly
+	for {
 		select {
-		case childRes := <-childDoneChan:
-			stdoutRes := <-stdoutDoneChan
-			childCancel()
-
-			if childRes.err != nil {
-				sanitizedStderr := sanitizeSecrets(stderrBuf.String(), string(req.Password), targetEnv)
-				return nil, fmt.Errorf("restic backup process failed: %w (stderr: %s)", childRes.err, sanitizedStderr)
-			}
-
+		case stdoutRes := <-stdoutDoneChan:
+			stdoutDoneChan = nil // do not select again
 			if stdoutRes.err != nil {
-				return nil, fmt.Errorf("failed parsing restic summary output: %w", stdoutRes.err)
+				// Parser error before successful completion is fatal!
+				parserErr = stdoutRes.err
+				// 1. cancel producer context immediately
+				prodCancel()
+				// 2. initiate hard termination of Restic
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				// 3. unblock producer writer safely
+				_ = safeCloseStdin()
+				// 4. reap child
+				childRes := <-childDoneChan
+				// 5. boundedly wait for producer shutdown
+				if !prodDone {
+					select {
+					case <-prodChan:
+					case <-time.After(3 * time.Second):
+					}
+				}
+				if childRes.err != nil && strings.Contains(parserErr.Error(), "missing summary event") {
+					sanitizedStderr := sanitizeSecrets(stderrBuf.String(), string(req.Password), targetEnv)
+					return nil, fmt.Errorf("restic backup process failed: %w (stderr: %s)", childRes.err, sanitizedStderr)
+				}
+				return nil, fmt.Errorf("failed parsing restic summary output: %w", parserErr)
+			}
+			parsedSummary = stdoutRes.summary
+			// Parser completed successfully before child/producer exit: retain summary and continue loop
+			continue
+
+		case outcome := <-prodChan:
+			prodChan = nil
+			prodDone = true
+			if outcome.panicked || outcome.err != nil {
+				// Producer failure or panic:
+				// DO NOT SEND GRACEFUL EOF!
+				// 1. Hard kill Restic child immediately
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				// 2. Reap child
+				<-childDoneChan
+				// 3. Cancel producer context
+				prodCancel()
+				// 4. Close parent pipe only AFTER live child can no longer observe graceful EOF
+				_ = safeCloseStdin()
+				// 5. Drain stdout scanner if still active
+				if stdoutDoneChan != nil {
+					<-stdoutDoneChan
+				}
+
+				if outcome.panicked {
+					return nil, errors.New("backup stream producer panicked during execution")
+				}
+				return nil, fmt.Errorf("backup streaming failed: %w", outcome.err)
 			}
 
-			summary := stdoutRes.summary
-			if summary.TotalBytesProcessed <= 0 && summary.FilesNew == 0 {
-				return nil, errors.New("restic backup produced empty logical snapshot")
+			// Producer succeeded (err == nil, no panic):
+			// Now and ONLY now, supervisor closes Restic STDIN pipe (Graceful EOF).
+			if closeErr := safeCloseStdin(); closeErr != nil {
+				prodCancel()
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+				<-childDoneChan
+				if stdoutDoneChan != nil {
+					<-stdoutDoneChan
+				}
+				return nil, fmt.Errorf("failed closing restic stdin: %w", closeErr)
 			}
 
-			return &ResticExecutionResult{
-				ArtifactID:       req.ArtifactID,
-				SnapshotID:       summary.SnapshotID,
-				LogicalSizeBytes: summary.TotalBytesProcessed,
-				InternalFilename: req.InternalFilename,
-				TargetToken:      targetToken,
-			}, nil
+			// Producer has finished and graceful EOF was sent.
+			// Now wait for child process and/or stdout parser to complete.
+			for childDoneChan != nil || (stdoutDoneChan != nil && parsedSummary == nil) {
+				select {
+				case stdoutRes := <-stdoutDoneChan:
+					stdoutDoneChan = nil
+					if stdoutRes.err != nil {
+						// Parser error while waiting for child to exit
+						prodCancel()
+						if cmd.Process != nil {
+							_ = cmd.Process.Kill()
+						}
+						if childDoneChan != nil {
+							childRes := <-childDoneChan
+							childDoneChan = nil
+							if childRes.err != nil && strings.Contains(stdoutRes.err.Error(), "missing summary event") {
+								sanitizedStderr := sanitizeSecrets(stderrBuf.String(), string(req.Password), targetEnv)
+								return nil, fmt.Errorf("restic backup process failed: %w (stderr: %s)", childRes.err, sanitizedStderr)
+							}
+						}
+						return nil, fmt.Errorf("failed parsing restic summary output: %w", stdoutRes.err)
+					}
+					parsedSummary = stdoutRes.summary
+
+				case childRes := <-childDoneChan:
+					childDoneChan = nil
+					// Child exited. If stdout is still reading, await its termination.
+					if stdoutDoneChan != nil {
+						stdoutRes := <-stdoutDoneChan
+						stdoutDoneChan = nil
+						if stdoutRes.err != nil {
+							if childRes.err != nil && strings.Contains(stdoutRes.err.Error(), "missing summary event") {
+								sanitizedStderr := sanitizeSecrets(stderrBuf.String(), string(req.Password), targetEnv)
+								return nil, fmt.Errorf("restic backup process failed: %w (stderr: %s)", childRes.err, sanitizedStderr)
+							}
+							return nil, fmt.Errorf("failed parsing restic summary output: %w", stdoutRes.err)
+						}
+						parsedSummary = stdoutRes.summary
+					}
+
+					childCancel()
+
+					if childRes.err != nil {
+						sanitizedStderr := sanitizeSecrets(stderrBuf.String(), string(req.Password), targetEnv)
+						return nil, fmt.Errorf("restic backup process failed: %w (stderr: %s)", childRes.err, sanitizedStderr)
+					}
+
+					if parsedSummary == nil {
+						return nil, errors.New("missing summary event in restic backup output")
+					}
+					if parsedSummary.TotalBytesProcessed <= 0 && parsedSummary.FilesNew == 0 {
+						return nil, errors.New("restic backup produced empty logical snapshot")
+					}
+
+					return &ResticExecutionResult{
+						ArtifactID:       req.ArtifactID,
+						SnapshotID:       parsedSummary.SnapshotID,
+						LogicalSizeBytes: parsedSummary.TotalBytesProcessed,
+						InternalFilename: req.InternalFilename,
+						TargetToken:      targetToken,
+					}, nil
+
+				case <-ctx.Done():
+					prodCancel()
+					if cmd.Process != nil {
+						_ = cmd.Process.Kill()
+					}
+					if childDoneChan != nil {
+						<-childDoneChan
+					}
+					if stdoutDoneChan != nil {
+						<-stdoutDoneChan
+					}
+					return nil, ctx.Err()
+				}
+			}
+
+		case childRes := <-childDoneChan:
+			// Restic child exited prematurely while producer was still active!
+			// 1. Immediately cancel producer context
+			prodCancel()
+			// 2. Close stdin pipe to unblock any blocked write
+			_ = safeCloseStdin()
+			// 3. Bounded wait for producer to stop
+			if !prodDone {
+				select {
+				case <-prodChan:
+				case <-time.After(3 * time.Second):
+				}
+			}
+			// 4. Drain stdout scanner if not already done
+			if stdoutDoneChan != nil {
+				<-stdoutDoneChan
+			}
+
+			sanitizedStderr := sanitizeSecrets(stderrBuf.String(), string(req.Password), targetEnv)
+			if childRes.err != nil {
+				return nil, fmt.Errorf("restic backup process exited prematurely: %w (stderr: %s)", childRes.err, sanitizedStderr)
+			}
+			return nil, fmt.Errorf("restic backup process exited prematurely with code 0 (stderr: %s)", sanitizedStderr)
 
 		case <-ctx.Done():
+			// Context cancellation while producer and child were running
 			prodCancel()
 			if cmd.Process != nil {
 				_ = cmd.Process.Kill()
 			}
+			_ = safeCloseStdin()
 			<-childDoneChan
-			<-stdoutDoneChan
+			if !prodDone {
+				select {
+				case <-prodChan:
+				case <-time.After(3 * time.Second):
+				}
+			}
+			if stdoutDoneChan != nil {
+				<-stdoutDoneChan
+			}
 			return nil, ctx.Err()
 		}
-
-	case childRes := <-childDoneChan:
-		// Restic child exited prematurely while producer was still active!
-		// 1. Immediately cancel producer context
-		prodCancel()
-		// 2. Close stdin pipe to unblock any blocked write
-		_ = safeCloseStdin()
-		// 3. Bounded wait for producer to stop
-		select {
-		case <-prodChan:
-		case <-time.After(3 * time.Second):
-		}
-		// 4. Drain stdout scanner
-		<-stdoutDoneChan
-
-		sanitizedStderr := sanitizeSecrets(stderrBuf.String(), string(req.Password), targetEnv)
-		if childRes.err != nil {
-			return nil, fmt.Errorf("restic backup process exited prematurely: %w (stderr: %s)", childRes.err, sanitizedStderr)
-		}
-		return nil, fmt.Errorf("restic backup process exited prematurely with code 0 (stderr: %s)", sanitizedStderr)
-
-	case <-ctx.Done():
-		// Context cancellation while both were running
-		prodCancel()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		<-childDoneChan
-		_ = safeCloseStdin()
-		select {
-		case <-prodChan:
-		case <-time.After(3 * time.Second):
-		}
-		<-stdoutDoneChan
-		return nil, ctx.Err()
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/repository"
 	"backup-platform/internal/backup/restic"
+	credDomain "backup-platform/internal/credential/domain"
 	orgDomain "backup-platform/internal/organization/domain"
 	"backup-platform/internal/storage"
 	"backup-platform/pkg/uuid"
@@ -25,6 +26,8 @@ type mockVerificationRepo struct {
 	runs        map[uuid.UUID]*domain.BackupRun
 	artifacts   map[uuid.UUID][]*domain.BackupArtifact
 	updatedArts map[uuid.UUID]domain.VerificationStatus
+	targets     map[uuid.UUID]*domain.StorageTarget
+	repos       map[uuid.UUID]*domain.BackupRepository
 	updateErr   error
 	getRunErr   error
 	getArtsErr  error
@@ -35,6 +38,8 @@ func newMockVerificationRepo() *mockVerificationRepo {
 		runs:        make(map[uuid.UUID]*domain.BackupRun),
 		artifacts:   make(map[uuid.UUID][]*domain.BackupArtifact),
 		updatedArts: make(map[uuid.UUID]domain.VerificationStatus),
+		targets:     make(map[uuid.UUID]*domain.StorageTarget),
+		repos:       make(map[uuid.UUID]*domain.BackupRepository),
 	}
 }
 
@@ -42,7 +47,12 @@ func (m *mockVerificationRepo) EnsureDefaultLocalStorageTarget(ctx context.Conte
 	return nil, nil
 }
 func (m *mockVerificationRepo) GetStorageTargetByID(ctx context.Context, orgID, targetID uuid.UUID) (*domain.StorageTarget, error) {
-	return nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if t, ok := m.targets[targetID]; ok && t.OrganizationID == orgID {
+		return t, nil
+	}
+	return nil, domain.ErrStorageTargetNotFound
 }
 func (m *mockVerificationRepo) GetPlanByID(ctx context.Context, orgID, planID uuid.UUID) (*domain.BackupPlan, error) {
 	return nil, nil
@@ -171,7 +181,12 @@ func (m *mockVerificationRepo) GetRepositoryByResourceID(ctx context.Context, or
 	return nil, nil
 }
 func (m *mockVerificationRepo) GetRepositoryByID(ctx context.Context, orgID, repoID uuid.UUID) (*domain.BackupRepository, error) {
-	return nil, nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if r, ok := m.repos[repoID]; ok && r.OrganizationID == orgID {
+		return r, nil
+	}
+	return nil, domain.ErrRepositoryNotFound
 }
 
 var _ repository.BackupRepository = (*mockVerificationRepo)(nil)
@@ -199,11 +214,19 @@ func (m *mockVerifyStorageProvider) EnsureStorageRoot(ctx context.Context) error
 }
 
 type mockVerifier struct {
-	dbVerifyMsg   string
-	dbVerifyErr   error
-	fileVerifyMsg string
-	fileVerifyErr error
-	callsCount    int
+	dbVerifyMsg        string
+	dbVerifyErr        error
+	fileVerifyMsg      string
+	fileVerifyErr      error
+	resticVerifyMsg    string
+	resticVerifyErr    error
+	callsCount         int
+	calledDirectDB     bool
+	calledDirectFile   bool
+	calledEncDB        bool
+	calledEncFile      bool
+	calledRestic       bool
+	resticExpectedSize int64
 }
 
 func (m *mockVerifier) VerifyDatabaseArtifact(
@@ -214,6 +237,7 @@ func (m *mockVerifier) VerifyDatabaseArtifact(
 	expectedChecksumSHA256 string,
 ) (string, error) {
 	m.callsCount++
+	m.calledDirectDB = true
 	if m.dbVerifyErr != nil {
 		return "", m.dbVerifyErr
 	}
@@ -228,6 +252,7 @@ func (m *mockVerifier) VerifyFilesArtifact(
 	expectedChecksumSHA256 string,
 ) (string, error) {
 	m.callsCount++
+	m.calledDirectFile = true
 	if m.fileVerifyErr != nil {
 		return "", m.fileVerifyErr
 	}
@@ -245,6 +270,7 @@ func (m *mockVerifier) VerifyEncryptedDatabaseArtifact(
 	orgID, artifactID uuid.UUID,
 ) (string, error) {
 	m.callsCount++
+	m.calledEncDB = true
 	if m.dbVerifyErr != nil {
 		return "", m.dbVerifyErr
 	}
@@ -262,6 +288,7 @@ func (m *mockVerifier) VerifyEncryptedFilesArtifact(
 	orgID, artifactID uuid.UUID,
 ) (string, error) {
 	m.callsCount++
+	m.calledEncFile = true
 	if m.fileVerifyErr != nil {
 		return "", m.fileVerifyErr
 	}
@@ -280,8 +307,16 @@ func (m *mockVerifier) VerifyResticSnapshot(
 	expectedLogicalSize int64,
 ) (string, error) {
 	m.callsCount++
+	m.calledRestic = true
+	m.resticExpectedSize = expectedLogicalSize
+	if m.resticVerifyErr != nil {
+		return "", m.resticVerifyErr
+	}
 	if m.dbVerifyErr != nil {
 		return "", m.dbVerifyErr
+	}
+	if m.resticVerifyMsg != "" {
+		return m.resticVerifyMsg, nil
 	}
 	return m.dbVerifyMsg, nil
 }
@@ -1068,4 +1103,197 @@ type mockFailingVerifyResolver struct {
 
 func (m *mockFailingVerifyResolver) Resolve(ctx context.Context, orgID, targetID uuid.UUID) (storage.StorageProvider, error) {
 	return nil, m.err
+}
+
+func TestVerificationService_ResticLogicalSize(t *testing.T) {
+	ctx := context.Background()
+	orgID := uuid.New()
+	runID := uuid.New()
+	resID := uuid.New()
+	targetID := uuid.New()
+	repoID := uuid.New()
+	credID := uuid.New()
+	snapID := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	setupResticService := func(verifier *mockVerifier) (*VerificationService, *mockVerificationRepo) {
+		repo := newMockVerificationRepo()
+		repo.runs[runID] = &domain.BackupRun{ID: runID, OrganizationID: orgID, Status: domain.RunStatusSuccess}
+		repo.repos[repoID] = &domain.BackupRepository{
+			ID:              repoID,
+			OrganizationID:  orgID,
+			ResourceID:      resID,
+			StorageTargetID: targetID,
+			CredentialID:    credID,
+			Status:          domain.BackupRepositoryStatusActive,
+		}
+		repo.targets[targetID] = &domain.StorageTarget{
+			ID:             targetID,
+			OrganizationID: orgID,
+			Type:           domain.StorageTargetTypeLocal,
+			Status:         domain.StorageTargetStatusActive,
+		}
+
+		storeProvider := &mockVerifyStorageProvider{}
+		svc := NewVerificationService(repo, storeProvider, verifier, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+		resticRunner := &mockResticRunnerForDownload{}
+		coordinator := restic.NewRepositoryOperationCoordinator()
+		vault := &mockVaultForDownload{
+			loadCredFunc: func(ctx context.Context, oID, cID uuid.UUID) (credDomain.Type, []byte, error) {
+				return credDomain.TypeResticRepositoryKey, []byte("password123"), nil
+			},
+		}
+		targetResolver := &mockTargetResolverForDownload{}
+		svc.SetResticDependencies(resticRunner, coordinator, vault, targetResolver)
+
+		return svc, repo
+	}
+
+	t.Run("A: valid Restic artifact with SizeBytes == 0 and LogicalSizeBytes > 0 passes on-demand VerifyRun", func(t *testing.T) {
+		verifier := &mockVerifier{
+			resticVerifyMsg: "ok",
+		}
+		svc, repo := setupResticService(verifier)
+
+		logicalSize := int64(1048576)
+		artID := uuid.New()
+		engineMeta, _ := json.Marshal(domain.ResticArtifactMetadata{
+			InternalFilename: "mydb.sql",
+			TargetToken:      "target123",
+		})
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:                 artID,
+				OrganizationID:     orgID,
+				RunID:              runID,
+				ResourceID:         resID,
+				StorageTargetID:    targetID,
+				RepositoryID:       &repoID,
+				SnapshotID:         snapID,
+				ArtifactType:       domain.ArtifactTypeDatabaseDump,
+				Format:             domain.ArtifactFormatResticSnapshot,
+				SizeBytes:          0, // MUST be 0
+				LogicalSizeBytes:   &logicalSize,
+				EngineMetadata:     engineMeta,
+				VerificationStatus: domain.VerificationStatusUnverified,
+			},
+		}
+
+		res, err := svc.VerifyRun(ctx, orgDomain.RoleAdmin, orgID, runID)
+		if err != nil {
+			t.Fatalf("expected nil error on valid restic verification, got: %v", err)
+		}
+		if res.VerificationStatus != domain.VerificationStatusVerified {
+			t.Errorf("expected overallStatus Verified, got: %v", res.VerificationStatus)
+		}
+
+		// Proves LogicalSizeBytes was passed to VerifyResticSnapshot, NOT SizeBytes
+		if verifier.resticExpectedSize != logicalSize {
+			t.Errorf("expected logical size %d to be passed to verifier, got %d", logicalSize, verifier.resticExpectedSize)
+		}
+
+		// Proves Direct Stream verifiers were NEVER called (Requirement D)
+		if verifier.calledDirectDB || verifier.calledDirectFile || verifier.calledEncDB || verifier.calledEncFile {
+			t.Errorf("CRITICAL: Direct Stream verifier was called for Restic artifact!")
+		}
+		if !verifier.calledRestic {
+			t.Errorf("expected Restic verifier to be called")
+		}
+	})
+
+	t.Run("B: LogicalSizeBytes nil fails closed and does NOT call Direct Stream verifier", func(t *testing.T) {
+		verifier := &mockVerifier{
+			resticVerifyMsg: "ok",
+		}
+		svc, repo := setupResticService(verifier)
+
+		artID := uuid.New()
+		engineMeta, _ := json.Marshal(domain.ResticArtifactMetadata{
+			InternalFilename: "mydb.sql",
+			TargetToken:      "target123",
+		})
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:                 artID,
+				OrganizationID:     orgID,
+				RunID:              runID,
+				ResourceID:         resID,
+				StorageTargetID:    targetID,
+				RepositoryID:       &repoID,
+				SnapshotID:         snapID,
+				ArtifactType:       domain.ArtifactTypeDatabaseDump,
+				Format:             domain.ArtifactFormatResticSnapshot,
+				SizeBytes:          0,
+				LogicalSizeBytes:   nil, // NIL!
+				EngineMetadata:     engineMeta,
+				VerificationStatus: domain.VerificationStatusUnverified,
+			},
+		}
+
+		res, err := svc.VerifyRun(ctx, orgDomain.RoleAdmin, orgID, runID)
+		if res != nil {
+			t.Errorf("expected nil result on invalid metadata, got: %+v", res)
+		}
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Errorf("expected ErrBackupServiceUnavailable, got: %v", err)
+		}
+
+		// Proves NO verifier was called (Direct Stream or Restic)
+		if verifier.calledDirectDB || verifier.calledDirectFile || verifier.calledEncDB || verifier.calledEncFile || verifier.calledRestic {
+			t.Errorf("CRITICAL: verifier was called when LogicalSizeBytes was nil!")
+		}
+
+		// Status remains unverified (not marked failed)
+		if _, updated := repo.updatedArts[artID]; updated {
+			t.Errorf("CRITICAL: artifact verification status must not be updated on metadata failure")
+		}
+	})
+
+	t.Run("C: LogicalSizeBytes zero fails closed without false integrity failure update", func(t *testing.T) {
+		verifier := &mockVerifier{
+			resticVerifyMsg: "ok",
+		}
+		svc, repo := setupResticService(verifier)
+
+		zeroSize := int64(0)
+		artID := uuid.New()
+		engineMeta, _ := json.Marshal(domain.ResticArtifactMetadata{
+			InternalFilename: "mydb.sql",
+			TargetToken:      "target123",
+		})
+		repo.artifacts[runID] = []*domain.BackupArtifact{
+			{
+				ID:                 artID,
+				OrganizationID:     orgID,
+				RunID:              runID,
+				ResourceID:         resID,
+				StorageTargetID:    targetID,
+				RepositoryID:       &repoID,
+				SnapshotID:         snapID,
+				ArtifactType:       domain.ArtifactTypeDatabaseDump,
+				Format:             domain.ArtifactFormatResticSnapshot,
+				SizeBytes:          0,
+				LogicalSizeBytes:   &zeroSize, // ZERO!
+				EngineMetadata:     engineMeta,
+				VerificationStatus: domain.VerificationStatusUnverified,
+			},
+		}
+
+		res, err := svc.VerifyRun(ctx, orgDomain.RoleAdmin, orgID, runID)
+		if res != nil {
+			t.Errorf("expected nil result on zero logical size, got: %+v", res)
+		}
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Errorf("expected ErrBackupServiceUnavailable, got: %v", err)
+		}
+
+		// Must not update artifact verification status to Failed
+		if _, updated := repo.updatedArts[artID]; updated {
+			t.Errorf("CRITICAL: artifact must not be falsely marked as failed when logical size is zero")
+		}
+
+		if verifier.calledDirectDB || verifier.calledDirectFile || verifier.calledEncDB || verifier.calledEncFile || verifier.calledRestic {
+			t.Errorf("CRITICAL: verifier was called when LogicalSizeBytes was zero!")
+		}
+	})
 }

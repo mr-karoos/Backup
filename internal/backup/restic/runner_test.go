@@ -2,6 +2,7 @@ package restic
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -261,6 +262,77 @@ func TestResticRunner_ValidateVersion(t *testing.T) {
 			if err := parseAndValidateResticVersion(ic); err == nil {
 				t.Errorf("expected %q to be rejected, but was accepted", ic)
 			}
+		}
+	})
+}
+
+func TestResticRunner_GetSnapshot_CanonicalIDValidation(t *testing.T) {
+	ctx := context.Background()
+	storageRoot := t.TempDir()
+	target, err := NewLocalRepositoryTarget(storageRoot, uuid.New(), uuid.New())
+	if err != nil {
+		t.Fatalf("failed creating local target: %v", err)
+	}
+
+	runner := &ResticRunner{
+		binaryPath: "dummy-restic",
+	}
+	pw := []byte("dummy-password")
+
+	t.Run("short ID rejected before execution", func(t *testing.T) {
+		_, err := runner.GetSnapshot(ctx, target, pw, "01234567")
+		if err == nil || !strings.Contains(err.Error(), "must be exactly 64 lowercase hexadecimal characters") {
+			t.Errorf("expected rejection for short ID, got %v", err)
+		}
+	})
+
+	t.Run("prefix rejected before execution", func(t *testing.T) {
+		_, err := runner.GetSnapshot(ctx, target, pw, "0123456789abcdef")
+		if err == nil || !strings.Contains(err.Error(), "must be exactly 64 lowercase hexadecimal characters") {
+			t.Errorf("expected rejection for prefix ID, got %v", err)
+		}
+	})
+
+	t.Run("uppercase hex rejected before execution", func(t *testing.T) {
+		upperID := strings.ToUpper("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+		_, err := runner.GetSnapshot(ctx, target, pw, upperID)
+		if err == nil || !strings.Contains(err.Error(), "must be exactly 64 lowercase hexadecimal characters") {
+			t.Errorf("expected rejection for uppercase hex ID, got %v", err)
+		}
+	})
+
+	t.Run("64-char nonhex rejected before execution", func(t *testing.T) {
+		nonHexID := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"
+		_, err := runner.GetSnapshot(ctx, target, pw, nonHexID)
+		if err == nil || !strings.Contains(err.Error(), "must be exactly 64 lowercase hexadecimal characters") {
+			t.Errorf("expected rejection for non-hex character, got %v", err)
+		}
+	})
+
+	t.Run("empty ID rejected before execution", func(t *testing.T) {
+		_, err := runner.GetSnapshot(ctx, target, pw, "")
+		if err == nil || !strings.Contains(err.Error(), "must be exactly 64 lowercase hexadecimal characters") {
+			t.Errorf("expected rejection for empty ID, got %v", err)
+		}
+	})
+
+	t.Run("returned different full ID with matching prefix rejected", func(t *testing.T) {
+		requestedID := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+		differentID := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde0"
+		outJSON := fmt.Sprintf(`[{"id":%q,"short_id":"01234567","time":"2026-09-06T10:00:00Z"}]`, differentID)
+
+		var snapshots []SnapshotItem
+		_ = json.Unmarshal([]byte(outJSON), &snapshots)
+
+		matched := false
+		for _, s := range snapshots {
+			if s.ID == requestedID {
+				matched = true
+				break
+			}
+		}
+		if matched {
+			t.Errorf("SECURITY FLAW: matched different full ID with matching prefix")
 		}
 	})
 }

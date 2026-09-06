@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/credential/secretcrypto"
 )
 
@@ -157,7 +158,7 @@ var (
 	ErrSnapshotNotFound = errors.New("snapshot not found in repository")
 )
 
-// GetSnapshot retrieves the metadata for a specific snapshot by its ID.
+// GetSnapshot retrieves the metadata for a specific snapshot by its canonical full 64-hex ID.
 func (r *ResticRunner) GetSnapshot(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) (*SnapshotItem, error) {
 	if target == nil {
 		return nil, errors.New("repository target is required")
@@ -166,8 +167,8 @@ func (r *ResticRunner) GetSnapshot(ctx context.Context, target RepositoryTarget,
 		return nil, errors.New("repository password cannot be empty")
 	}
 	cleanID := strings.TrimSpace(snapshotID)
-	if cleanID == "" || strings.HasPrefix(cleanID, "-") {
-		return nil, errors.New("invalid snapshot ID")
+	if !domain.IsValidCanonicalResticSnapshotID(cleanID) {
+		return nil, errors.New("invalid snapshot ID: must be exactly 64 lowercase hexadecimal characters")
 	}
 
 	args := []string{"snapshots", cleanID, "--json"}
@@ -186,7 +187,7 @@ func (r *ResticRunner) GetSnapshot(ctx context.Context, target RepositoryTarget,
 	}
 
 	for _, s := range snapshots {
-		if s.ID == cleanID || s.ShortID == cleanID {
+		if s.ID == cleanID {
 			return &s, nil
 		}
 	}

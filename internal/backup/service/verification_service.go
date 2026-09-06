@@ -190,6 +190,10 @@ func (s *VerificationService) VerifyRun(
 				s.logger.Error("invalid restic artifact metadata: missing repository_id or snapshot_id")
 				return nil, domain.ErrBackupServiceUnavailable
 			}
+			if art.LogicalSizeBytes == nil || *art.LogicalSizeBytes <= 0 {
+				s.logger.Error("invalid restic artifact metadata: missing or non-positive logical_size_bytes")
+				return nil, domain.ErrBackupServiceUnavailable
+			}
 			var meta domain.ResticArtifactMetadata
 			if err := json.Unmarshal(art.EngineMetadata, &meta); err != nil || strings.TrimSpace(meta.InternalFilename) == "" {
 				s.logger.Error("missing or invalid internal_filename in engine_metadata for restic verification", slog.Any("error", err))
@@ -251,7 +255,7 @@ func (s *VerificationService) VerifyRun(
 				art.ID,
 				meta.TargetToken,
 				strings.TrimSpace(meta.InternalFilename),
-				art.SizeBytes,
+				*art.LogicalSizeBytes,
 			)
 
 			secretcrypto.ZeroBytes(repoKey)
