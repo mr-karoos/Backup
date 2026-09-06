@@ -332,12 +332,13 @@ BackupArtifact + Update Run (success) + Update Job (completed)
   * پیاده‌سازی اعتبارسنجی سطح ۱ (Post-Backup) درون کارگر بلافاصله پس از ایجاد اسنپ‌شات.
   * پیاده‌سازی دانلود جریانی `restic dump` با فشرده‌سازی در لحظه Gzip و انتقال Chunked بر بستر انتزاع `DownloadDescriptor`.
 
-* **گام A.5 — ارکستراسیون مخزن، سیاست نگهداری و صف پایدار نگهداری دوره‌ای (`Step A.5`)**:
-  * پیاده‌سازی سرویس هماهنگ‌کننده `RepositoryOperationCoordinator` درون‌برنامه‌ای جهت جلوگیری از تداخل عملیات متضاد (ADR-035).
-  * یکپارچه‌سازی فرآیند Retention با دستور `restic forget` و حذف فیزیکی ایمن.
-  * ایجاد صف پایدار مستقل در دیتابیس (`repository_maintenance_jobs` و `repository_maintenance_runs`) و پیاده‌سازی کارگر `RepositoryMaintenanceWorker`.
-  * پیاده‌سازی اعتبارسنجی سطح ۲ (Deep Check) با بررسی زیرمجموعه‌های چرخشی قطعی ($1/N$).
-  * اعمال سیاست قطعی عدم آنلاک خودکار (`NO AUTOMATIC RESTIC UNLOCK`) و تثبیت هاست‌نیم کانتینر با `hostname: backup-platform-node-1`.
+* **گام A.5 — ارکستراسیون مخزن، سیاست نگهداری و صف پایدار نگهداری دوره‌ای (`Step A.5`) [تکمیل‌شده]**:
+  * [x] پیاده‌سازی سرویس هماهنگ‌کننده `RepositoryOperationCoordinator` درون‌برنامه‌ای جهت جلوگیری از تداخل عملیات متضاد (ADR-035).
+  * [x] یکپارچه‌سازی فرآیند Retention با دستور `restic forget` و حذف فیزیکی ایمن.
+  * [x] ایجاد صف پایدار مستقل در دیتابیس (`repository_maintenance_jobs` و `repository_maintenance_runs`) و پیاده‌سازی کارگر `RepositoryMaintenanceWorker`.
+  * [x] پیاده‌سازی اعتبارسنجی سطح ۲ (Deep Check) با بررسی زیرمجموعه‌های چرخشی قطعی ($1/N$).
+  * [x] اعمال سیاست قطعی عدم آنلاک خودکار (`NO AUTOMATIC RESTIC UNLOCK`) و تثبیت هاست‌نیم کانتینر با `hostname: backup-platform-node-1`.
+
 
 ### Future Phase B — پشتیبانی از منابع داده تکمیلی (Additional Data Sources)
 * پشتیبانی از پایگاه داده `SQLite` به روش ایمن (Online Safe Backup).

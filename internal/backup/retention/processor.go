@@ -27,6 +27,11 @@ type StorageProvider interface {
 	DeleteArtifact(ctx context.Context, storageRef string) error
 }
 
+// MaintenanceEnqueuer defines the maintenance job queuing interface.
+type MaintenanceEnqueuer interface {
+	EnqueueMaintenanceJob(ctx context.Context, params domain.EnqueueMaintenanceJobParams) (*domain.MaintenanceJob, error)
+}
+
 // AuditRecorder defines the audit log emission interface.
 type AuditRecorder interface {
 	Record(ctx context.Context, entry *auditDomain.AuditLog) error
@@ -34,20 +39,22 @@ type AuditRecorder interface {
 
 // CleanupSummary captures deterministic execution statistics for retention runs.
 type CleanupSummary struct {
-	RunsEvaluated      int
-	RunsExpired        int
-	ArtifactsAttempted int
-	ArtifactsDeleted   int
+	RunsEvaluated         int
+	RunsExpired           int
+	ArtifactsAttempted    int
+	ArtifactsDeleted      int
+	MaintenanceJobsQueued int
 }
 
 // Processor manages automated retention policy execution for backup plan runs.
 type Processor struct {
-	repo            PlanAndRunRepository
-	storageProvider StorageProvider
-	storageResolver storage.StorageProviderResolver
-	auditRecorder   AuditRecorder
-	logger          *slog.Logger
-	nowFunc         func() time.Time
+	repo                PlanAndRunRepository
+	storageProvider     StorageProvider
+	storageResolver     storage.StorageProviderResolver
+	maintenanceEnqueuer MaintenanceEnqueuer
+	auditRecorder       AuditRecorder
+	logger              *slog.Logger
+	nowFunc             func() time.Time
 }
 
 // NewProcessor constructs a new retention Processor.
@@ -72,6 +79,11 @@ func NewProcessor(
 // SetStorageResolver configures a dynamic storage provider resolver.
 func (p *Processor) SetStorageResolver(resolver storage.StorageProviderResolver) {
 	p.storageResolver = resolver
+}
+
+// SetMaintenanceEnqueuer configures the maintenance job enqueuer for restic snapshot retention.
+func (p *Processor) SetMaintenanceEnqueuer(enqueuer MaintenanceEnqueuer) {
+	p.maintenanceEnqueuer = enqueuer
 }
 
 // SetNowFunc injects a custom clock supplier for deterministic unit and integration testing.
@@ -216,6 +228,40 @@ func (p *Processor) ApplyAfterSuccessfulRun(
 			}
 
 			summary.ArtifactsAttempted++
+
+			if art.Format == domain.ArtifactFormatResticSnapshot {
+				if p.maintenanceEnqueuer == nil || art.RepositoryID == nil || *art.RepositoryID == uuid.Nil || art.SnapshotID == "" {
+					p.logger.Warn("cannot enqueue restic_forget maintenance job for artifact: missing dependencies",
+						slog.String("org_id", orgID.String()),
+						slog.String("artifact_id", art.ID.String()),
+					)
+					continue
+				}
+
+				_, err := p.maintenanceEnqueuer.EnqueueMaintenanceJob(ctx, domain.EnqueueMaintenanceJobParams{
+					OrganizationID: orgID,
+					RepositoryID:   *art.RepositoryID,
+					OperationType:  domain.MaintenanceOpResticForget,
+					ArtifactID:     &art.ID,
+					SnapshotID:     art.SnapshotID,
+					Metadata: map[string]interface{}{
+						"backup_plan_id": plan.ID.String(),
+						"run_id":         run.ID.String(),
+						"source":         "retention_policy",
+					},
+				})
+				if err != nil {
+					p.logger.Warn("failed enqueuing restic_forget maintenance job during retention",
+						slog.String("org_id", orgID.String()),
+						slog.String("artifact_id", art.ID.String()),
+						slog.String("snapshot_id", art.SnapshotID),
+						slog.String("error", err.Error()),
+					)
+					continue
+				}
+				summary.MaintenanceJobsQueued++
+				continue
+			}
 
 			storeProvider := p.storageProvider
 			if p.storageResolver != nil && art.StorageTargetID != uuid.Nil {

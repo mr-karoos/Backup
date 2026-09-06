@@ -3405,6 +3405,15 @@ func (f *fakeCommandRunner) DumpSample(ctx context.Context, target restic.Reposi
 func (f *fakeCommandRunner) DumpStream(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error) {
 	return nil, nil
 }
+func (f *fakeCommandRunner) ForgetSnapshot(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) error {
+	return nil
+}
+func (f *fakeCommandRunner) Prune(ctx context.Context, target restic.RepositoryTarget, password []byte) error {
+	return nil
+}
+func (f *fakeCommandRunner) CheckSubset(ctx context.Context, target restic.RepositoryTarget, password []byte, subsetIndex, subsetTotal int) error {
+	return nil
+}
 
 func TestWorkerPool_ResticExecution(t *testing.T) {
 	orgID := uuid.New()

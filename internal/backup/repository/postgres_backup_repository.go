@@ -2192,3 +2192,491 @@ func (r *PostgresBackupRepository) GetRepositoryByID(ctx context.Context, orgID,
 
 	return repo, nil
 }
+
+// -----------------------------------------------------------------------------
+// MaintenanceRepository Implementation (Future Phase A - Step A.5)
+// -----------------------------------------------------------------------------
+
+func scanMaintenanceJob(s interface {
+	Scan(dest ...interface{}) error
+}) (*domain.MaintenanceJob, error) {
+	var job domain.MaintenanceJob
+	var opStr, statusStr string
+	var snapID *string
+
+	err := s.Scan(
+		&job.ID,
+		&job.OrganizationID,
+		&job.RepositoryID,
+		&opStr,
+		&statusStr,
+		&job.ArtifactID,
+		&snapID,
+		&job.SubsetIndex,
+		&job.SubsetTotal,
+		&job.Metadata,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	job.OperationType = domain.MaintenanceOperationType(opStr)
+	job.Status = domain.MaintenanceJobStatus(statusStr)
+	if snapID != nil {
+		job.SnapshotID = *snapID
+	}
+	return &job, nil
+}
+
+func scanMaintenanceRun(s interface {
+	Scan(dest ...interface{}) error
+}) (*domain.MaintenanceRun, error) {
+	var run domain.MaintenanceRun
+	var statusStr string
+
+	err := s.Scan(
+		&run.ID,
+		&run.OrganizationID,
+		&run.JobID,
+		&run.AttemptNumber,
+		&statusStr,
+		&run.StartedAt,
+		&run.EndedAt,
+		&run.HeartbeatAt,
+		&run.LeaseUntil,
+		&run.ErrorMessage,
+		&run.LogsSummary,
+		&run.CreatedAt,
+		&run.UpdatedAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	run.Status = domain.MaintenanceRunStatus(statusStr)
+	return &run, nil
+}
+
+// EnqueueMaintenanceJob enqueues a maintenance job with idempotent conflict resolution.
+func (r *PostgresBackupRepository) EnqueueMaintenanceJob(ctx context.Context, params domain.EnqueueMaintenanceJobParams) (*domain.MaintenanceJob, error) {
+	if err := params.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid maintenance job params: %w", err)
+	}
+
+	q := r.txManager.Querier()
+	meta := params.MetadataJSON()
+
+	var snapID *string
+	if params.SnapshotID != "" {
+		snapID = &params.SnapshotID
+	}
+
+	const query = `
+		INSERT INTO repository_maintenance_jobs (
+			organization_id, repository_id, operation_type, status,
+			artifact_id, snapshot_id, subset_index, subset_total, metadata,
+			created_at, updated_at
+		) VALUES (
+			$1, $2, $3, 'pending',
+			$4, $5, $6, $7, $8,
+			NOW(), NOW()
+		)
+		ON CONFLICT DO NOTHING
+		RETURNING id, organization_id, repository_id, operation_type, status,
+		          artifact_id, snapshot_id, subset_index, subset_total, metadata,
+		          created_at, updated_at;
+	`
+
+	row := q.QueryRow(ctx, query,
+		params.OrganizationID,
+		params.RepositoryID,
+		string(params.OperationType),
+		params.ArtifactID,
+		snapID,
+		params.SubsetIndex,
+		params.SubsetTotal,
+		meta,
+	)
+
+	job, err := scanMaintenanceJob(row)
+	if err == nil {
+		return job, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("failed enqueuing maintenance job: %w", err)
+	}
+
+	// Conflict hit -> retrieve existing active job for deduplication
+	selectQuery := `
+		SELECT id, organization_id, repository_id, operation_type, status,
+		       artifact_id, snapshot_id, subset_index, subset_total, metadata,
+		       created_at, updated_at
+		FROM repository_maintenance_jobs
+		WHERE organization_id = $1 AND repository_id = $2 AND operation_type = $3 AND status IN ('pending', 'running')
+	`
+	args := []interface{}{params.OrganizationID, params.RepositoryID, string(params.OperationType)}
+	if params.OperationType == domain.MaintenanceOpResticForget {
+		selectQuery += " AND snapshot_id = $4"
+		args = append(args, params.SnapshotID)
+	} else if params.OperationType == domain.MaintenanceOpResticDeepCheck {
+		selectQuery += " AND subset_index = $4 AND subset_total = $5"
+		args = append(args, *params.SubsetIndex, *params.SubsetTotal)
+	}
+	selectQuery += " ORDER BY created_at DESC LIMIT 1;"
+
+	row = q.QueryRow(ctx, selectQuery, args...)
+	existingJob, err := scanMaintenanceJob(row)
+	if err != nil {
+		return nil, fmt.Errorf("failed retrieving conflicting maintenance job: %w", err)
+	}
+	return existingJob, nil
+}
+
+// ClaimNextMaintenanceJob atomically claims a pending or expired running maintenance job using FOR UPDATE SKIP LOCKED.
+func (r *PostgresBackupRepository) ClaimNextMaintenanceJob(ctx context.Context, leaseDuration time.Duration) (*domain.MaintenanceJob, *domain.MaintenanceRun, error) {
+	if leaseDuration <= 0 {
+		leaseDuration = 2 * time.Minute
+	}
+
+	var claimedJob *domain.MaintenanceJob
+	var newRun *domain.MaintenanceRun
+
+	err := r.txManager.WithinTx(ctx, func(tx database.Querier) error {
+		const selectQuery = `
+			SELECT id, organization_id, repository_id, operation_type, status,
+			       artifact_id, snapshot_id, subset_index, subset_total, metadata,
+			       created_at, updated_at
+			FROM repository_maintenance_jobs
+			WHERE status = 'pending'
+			   OR (status = 'running' AND id IN (
+			       SELECT job_id FROM repository_maintenance_runs
+			       WHERE status = 'running' AND lease_until < NOW()
+			   ))
+			ORDER BY created_at ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT 1;
+		`
+		row := tx.QueryRow(ctx, selectQuery)
+		job, err := scanMaintenanceJob(row)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil
+			}
+			return fmt.Errorf("failed selecting next maintenance job: %w", err)
+		}
+
+		const expireOldRunsQuery = `
+			UPDATE repository_maintenance_runs
+			SET status = 'failed', ended_at = NOW(), error_message = 'lease expired / abandoned', updated_at = NOW()
+			WHERE job_id = $1 AND status = 'running';
+		`
+		if _, err := tx.Exec(ctx, expireOldRunsQuery, job.ID); err != nil {
+			return fmt.Errorf("failed expiring stale maintenance runs: %w", err)
+		}
+
+		const updateJobQuery = `
+			UPDATE repository_maintenance_jobs
+			SET status = 'running', updated_at = NOW()
+			WHERE id = $1
+			RETURNING id, organization_id, repository_id, operation_type, status,
+			          artifact_id, snapshot_id, subset_index, subset_total, metadata,
+			          created_at, updated_at;
+		`
+		jobRow := tx.QueryRow(ctx, updateJobQuery, job.ID)
+		claimedJob, err = scanMaintenanceJob(jobRow)
+		if err != nil {
+			return fmt.Errorf("failed updating maintenance job to running: %w", err)
+		}
+
+		var count int
+		const countQuery = `SELECT COUNT(*) FROM repository_maintenance_runs WHERE job_id = $1;`
+		if err := tx.QueryRow(ctx, countQuery, job.ID).Scan(&count); err != nil {
+			return fmt.Errorf("failed counting previous maintenance runs: %w", err)
+		}
+		attemptNumber := count + 1
+
+		runID := uuid.New()
+		leaseSeconds := int64(leaseDuration.Seconds())
+		const insertRunQuery = `
+			INSERT INTO repository_maintenance_runs (
+				id, organization_id, job_id, attempt_number, status,
+				started_at, ended_at, heartbeat_at, lease_until, error_message, logs_summary,
+				created_at, updated_at
+			) VALUES (
+				$1, $2, $3, $4, 'running',
+				NOW(), NULL, NOW(), NOW() + ($5 * INTERVAL '1 second'), NULL, '[]'::jsonb,
+				NOW(), NOW()
+			)
+			RETURNING id, organization_id, job_id, attempt_number, status,
+			          started_at, ended_at, heartbeat_at, lease_until, error_message, logs_summary,
+			          created_at, updated_at;
+		`
+		runRow := tx.QueryRow(ctx, insertRunQuery, runID, claimedJob.OrganizationID, claimedJob.ID, attemptNumber, leaseSeconds)
+		newRun, err = scanMaintenanceRun(runRow)
+		if err != nil {
+			return fmt.Errorf("failed inserting maintenance run: %w", err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, nil, err
+	}
+	return claimedJob, newRun, nil
+}
+
+// HeartbeatMaintenanceRun updates heartbeat and extends the lease of a running maintenance run.
+func (r *PostgresBackupRepository) HeartbeatMaintenanceRun(ctx context.Context, runID uuid.UUID, leaseDuration time.Duration) error {
+	if runID == uuid.Nil {
+		return fmt.Errorf("runID is required")
+	}
+	if leaseDuration <= 0 {
+		leaseDuration = 2 * time.Minute
+	}
+	leaseSeconds := int64(leaseDuration.Seconds())
+
+	q := r.txManager.Querier()
+	const query = `
+		UPDATE repository_maintenance_runs
+		SET heartbeat_at = NOW(), lease_until = NOW() + ($2 * INTERVAL '1 second'), updated_at = NOW()
+		WHERE id = $1 AND status = 'running';
+	`
+	cmd, err := q.Exec(ctx, query, runID, leaseSeconds)
+	if err != nil {
+		return fmt.Errorf("failed updating maintenance run heartbeat: %w", err)
+	}
+	if cmd.RowsAffected() == 0 {
+		return fmt.Errorf("maintenance run not found or not in running state")
+	}
+	return nil
+}
+
+// CompleteMaintenanceJob marks a maintenance job as completed and its run as success.
+func (r *PostgresBackupRepository) CompleteMaintenanceJob(ctx context.Context, jobID, runID uuid.UUID, logsSummary []byte) error {
+	if jobID == uuid.Nil || runID == uuid.Nil {
+		return fmt.Errorf("jobID and runID are required")
+	}
+	if len(logsSummary) == 0 {
+		logsSummary = []byte("[]")
+	}
+
+	return r.txManager.WithinTx(ctx, func(tx database.Querier) error {
+		const updateRun = `
+			UPDATE repository_maintenance_runs
+			SET status = 'success', ended_at = NOW(), logs_summary = $3, updated_at = NOW()
+			WHERE id = $1 AND job_id = $2 AND status = 'running';
+		`
+		cmd, err := tx.Exec(ctx, updateRun, runID, jobID, logsSummary)
+		if err != nil {
+			return fmt.Errorf("failed completing maintenance run: %w", err)
+		}
+		if cmd.RowsAffected() == 0 {
+			return fmt.Errorf("maintenance run not running or not found")
+		}
+
+		const updateJob = `
+			UPDATE repository_maintenance_jobs
+			SET status = 'completed', updated_at = NOW()
+			WHERE id = $1;
+		`
+		if _, err := tx.Exec(ctx, updateJob, jobID); err != nil {
+			return fmt.Errorf("failed completing maintenance job: %w", err)
+		}
+		return nil
+	})
+}
+
+// FailMaintenanceJob marks a maintenance run as failed and sets the job status to pending (if retryable) or failed.
+func (r *PostgresBackupRepository) FailMaintenanceJob(ctx context.Context, jobID, runID uuid.UUID, errMsg string, retryable bool) error {
+	if jobID == uuid.Nil || runID == uuid.Nil {
+		return fmt.Errorf("jobID and runID are required")
+	}
+
+	return r.txManager.WithinTx(ctx, func(tx database.Querier) error {
+		const updateRun = `
+			UPDATE repository_maintenance_runs
+			SET status = 'failed', ended_at = NOW(), error_message = $3, updated_at = NOW()
+			WHERE id = $1 AND job_id = $2 AND status = 'running';
+		`
+		_, err := tx.Exec(ctx, updateRun, runID, jobID, errMsg)
+		if err != nil {
+			return fmt.Errorf("failed failing maintenance run: %w", err)
+		}
+
+		newStatus := "failed"
+		if retryable {
+			newStatus = "pending"
+		}
+		const updateJob = `
+			UPDATE repository_maintenance_jobs
+			SET status = $2, updated_at = NOW()
+			WHERE id = $1;
+		`
+		if _, err := tx.Exec(ctx, updateJob, jobID, newStatus); err != nil {
+			return fmt.Errorf("failed updating maintenance job status: %w", err)
+		}
+		return nil
+	})
+}
+
+// GetLastSuccessfulDeepCheckSubset returns the subset index of the most recent successful deep check for a repository.
+func (r *PostgresBackupRepository) GetLastSuccessfulDeepCheckSubset(ctx context.Context, orgID, repoID uuid.UUID) (int, error) {
+	if orgID == uuid.Nil || repoID == uuid.Nil {
+		return 0, fmt.Errorf("orgID and repoID are required")
+	}
+	q := r.txManager.Querier()
+	const query = `
+		SELECT j.subset_index
+		FROM repository_maintenance_jobs j
+		JOIN repository_maintenance_runs r ON r.job_id = j.id
+		WHERE j.organization_id = $1 AND j.repository_id = $2
+		  AND j.operation_type = 'restic_deep_check'
+		  AND r.status = 'success'
+		  AND j.subset_index IS NOT NULL
+		ORDER BY r.ended_at DESC NULLS LAST, r.created_at DESC
+		LIMIT 1;
+	`
+	var subsetIndex int
+	err := q.QueryRow(ctx, query, orgID, repoID).Scan(&subsetIndex)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed querying last successful deep check subset: %w", err)
+	}
+	return subsetIndex, nil
+}
+
+// GetMaintenanceJobByID retrieves a maintenance job by ID within an organization.
+func (r *PostgresBackupRepository) GetMaintenanceJobByID(ctx context.Context, orgID, jobID uuid.UUID) (*domain.MaintenanceJob, error) {
+	q := r.txManager.Querier()
+	const query = `
+		SELECT id, organization_id, repository_id, operation_type, status,
+		       artifact_id, snapshot_id, subset_index, subset_total, metadata,
+		       created_at, updated_at
+		FROM repository_maintenance_jobs
+		WHERE organization_id = $1 AND id = $2;
+	`
+	row := q.QueryRow(ctx, query, orgID, jobID)
+	job, err := scanMaintenanceJob(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrJobNotFound
+		}
+		return nil, fmt.Errorf("failed querying maintenance job: %w", err)
+	}
+	return job, nil
+}
+
+// GetMaintenanceRunByID retrieves a maintenance run by ID within an organization.
+func (r *PostgresBackupRepository) GetMaintenanceRunByID(ctx context.Context, orgID, runID uuid.UUID) (*domain.MaintenanceRun, error) {
+	q := r.txManager.Querier()
+	const query = `
+		SELECT id, organization_id, job_id, attempt_number, status,
+		       started_at, ended_at, heartbeat_at, lease_until, error_message, logs_summary,
+		       created_at, updated_at
+		FROM repository_maintenance_runs
+		WHERE organization_id = $1 AND id = $2;
+	`
+	row := q.QueryRow(ctx, query, orgID, runID)
+	run, err := scanMaintenanceRun(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, domain.ErrRunNotFound
+		}
+		return nil, fmt.Errorf("failed querying maintenance run: %w", err)
+	}
+	return run, nil
+}
+
+// ListMaintenanceJobs lists recent maintenance jobs for a repository.
+func (r *PostgresBackupRepository) ListMaintenanceJobs(ctx context.Context, orgID, repoID uuid.UUID, limit int) ([]*domain.MaintenanceJob, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	q := r.txManager.Querier()
+	const query = `
+		SELECT id, organization_id, repository_id, operation_type, status,
+		       artifact_id, snapshot_id, subset_index, subset_total, metadata,
+		       created_at, updated_at
+		FROM repository_maintenance_jobs
+		WHERE organization_id = $1 AND repository_id = $2
+		ORDER BY created_at DESC
+		LIMIT $3;
+	`
+	rows, err := q.Query(ctx, query, orgID, repoID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed listing maintenance jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []*domain.MaintenanceJob
+	for rows.Next() {
+		j, err := scanMaintenanceJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("failed scanning maintenance job: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, nil
+}
+
+// ListMaintenanceRuns lists all runs for a given maintenance job.
+func (r *PostgresBackupRepository) ListMaintenanceRuns(ctx context.Context, orgID, jobID uuid.UUID) ([]*domain.MaintenanceRun, error) {
+	q := r.txManager.Querier()
+	const query = `
+		SELECT id, organization_id, job_id, attempt_number, status,
+		       started_at, ended_at, heartbeat_at, lease_until, error_message, logs_summary,
+		       created_at, updated_at
+		FROM repository_maintenance_runs
+		WHERE organization_id = $1 AND job_id = $2
+		ORDER BY attempt_number ASC;
+	`
+	rows, err := q.Query(ctx, query, orgID, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("failed listing maintenance runs: %w", err)
+	}
+	defer rows.Close()
+
+	var runs []*domain.MaintenanceRun
+	for rows.Next() {
+		run, err := scanMaintenanceRun(rows)
+		if err != nil {
+			return nil, fmt.Errorf("failed scanning maintenance run: %w", err)
+		}
+		runs = append(runs, run)
+	}
+	return runs, nil
+}
+
+// ListActiveRepositories lists all active backup repositories across all organizations.
+func (r *PostgresBackupRepository) ListActiveRepositories(ctx context.Context, limit int) ([]*domain.BackupRepository, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := r.txManager.Querier()
+	const query = `
+		SELECT id, organization_id, resource_id, storage_target_id, credential_id,
+		       repository_locator, status, metadata, created_at, updated_at
+		FROM backup_repositories
+		WHERE status = 'active'
+		ORDER BY created_at ASC
+		LIMIT $1;
+	`
+	rows, err := q.Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed querying active repositories: %w", err)
+	}
+	defer rows.Close()
+
+	var repos []*domain.BackupRepository
+	for rows.Next() {
+		repo, err := scanBackupRepository(rows)
+		if err != nil {
+			return nil, fmt.Errorf("failed scanning backup repository: %w", err)
+		}
+		repos = append(repos, repo)
+	}
+	return repos, nil
+}

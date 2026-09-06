@@ -34,6 +34,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: backup-platform-app
+    hostname: backup-platform-node-1
     restart: unless-stopped
     depends_on:
       postgres:

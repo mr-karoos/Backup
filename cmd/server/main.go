@@ -342,6 +342,7 @@ func run() error {
 		log,
 	)
 	retentionProcessor.SetStorageResolver(storageResolverService)
+	retentionProcessor.SetMaintenanceEnqueuer(backupRepository)
 
 	workerPool := backupWorker.NewWorkerPool(
 		backupWorker.DefaultWorkerPoolConfig(),
@@ -362,6 +363,20 @@ func run() error {
 	workerPool.SetResticEngine(resticEngine, resticCoordinator, repoService, resticRunner, resticTargetResolver)
 	workerPool.Start(backgroundCtx)
 
+	maintenanceWorker := backupWorker.NewRepositoryMaintenanceWorker(
+		backupRepository,
+		backupRepository,
+		backupRepository,
+		vaultService,
+		resticTargetResolver,
+		resticRunner,
+		resticCoordinator,
+		auditRecorder,
+		backupWorker.DefaultMaintenanceWorkerConfig(),
+		log,
+	)
+	maintenanceWorker.Start(backgroundCtx)
+
 	staleReaper := backupWorker.NewStaleRunReaper(backupRepository, localStorageProvider, 30*time.Second, log)
 	staleReaper.SetStorageResolver(storageResolverService)
 	staleReaper.Start(backgroundCtx)
@@ -371,8 +386,17 @@ func run() error {
 		_ = backupSched.Start(backgroundCtx)
 	}()
 
+	maintenanceSched := backupScheduler.NewMaintenanceScheduler(
+		backupRepository,
+		backupScheduler.DefaultMaintenanceSchedulerConfig(),
+		log,
+	)
+	maintenanceSched.Start(backgroundCtx)
+
 	stopBackgroundServices := func(ctx context.Context) {
 		backgroundCancel()
+		maintenanceSched.Stop()
+		maintenanceWorker.Stop()
 		_ = staleReaper.Stop(ctx)
 		_ = workerPool.Stop(ctx)
 	}

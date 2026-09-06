@@ -65,6 +65,18 @@ func (m *mockResticRunner) DumpStream(ctx context.Context, target restic.Reposit
 	return nil, nil
 }
 
+func (m *mockResticRunner) ForgetSnapshot(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) error {
+	return nil
+}
+
+func (m *mockResticRunner) Prune(ctx context.Context, target restic.RepositoryTarget, password []byte) error {
+	return nil
+}
+
+func (m *mockResticRunner) CheckSubset(ctx context.Context, target restic.RepositoryTarget, password []byte, subsetIndex, subsetTotal int) error {
+	return nil
+}
+
 type mockTarget struct{}
 
 func (m *mockTarget) Type() string                { return "local" }

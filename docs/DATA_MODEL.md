@@ -467,6 +467,60 @@
 
 ---
 
+### ۱۴. موجودیت جاب‌های نگهداری مخزن (`repository_maintenance_jobs`)
+
+* **وظیفه**: صف پایدار و ثبت درخواست‌های عملیات نگهداری مخزن Restic نظیر هرس داده‌ها (`restic_prune`)، بررسی عمیق ساختاری (`restic_deep_check`) و حذف اسنپ‌شات‌های منقضی (`restic_forget`).
+* **دامنه‌بندی سازمانی**: دارد (`organization_id`).
+
+| نام فیلد | نوع داده | توضیحات و الزامات |
+| :--- | :--- | :--- |
+| `id` | `UUID` | کلید اصلی (Primary Key). |
+| `organization_id` | `UUID` | کلید خارجی به جدول `organizations.id` (اجباری، حذف RESTRICT). |
+| `repository_id` | `UUID` | کلید خارجی به جدول `backup_repositories.id` (اجباری، حذف RESTRICT). |
+| `operation_type` | `VARCHAR(50)` | نوع عملیات نگهداری (`restic_prune`, `restic_deep_check`, `restic_forget`). |
+| `status` | `VARCHAR(30)` | وضعیت چرخه حیات (`pending`, `running`, `completed`, `failed`, `cancelled` - پیش‌فرض: `pending`). |
+| `artifact_id` | `UUID` | ارجاع به آرتیفکت در حال حذف برای `restic_forget` (برای سایر عملیات NULL). |
+| `snapshot_id` | `VARCHAR(64)` | شناسه ۶۴ کاراکتری هگزادسیمال اسنپ‌شات هدف برای `restic_forget` (برای سایر عملیات NULL). |
+| `subset_index` | `INTEGER` | اندیس زیرمجموعه در حال بررسی برای `restic_deep_check` (برای سایر عملیات NULL). |
+| `subset_total` | `INTEGER` | تعداد کل زیرمجموعه‌های تقسیم‌شده برای `restic_deep_check` (برای سایر عملیات NULL). |
+| `metadata` | `JSONB` | ابرداده پاک‌سازی‌شده عملیاتی (پیش‌فرض: `{}`::jsonb). |
+| `created_at` | `TIMESTAMPTZ` | زمان ایجاد و صف‌بندی جاب. |
+| `updated_at` | `TIMESTAMPTZ` | زمان آخرین تغییر وضعیت. |
+
+* **قیدهای مانعةالجمع چندریختی (Polymorphic Field Constraints)**:
+  * برای `restic_forget`: فیلدهای `artifact_id` و `snapshot_id` (دقیقاً ۶۴ هگز کوچک) الزامی و فیلدهای `subset_*` باید NULL باشند.
+  * برای `restic_prune`: فیلدهای `artifact_id`، `snapshot_id` و `subset_*` باید همگی NULL باشند.
+  * برای `restic_deep_check`: فیلدهای `artifact_id` و `snapshot_id` باید NULL، و فیلدهای `subset_index >= 1` و `subset_total >= subset_index` الزامی هستند.
+* **ایندکس‌های یکتای ددابلیکاسیون (Partial Unique Indexes)**:
+  * مانع از ایجاد جاب‌های تکراری در وضعیت‌های `pending` و `running` برای همان مخزن یا اسنپ‌شات (`uq_repo_maint_jobs_active_prune`, `uq_repo_maint_jobs_active_check`, `uq_repo_maint_jobs_active_forget`).
+
+---
+
+### ۱۵. موجودیت تلاش‌های اجرای نگهداری مخزن (`repository_maintenance_runs`)
+
+* **وظیفه**: ثبت سوابق فیزیکی هر تلاش اجرایی برای یک جاب نگهداری، مدیریت Heartbeat و انقضای Lease جهت پایش کرش.
+* **دامنه‌بندی سازمانی**: دارد (`organization_id`).
+
+| نام فیلد | نوع داده | توضیحات و الزامات |
+| :--- | :--- | :--- |
+| `id` | `UUID` | کلید اصلی (Primary Key). |
+| `organization_id` | `UUID` | کلید خارجی به جدول `organizations.id` (اجباری، حذف RESTRICT). |
+| `job_id` | `UUID` | کلید خارجی به جدول `repository_maintenance_jobs.id` (اجباری، حذف RESTRICT). |
+| `attempt_number` | `INTEGER` | شماره تلاش اجرایی برای این جاب (شروع از ۱). |
+| `status` | `VARCHAR(30)` | وضعیت اجرا (`running`, `success`, `failed` - پیش‌فرض: `running`). |
+| `started_at` | `TIMESTAMPTZ` | زمان شروع فیزیکی اجرا. |
+| `ended_at` | `TIMESTAMPTZ` | زمان پایان موفق یا ناموفق اجرا. |
+| `heartbeat_at` | `TIMESTAMPTZ` | آخرین زمان ارسال سیگنال حیات توسط کارگر نگهداری. |
+| `lease_until` | `TIMESTAMPTZ` | زمان انقضای اجاره کارگر جهت تشخیص زامبی/کرش. |
+| `error_message` | `TEXT` | پیام خطای پاک‌سازی‌شده در صورت بروز خطا. |
+| `result_payload` | `JSONB` | جزئیات نتایج حاصل از اجرای دستور (پیش‌فرض: `{}`::jsonb). |
+| `created_at` | `TIMESTAMPTZ` | زمان ایجاد رکورد. |
+| `updated_at` | `TIMESTAMPTZ` | زمان به‌روزرسانی رکورد. |
+
+* **کنترل یکتایی تلاش‌ها**: شاخص یکتای `uq_repo_maint_runs_job_attempt` بر روی ترکیب `(job_id, attempt_number)` مانع از ثبت تکراری شماره تلاش می‌شود.
+
+---
+
 ## ۶. تشریح روابط و قیدهای عدم ارجاع بین‌سازمانی (Cross-Organization Constraints)
 
 برای تضمین ایزولاسیون کامل چندسازمانی (Multi-tenancy) و جلوگیری از هرگونه نشت داده (Data Leakage) میان سازمان‌ها، قواعد یکپارچگی زیر در لایه Data Layer و پایگاه داده اعمال می‌شوند:

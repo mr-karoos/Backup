@@ -206,7 +206,7 @@ func TestWorkerPool_RealPostgres15AndRestic_A4_E2E(t *testing.T) {
 		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM organizations WHERE id = $1", orgID)
 	}
 	cleanup()
-	t.Cleanup(cleanup)
+	defer cleanup()
 
 	// Seed Organization
 	slug := fmt.Sprintf("org-real-worker-e2e-%s", orgID.String()[:8])

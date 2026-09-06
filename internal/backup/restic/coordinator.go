@@ -15,6 +15,7 @@ import (
 type RepositoryOperationCoordinator interface {
 	AcquireShared(ctx context.Context, repoID uuid.UUID) (func(), error)
 	AcquireExclusive(ctx context.Context, repoID uuid.UUID) (func(), error)
+	TryAcquireExclusive(repoID uuid.UUID) (func(), bool, error)
 }
 
 // InProcessRepositoryOperationCoordinator implements RepositoryOperationCoordinator using in-process RWMutexes.
@@ -99,4 +100,24 @@ func (c *InProcessRepositoryOperationCoordinator) AcquireExclusive(ctx context.C
 		case <-time.After(2 * time.Millisecond):
 		}
 	}
+}
+
+// TryAcquireExclusive attempts to acquire an exclusive lock immediately without blocking.
+// If another operation currently holds the lock, it returns (nil, false, nil).
+func (c *InProcessRepositoryOperationCoordinator) TryAcquireExclusive(repoID uuid.UUID) (func(), bool, error) {
+	if repoID == uuid.Nil {
+		return nil, false, errors.New("repository ID cannot be nil")
+	}
+
+	l := c.getLock(repoID)
+	if l.TryLock() {
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				l.Unlock()
+			})
+		}, true, nil
+	}
+
+	return nil, false, nil
 }

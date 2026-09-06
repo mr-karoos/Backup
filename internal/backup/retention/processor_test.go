@@ -1175,3 +1175,117 @@ func TestRetentionProcessor_SameOrganizationPlanIsolation(t *testing.T) {
 		}
 	}
 }
+
+type mockMaintenanceEnqueuer struct {
+	enqueued []domain.EnqueueMaintenanceJobParams
+}
+
+func (m *mockMaintenanceEnqueuer) EnqueueMaintenanceJob(ctx context.Context, params domain.EnqueueMaintenanceJobParams) (*domain.MaintenanceJob, error) {
+	m.enqueued = append(m.enqueued, params)
+	return &domain.MaintenanceJob{
+		ID:            uuid.New(),
+		RepositoryID:  params.RepositoryID,
+		OperationType: params.OperationType,
+		Status:        domain.MaintenanceJobPending,
+		SnapshotID:    params.SnapshotID,
+	}, nil
+}
+
+func TestRetentionProcessor_ResticSnapshotQueuesForget(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	orgID := uuid.New()
+	planID := uuid.New()
+	repoID := uuid.New()
+	keepCount := 1
+
+	plan := &domain.BackupPlan{
+		ID:             planID,
+		OrganizationID: orgID,
+		RetentionCount: &keepCount,
+	}
+
+	endedCurrent := now
+	endedOld := now.Add(-2 * time.Hour)
+	// Two runs: runCurrent (kept) and runOld (expired)
+	runCurrent := &domain.BackupRun{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		Status:         domain.RunStatusSuccess,
+		CreatedAt:      now,
+		EndedAt:        &endedCurrent,
+	}
+	runOld := &domain.BackupRun{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		Status:         domain.RunStatusSuccess,
+		CreatedAt:      now.Add(-2 * time.Hour),
+		EndedAt:        &endedOld,
+	}
+
+	validSnapID := "1111222233334444555566667777888899990000aaaabbbbccccddddeeeeffff"
+	artOld := &domain.BackupArtifact{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		RunID:          runOld.ID,
+		Format:         domain.ArtifactFormatResticSnapshot,
+		RepositoryID:   &repoID,
+		SnapshotID:     validSnapID,
+		IsDeleted:      false,
+	}
+
+	repo := newMockRepo()
+	repo.plans[planID] = plan
+	repo.successfulRuns[planID] = []*domain.BackupRun{runCurrent, runOld}
+	repo.artifacts[runOld.ID] = []*domain.BackupArtifact{artOld}
+
+	store := newMockStorage()
+	audit := &mockAuditRecorder{}
+	enqueuer := &mockMaintenanceEnqueuer{}
+
+	proc := NewProcessor(repo, store, audit, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	proc.SetNowFunc(func() time.Time { return now })
+	proc.SetMaintenanceEnqueuer(enqueuer)
+
+	summary, err := proc.ApplyAfterSuccessfulRun(context.Background(), orgID, &planID, runCurrent.ID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if summary.ArtifactsAttempted != 1 {
+		t.Errorf("expected 1 artifact attempted, got %d", summary.ArtifactsAttempted)
+	}
+	if summary.ArtifactsDeleted != 0 {
+		t.Errorf("expected 0 artifacts directly deleted for restic snapshot, got %d", summary.ArtifactsDeleted)
+	}
+	if summary.MaintenanceJobsQueued != 1 {
+		t.Errorf("expected 1 maintenance job queued, got %d", summary.MaintenanceJobsQueued)
+	}
+
+	// Must NOT delete from storage provider
+	if len(store.deleted) != 0 {
+		t.Errorf("expected 0 deletions from storage provider, got %d", len(store.deleted))
+	}
+
+	// Must NOT tombstone in database yet (maintenance worker will do this upon forget success)
+	if repo.tombstoned[artOld.ID] {
+		t.Errorf("artifact should not be tombstoned yet before maintenance worker executes forget")
+	}
+
+	// Must have enqueued restic_forget
+	if len(enqueuer.enqueued) != 1 {
+		t.Fatalf("expected 1 enqueued maintenance job, got %d", len(enqueuer.enqueued))
+	}
+	job := enqueuer.enqueued[0]
+	if job.OperationType != domain.MaintenanceOpResticForget {
+		t.Errorf("expected operation restic_forget, got %s", job.OperationType)
+	}
+	if job.RepositoryID != repoID {
+		t.Errorf("expected repoID %s, got %s", repoID, job.RepositoryID)
+	}
+	if job.SnapshotID != validSnapID {
+		t.Errorf("expected snapshotID %s, got %s", validSnapID, job.SnapshotID)
+	}
+	if job.ArtifactID == nil || *job.ArtifactID != artOld.ID {
+		t.Errorf("expected artifact ID %s, got %v", artOld.ID, job.ArtifactID)
+	}
+}

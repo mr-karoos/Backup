@@ -32,6 +32,9 @@ type CommandRunner interface {
 	ListSnapshotNodes(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) ([]SnapshotNode, error)
 	DumpSample(ctx context.Context, target RepositoryTarget, password []byte, snapshotID, internalFilename string, maxBytes int) ([]byte, error)
 	DumpStream(ctx context.Context, target RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error)
+	ForgetSnapshot(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) error
+	Prune(ctx context.Context, target RepositoryTarget, password []byte) error
+	CheckSubset(ctx context.Context, target RepositoryTarget, password []byte, subsetIndex, subsetTotal int) error
 }
 
 // SnapshotSummary represents the summary metrics of a snapshot.
@@ -428,6 +431,67 @@ func (r *ResticRunner) DumpStream(ctx context.Context, target RepositoryTarget, 
 	}()
 
 	return d, nil
+}
+
+// ForgetSnapshot removes a snapshot from the repository without pruning unreferenced data blobs.
+func (r *ResticRunner) ForgetSnapshot(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) error {
+	if target == nil {
+		return errors.New("repository target is required")
+	}
+	if len(password) == 0 {
+		return errors.New("repository password cannot be empty")
+	}
+	if !domain.IsValidCanonicalResticSnapshotID(snapshotID) {
+		return fmt.Errorf("invalid canonical restic snapshot ID: %s", snapshotID)
+	}
+
+	args := []string{"forget", snapshotID}
+	_, err := r.runCommand(ctx, target, password, args)
+	if err != nil {
+		return fmt.Errorf("failed executing restic forget: %w", err)
+	}
+	return nil
+}
+
+// Prune removes unreferenced data blobs from the repository.
+func (r *ResticRunner) Prune(ctx context.Context, target RepositoryTarget, password []byte) error {
+	if target == nil {
+		return errors.New("repository target is required")
+	}
+	if len(password) == 0 {
+		return errors.New("repository password cannot be empty")
+	}
+
+	args := []string{"prune"}
+	_, err := r.runCommand(ctx, target, password, args)
+	if err != nil {
+		return fmt.Errorf("failed executing restic prune: %w", err)
+	}
+	return nil
+}
+
+// CheckSubset verifies the integrity of repository structures and a deterministic subset of data packs.
+func (r *ResticRunner) CheckSubset(ctx context.Context, target RepositoryTarget, password []byte, subsetIndex, subsetTotal int) error {
+	if target == nil {
+		return errors.New("repository target is required")
+	}
+	if len(password) == 0 {
+		return errors.New("repository password cannot be empty")
+	}
+	if subsetIndex < 1 {
+		return fmt.Errorf("subsetIndex must be >= 1, got %d", subsetIndex)
+	}
+	if subsetTotal < subsetIndex {
+		return fmt.Errorf("subsetTotal must be >= subsetIndex, got total %d, index %d", subsetTotal, subsetIndex)
+	}
+
+	subsetFlag := fmt.Sprintf("--read-data-subset=%d/%d", subsetIndex, subsetTotal)
+	args := []string{"check", subsetFlag}
+	_, err := r.runCommand(ctx, target, password, args)
+	if err != nil {
+		return fmt.Errorf("failed executing restic check %s: %w", subsetFlag, err)
+	}
+	return nil
 }
 
 // runCommand handles safe subprocess dispatch with child-only secret environment and sanitized output.
