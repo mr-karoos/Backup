@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/restic"
@@ -64,52 +66,83 @@ type ResticBackupSummary struct {
 	SnapshotID          string `json:"snapshot_id"`
 }
 
-// parseResticBackupSummary parses the JSON output from restic backup --json and returns the unique summary.
-func parseResticBackupSummary(output string) (*ResticBackupSummary, error) {
-	scanner := bufio.NewScanner(strings.NewReader(output))
+const (
+	// MaxBackupJSONLineBytes is the maximum allowed length for a single JSON line/event from restic backup --json.
+	// Single events exceeding this limit fail closed to prevent memory exhaustion.
+	MaxBackupJSONLineBytes = 64 * 1024
+)
+
+// StreamParseResticBackupStdout concurrently parses JSON lines from restic backup --json stdout.
+// It fails closed on any malformed JSON event, oversized event, duplicate summary, missing summary,
+// or invalid non-64-hex snapshot ID. Progress and status events are discarded immediately to preserve bounded memory.
+func StreamParseResticBackupStdout(r io.Reader) (*ResticBackupSummary, error) {
+	scanner := bufio.NewScanner(r)
+	buf := make([]byte, 16*1024)
+	scanner.Buffer(buf, MaxBackupJSONLineBytes)
+
 	var summary *ResticBackupSummary
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || !strings.HasPrefix(line, "{") {
+		lineBytes := bytes.TrimSpace(scanner.Bytes())
+		if len(lineBytes) == 0 {
 			continue
 		}
 
-		var obj map[string]any
-		if err := json.Unmarshal([]byte(line), &obj); err != nil {
-			continue // skip non-JSON or partial line
+		// Must be valid JSON
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(lineBytes, &raw); err != nil {
+			return nil, fmt.Errorf("malformed JSON in restic backup output: %w", err)
 		}
 
-		msgType, _ := obj["message_type"].(string)
-		if msgType == "summary" {
-			var s ResticBackupSummary
-			if err := json.Unmarshal([]byte(line), &s); err != nil {
-				return nil, fmt.Errorf("malformed restic summary event: %w", err)
-			}
-			if summary != nil && summary.SnapshotID != s.SnapshotID {
+		var msgType string
+		if mtRaw, ok := raw["message_type"]; ok {
+			_ = json.Unmarshal(mtRaw, &msgType)
+		}
+
+		switch msgType {
+		case "summary":
+			if summary != nil {
 				return nil, errors.New("conflicting duplicate snapshot summary events in restic output")
 			}
+			var s ResticBackupSummary
+			if err := json.Unmarshal(lineBytes, &s); err != nil {
+				return nil, fmt.Errorf("malformed restic summary event: %w", err)
+			}
+			if s.SnapshotID == "" {
+				return nil, errors.New("restic backup summary missing snapshot_id")
+			}
+			if !domain.IsValidCanonicalResticSnapshotID(s.SnapshotID) {
+				return nil, fmt.Errorf("invalid snapshot ID format: expected 64 lowercase hex characters, got %q", s.SnapshotID)
+			}
 			summary = &s
+
+		case "status":
+			// Valid status/progress event - discard immediately to maintain bounded memory
+			continue
+
+		default:
+			// Other valid JSON event types - discard immediately
+			continue
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading restic output: %w", err)
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, fmt.Errorf("oversized hostile event in restic backup output exceeding %d bytes limit: %w", MaxBackupJSONLineBytes, err)
+		}
+		return nil, fmt.Errorf("error reading restic backup stdout: %w", err)
 	}
 
 	if summary == nil {
 		return nil, errors.New("missing summary event in restic backup output")
 	}
 
-	if summary.SnapshotID == "" {
-		return nil, errors.New("restic backup summary missing snapshot_id")
-	}
-
-	if !hexSnapshotIDRegex.MatchString(summary.SnapshotID) {
-		return nil, fmt.Errorf("invalid snapshot ID format: %q", summary.SnapshotID)
-	}
-
 	return summary, nil
+}
+
+// parseResticBackupSummary parses the JSON output from restic backup --json and returns the unique summary.
+func parseResticBackupSummary(output string) (*ResticBackupSummary, error) {
+	return StreamParseResticBackupStdout(strings.NewReader(output))
 }
 
 // StdinBackupRequest encapsulates all parameters required for a Fail-Closed Gated EOF backup.
@@ -240,15 +273,51 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 		return nil, fmt.Errorf("failed creating restic stdin pipe: %w", err)
 	}
 
-	stdoutBuf := newBoundedBuffer(restic.MaxOutputBytes)
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdinPipe.Close()
+		return nil, fmt.Errorf("failed creating restic stdout pipe: %w", err)
+	}
+
 	stderrBuf := newBoundedBuffer(restic.MaxOutputBytes)
-	cmd.Stdout = stdoutBuf
 	cmd.Stderr = stderrBuf
 
 	// 5. Start Restic process
 	if err := cmd.Start(); err != nil {
 		_ = stdinPipe.Close()
+		_ = stdoutPipe.Close()
 		return nil, fmt.Errorf("failed starting restic process: %w", err)
+	}
+
+	// Channel for concurrent streaming stdout JSON parser
+	type stdoutResult struct {
+		summary *ResticBackupSummary
+		err     error
+	}
+	stdoutDoneChan := make(chan stdoutResult, 1)
+	go func() {
+		s, sErr := StreamParseResticBackupStdout(stdoutPipe)
+		stdoutDoneChan <- stdoutResult{summary: s, err: sErr}
+	}()
+
+	// Channel for child process completion (cmd.Wait() is called in exactly ONE goroutine)
+	type childOutcome struct {
+		err error
+	}
+	childDoneChan := make(chan childOutcome, 1)
+	go func() {
+		wErr := cmd.Wait()
+		childDoneChan <- childOutcome{err: wErr}
+	}()
+
+	// Safe closer for stdinPipe to prevent double close
+	var stdinOnce sync.Once
+	safeCloseStdin := func() error {
+		var closeErr error
+		stdinOnce.Do(func() {
+			closeErr = stdinPipe.Close()
+		})
+		return closeErr
 	}
 
 	// 6. Producer execution in dedicated goroutine with panic recovery
@@ -274,79 +343,120 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 		prodChan <- prodOutcome{err: pErr, panicked: false}
 	}()
 
-	// 7. Supervisor waiting on producer completion or context cancellation
-	var outcome prodOutcome
+	// 7. Concurrent State Machine: supervisor concurrently observes:
+	// - producer result (prodChan)
+	// - restic child result (childDoneChan)
+	// - parent ctx.Done()
 	select {
-	case <-ctx.Done():
-		// Context cancellation / timeout: Kill child, close pipe, reap child, wait producer
-		childCancel()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	case outcome := <-prodChan:
+		// 8. Producer completed first:
+		if outcome.panicked || outcome.err != nil {
+			// Producer failure or panic:
+			// DO NOT SEND GRACEFUL EOF!
+			// 1. Hard kill Restic child immediately
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			// 2. Reap child
+			<-childDoneChan
+			// 3. Cancel producer context
+			prodCancel()
+			// 4. Close parent pipe only AFTER live child can no longer observe graceful EOF
+			_ = safeCloseStdin()
+			// 5. Drain stdout scanner
+			<-stdoutDoneChan
+
+			if outcome.panicked {
+				return nil, errors.New("backup stream producer panicked during execution")
+			}
+			return nil, fmt.Errorf("backup streaming failed: %w", outcome.err)
 		}
-		_ = stdinPipe.Close()
-		_ = cmd.Wait()
+
+		// Producer succeeded (err == nil, no panic):
+		// Now and ONLY now, supervisor closes Restic STDIN pipe (Graceful EOF).
+		if closeErr := safeCloseStdin(); closeErr != nil {
+			prodCancel()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			<-childDoneChan
+			<-stdoutDoneChan
+			return nil, fmt.Errorf("failed closing restic stdin: %w", closeErr)
+		}
+
+		// Wait for Restic child process to exit cleanly
+		select {
+		case childRes := <-childDoneChan:
+			stdoutRes := <-stdoutDoneChan
+			childCancel()
+
+			if childRes.err != nil {
+				sanitizedStderr := sanitizeSecrets(stderrBuf.String(), string(req.Password), targetEnv)
+				return nil, fmt.Errorf("restic backup process failed: %w (stderr: %s)", childRes.err, sanitizedStderr)
+			}
+
+			if stdoutRes.err != nil {
+				return nil, fmt.Errorf("failed parsing restic summary output: %w", stdoutRes.err)
+			}
+
+			summary := stdoutRes.summary
+			if summary.TotalBytesProcessed <= 0 && summary.FilesNew == 0 {
+				return nil, errors.New("restic backup produced empty logical snapshot")
+			}
+
+			return &ResticExecutionResult{
+				ArtifactID:       req.ArtifactID,
+				SnapshotID:       summary.SnapshotID,
+				LogicalSizeBytes: summary.TotalBytesProcessed,
+				InternalFilename: req.InternalFilename,
+				TargetToken:      targetToken,
+			}, nil
+
+		case <-ctx.Done():
+			prodCancel()
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			<-childDoneChan
+			<-stdoutDoneChan
+			return nil, ctx.Err()
+		}
+
+	case childRes := <-childDoneChan:
+		// Restic child exited prematurely while producer was still active!
+		// 1. Immediately cancel producer context
 		prodCancel()
-		<-prodChan
-		return nil, ctx.Err()
-
-	case outcome = <-prodChan:
-		// Producer completed
-	}
-
-	// 8. Gated EOF Gatekeeper:
-	// If producer panicked or returned an error: DO NOT SEND EOF!
-	// Hard-terminate Restic immediately, close pipe, reap child.
-	if outcome.panicked || outcome.err != nil {
-		childCancel()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+		// 2. Close stdin pipe to unblock any blocked write
+		_ = safeCloseStdin()
+		// 3. Bounded wait for producer to stop
+		select {
+		case <-prodChan:
+		case <-time.After(3 * time.Second):
 		}
-		_ = stdinPipe.Close()
-		_ = cmd.Wait()
+		// 4. Drain stdout scanner
+		<-stdoutDoneChan
 
-		if outcome.panicked {
-			return nil, errors.New("backup stream producer panicked during execution")
-		}
-		return nil, fmt.Errorf("backup streaming failed: %w", outcome.err)
-	}
-
-	// 9. Connector succeeded (err == nil, no panic):
-	// Now and ONLY now, supervisor closes Restic STDIN pipe (Graceful EOF).
-	if closeErr := stdinPipe.Close(); closeErr != nil {
-		childCancel()
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
-		_ = cmd.Wait()
-		return nil, fmt.Errorf("failed closing restic stdin: %w", closeErr)
-	}
-
-	// 10. Wait for Restic child process to exit
-	waitErr := cmd.Wait()
-	childCancel()
-
-	if waitErr != nil {
 		sanitizedStderr := sanitizeSecrets(stderrBuf.String(), string(req.Password), targetEnv)
-		return nil, fmt.Errorf("restic backup process failed: %w (stderr: %s)", waitErr, sanitizedStderr)
-	}
+		if childRes.err != nil {
+			return nil, fmt.Errorf("restic backup process exited prematurely: %w (stderr: %s)", childRes.err, sanitizedStderr)
+		}
+		return nil, fmt.Errorf("restic backup process exited prematurely with code 0 (stderr: %s)", sanitizedStderr)
 
-	// 11. Parse and validate JSON summary output
-	summary, parseErr := parseResticBackupSummary(stdoutBuf.String())
-	if parseErr != nil {
-		return nil, fmt.Errorf("failed parsing restic summary output: %w", parseErr)
+	case <-ctx.Done():
+		// Context cancellation while both were running
+		prodCancel()
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		<-childDoneChan
+		_ = safeCloseStdin()
+		select {
+		case <-prodChan:
+		case <-time.After(3 * time.Second):
+		}
+		<-stdoutDoneChan
+		return nil, ctx.Err()
 	}
-
-	if summary.TotalBytesProcessed <= 0 && summary.FilesNew == 0 {
-		return nil, errors.New("restic backup produced empty logical snapshot")
-	}
-
-	return &ResticExecutionResult{
-		ArtifactID:       req.ArtifactID,
-		SnapshotID:       summary.SnapshotID,
-		LogicalSizeBytes: summary.TotalBytesProcessed,
-		InternalFilename: req.InternalFilename,
-		TargetToken:      targetToken,
-	}, nil
 }
 
 // boundedBuffer for safe subprocess stdout/stderr capture

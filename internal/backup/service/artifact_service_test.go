@@ -787,6 +787,7 @@ func TestArtifactService_ResticDownload(t *testing.T) {
 		SnapshotID:       "snap123456",
 		StorageTargetID:  targetID,
 		LogicalSizeBytes: int64Ptr(int64(len(rawDumpContent))),
+		EngineMetadata:   []byte(`{"internal_filename":"ecommerce.sql","target_token":"ecommerce"}`),
 	}
 
 	backupRepo := &mockArtifactRepo{
@@ -911,6 +912,52 @@ func TestArtifactService_ResticDownload(t *testing.T) {
 		_, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
 		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
 			t.Fatalf("expected ErrBackupServiceUnavailable on nil repository_id, got: %v", err)
+		}
+	})
+
+	t.Run("fails when engine_metadata is missing", func(t *testing.T) {
+		noMetaArt := &domain.BackupArtifact{
+			ID:             artID,
+			OrganizationID: orgID,
+			Format:         domain.ArtifactFormatResticSnapshot,
+			RepositoryID:   &repoID,
+			SnapshotID:     "snap123",
+			EngineMetadata: nil,
+		}
+		repoNoMeta := &mockArtifactRepo{
+			getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+				return noMetaArt, nil
+			},
+		}
+		svc := NewArtifactService(repoNoMeta, &mockStorageProvider{}, &mockAuditService{}, nil)
+		svc.SetResticDependencies(runner, coordinator, vault, targetResolver)
+
+		_, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable on missing engine_metadata, got: %v", err)
+		}
+	})
+
+	t.Run("fails when internal_filename in engine_metadata is empty", func(t *testing.T) {
+		emptyFnArt := &domain.BackupArtifact{
+			ID:             artID,
+			OrganizationID: orgID,
+			Format:         domain.ArtifactFormatResticSnapshot,
+			RepositoryID:   &repoID,
+			SnapshotID:     "snap123",
+			EngineMetadata: []byte(`{"internal_filename":"   ","target_token":"ecommerce"}`),
+		}
+		repoEmptyFn := &mockArtifactRepo{
+			getArtifactByIDFunc: func(ctx context.Context, oID, aID uuid.UUID) (*domain.BackupArtifact, error) {
+				return emptyFnArt, nil
+			},
+		}
+		svc := NewArtifactService(repoEmptyFn, &mockStorageProvider{}, &mockAuditService{}, nil)
+		svc.SetResticDependencies(runner, coordinator, vault, targetResolver)
+
+		_, err := svc.OpenArtifactDownload(context.Background(), orgDomain.RoleAdmin, orgID, artID)
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable on empty internal_filename, got: %v", err)
 		}
 	})
 }

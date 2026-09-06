@@ -193,9 +193,15 @@ func TestResticRunner_RedactionOrder(t *testing.T) {
 		t.Errorf("expected [REDACTED_SECRET] in error, got: %s", errStr)
 	}
 
-	// Assert target.Cleanup() was called and zeroed the in-memory secret
+	// Assert RepositoryTarget is caller-owned: runner does NOT prematurely wipe target secrets
+	if len(target.secretAccessKey) == 0 {
+		t.Errorf("expected target secretAccessKey to remain valid (caller-owned) after runner completes")
+	}
+
+	// Caller performs explicit cleanup
+	target.Cleanup()
 	if len(target.secretAccessKey) != 0 {
-		t.Errorf("expected target secretAccessKey to be zeroed after runner completes")
+		t.Errorf("expected target secretAccessKey to be zeroed after caller cleanup")
 	}
 }
 

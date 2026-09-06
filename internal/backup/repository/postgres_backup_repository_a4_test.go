@@ -74,8 +74,10 @@ func TestPostgresBackupRepository_StepA4_Integration(t *testing.T) {
 	credB := uuid.New()
 	resticRepoA := uuid.New()
 	resticRepoB := uuid.New()
-	jobA := uuid.New()
-	runA := uuid.New()
+	jobDirect := uuid.New()
+	runDirect := uuid.New()
+	jobRestic := uuid.New()
+	runRestic := uuid.New()
 
 	cleanup := func() {
 		cleanupCtx := context.Background()
@@ -133,32 +135,38 @@ func TestPostgresBackupRepository_StepA4_Integration(t *testing.T) {
 		t.Fatalf("failed seeding credentials: %v", err)
 	}
 
-	// 5. Seed Repositories
+	// 5. Seed Repositories (exact real columns: no repository_type, status='active')
+	locatorA := fmt.Sprintf("orgs/%s/res/%s", orgA.String(), resA.String())
+	locatorB := fmt.Sprintf("orgs/%s/res/%s", orgB.String(), resB.String())
 	_, err = pool.Querier().Exec(ctx, `
-		INSERT INTO backup_repositories (id, organization_id, resource_id, storage_target_id, credential_id, repository_type, repository_locator, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, 'local', 'orgs/' || $2 || '/res/' || $3, 'ready', NOW(), NOW()),
-		       ($6, $7, $8, $9, $10, 'local', 'orgs/' || $7 || '/res/' || $8, 'ready', NOW(), NOW())`,
-		resticRepoA, orgA, resA, targetA, credA,
-		resticRepoB, orgB, resB, targetB, credB)
+		INSERT INTO backup_repositories (id, organization_id, resource_id, storage_target_id, credential_id, repository_locator, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'active', NOW(), NOW()),
+		       ($7, $8, $9, $10, $11, $12, 'active', NOW(), NOW())`,
+		resticRepoA, orgA, resA, targetA, credA, locatorA,
+		resticRepoB, orgB, resB, targetB, credB, locatorB)
 	if err != nil {
 		t.Fatalf("failed seeding backup_repositories: %v", err)
 	}
 
-	// 6. Seed Backup Job and Run
+	// 6. Seed Backup Jobs and Runs (with trigger_type, target_spec, storage_target_id, engine_type)
 	_, err = pool.Querier().Exec(ctx, `
-		INSERT INTO backup_jobs (id, organization_id, resource_id, backup_type, status, created_at, updated_at)
-		VALUES ($1, $2, $3, 'mysql_database', 'completed', NOW(), NOW())`,
-		jobA, orgA, resA)
+		INSERT INTO backup_jobs (id, organization_id, resource_id, storage_target_id, engine_type, trigger_type, backup_type, target_spec, status, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, 'direct_stream', 'manual', 'mysql_database', '{"database_name": "mydb"}'::jsonb, 'completed', NOW(), NOW()),
+		       ($5, $2, $3, $4, 'restic',        'manual', 'mysql_database', '{"database_name": "mydb"}'::jsonb, 'completed', NOW(), NOW())`,
+		jobDirect, orgA, resA, targetA,
+		jobRestic)
 	if err != nil {
-		t.Fatalf("failed seeding backup_job: %v", err)
+		t.Fatalf("failed seeding backup_jobs: %v", err)
 	}
 
 	_, err = pool.Querier().Exec(ctx, `
-		INSERT INTO backup_runs (id, organization_id, job_id, status, run_type, trigger_source, created_at, updated_at)
-		VALUES ($1, $2, $3, 'completed', 'manual', 'user', NOW(), NOW())`,
-		runA, orgA, jobA)
+		INSERT INTO backup_runs (id, organization_id, job_id, attempt_number, status, created_at, updated_at)
+		VALUES ($1, $2, $3, 1, 'running', NOW(), NOW()),
+		       ($4, $2, $5, 1, 'running', NOW(), NOW())`,
+		runDirect, orgA, jobDirect,
+		runRestic, jobRestic)
 	if err != nil {
-		t.Fatalf("failed seeding backup_run: %v", err)
+		t.Fatalf("failed seeding backup_runs: %v", err)
 	}
 
 	// Test 1: Create direct_stream Artifact
@@ -166,7 +174,7 @@ func TestPostgresBackupRepository_StepA4_Integration(t *testing.T) {
 	directArt := &domain.BackupArtifact{
 		ID:                 directArtID,
 		OrganizationID:     orgA,
-		RunID:              runA,
+		RunID:              runDirect,
 		ResourceID:         resA,
 		StorageTargetID:    targetA,
 		ArtifactType:       domain.ArtifactTypeDatabaseDump,
@@ -196,7 +204,7 @@ func TestPostgresBackupRepository_StepA4_Integration(t *testing.T) {
 	resticArt := &domain.BackupArtifact{
 		ID:                 resticArtID,
 		OrganizationID:     orgA,
-		RunID:              runA,
+		RunID:              runRestic,
 		ResourceID:         resA,
 		StorageTargetID:    targetA,
 		ArtifactType:       domain.ArtifactTypeDatabaseDump,
@@ -204,7 +212,7 @@ func TestPostgresBackupRepository_StepA4_Integration(t *testing.T) {
 		TargetName:         "production_db",
 		StorageReference:   "",
 		SizeBytes:          0,
-		ChecksumAlgorithm:  domain.ChecksumAlgorithmSHA256,
+		ChecksumAlgorithm:  "",
 		ChecksumHash:       "",
 		RepositoryID:       &resticRepoA,
 		SnapshotID:         snapID,
@@ -225,7 +233,7 @@ func TestPostgresBackupRepository_StepA4_Integration(t *testing.T) {
 	crossTenantArt := &domain.BackupArtifact{
 		ID:                 uuid.New(),
 		OrganizationID:     orgA,
-		RunID:              runA,
+		RunID:              runRestic,
 		ResourceID:         resA,
 		StorageTargetID:    targetA,
 		ArtifactType:       domain.ArtifactTypeDatabaseDump,
@@ -233,7 +241,7 @@ func TestPostgresBackupRepository_StepA4_Integration(t *testing.T) {
 		TargetName:         "production_db",
 		StorageReference:   "",
 		SizeBytes:          0,
-		ChecksumAlgorithm:  domain.ChecksumAlgorithmSHA256,
+		ChecksumAlgorithm:  "",
 		ChecksumHash:       "",
 		RepositoryID:       &resticRepoB, // Belongs to Org B!
 		SnapshotID:         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -268,13 +276,21 @@ func TestPostgresBackupRepository_StepA4_Integration(t *testing.T) {
 		t.Fatalf("expected ErrArtifactNotFound when querying cross-tenant artifact, got: %v", err)
 	}
 
-	// Test 6: GetRunArtifacts returns both polymorphic artifacts
-	arts, err := repo.GetRunArtifacts(ctx, orgA, runA)
+	// Test 6: GetRunArtifacts returns artifacts per run
+	directArts, err := repo.GetRunArtifacts(ctx, orgA, runDirect)
 	if err != nil {
-		t.Fatalf("failed listing artifacts by run: %v", err)
+		t.Fatalf("failed listing artifacts by direct run: %v", err)
 	}
-	if len(arts) != 2 {
-		t.Fatalf("expected 2 artifacts, got: %d", len(arts))
+	if len(directArts) != 1 {
+		t.Fatalf("expected 1 direct artifact, got: %d", len(directArts))
+	}
+
+	resticArts, err := repo.GetRunArtifacts(ctx, orgA, runRestic)
+	if err != nil {
+		t.Fatalf("failed listing artifacts by restic run: %v", err)
+	}
+	if len(resticArts) != 1 {
+		t.Fatalf("expected 1 restic artifact, got: %d", len(resticArts))
 	}
 
 	// Test 7: ListArtifacts lists all organization artifacts

@@ -83,8 +83,6 @@ func TestRepositoryService_RealPostgresAndRestic_E2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed initializing database pool: %v", err)
 	}
-	defer pool.Close()
-
 	orgID := uuid.New()
 	resID := uuid.New()
 	targetLocalID := uuid.New()
@@ -93,13 +91,17 @@ func TestRepositoryService_RealPostgresAndRestic_E2E(t *testing.T) {
 	cleanup := func() {
 		cleanupCtx := context.Background()
 		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM backup_repositories WHERE organization_id = $1", orgID)
+		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM resource_connectors WHERE organization_id = $1", orgID)
+		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM resources WHERE organization_id = $1", orgID)
 		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM credentials WHERE organization_id = $1", orgID)
 		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM storage_targets WHERE organization_id = $1", orgID)
-		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM resources WHERE organization_id = $1", orgID)
 		_, _ = pool.Querier().Exec(cleanupCtx, "DELETE FROM organizations WHERE id = $1", orgID)
 	}
 	cleanup()
-	defer cleanup()
+	t.Cleanup(func() {
+		cleanup()
+		pool.Close()
+	})
 
 	// Seed Organization
 	slug := fmt.Sprintf("org-e2e-restic-%s", orgID.String()[:8])

@@ -315,6 +315,7 @@ func run() error {
 		log,
 	)
 	artifactService.SetResticDependencies(resticRunner, resticCoordinator, vaultService, resticTargetResolver)
+	verificationService.SetResticDependencies(resticRunner, resticCoordinator, vaultService, resticTargetResolver)
 
 	backupHandler := backupHttpapi.NewHandler(backupJobService, backupPlanService, historyService, artifactService, verificationService, log)
 	backupHandler.SetStorageTargetService(storageTargetService)

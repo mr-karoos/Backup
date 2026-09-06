@@ -306,7 +306,7 @@ func TestVerificationEngine_VerifyResticSnapshot(t *testing.T) {
 		}
 	})
 
-	t.Run("DumpSampleFailure_FailsVerification", func(t *testing.T) {
+	t.Run("DumpSample_InfrastructureError", func(t *testing.T) {
 		runner := &mockResticRunner{
 			getSnapshotFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) (*restic.SnapshotItem, error) {
 				return validSnapshot, nil
@@ -315,7 +315,45 @@ func TestVerificationEngine_VerifyResticSnapshot(t *testing.T) {
 				return validNodes, nil
 			},
 			dumpSampleFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID, fn string, maxBytes int) ([]byte, error) {
-				return nil, errors.New("blob corrupted: hash mismatch")
+				return nil, errors.New("network timeout talking to s3")
+			},
+		}
+
+		_, err := engine.VerifyResticSnapshot(
+			context.Background(),
+			runner,
+			target,
+			password,
+			snapID,
+			orgID,
+			resID,
+			runID,
+			artID,
+			targetToken,
+			internalFilename,
+			expectedLogicalSize,
+		)
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		if errors.Is(err, domain.ErrVerificationFailed) {
+			t.Fatalf("infrastructure error must NOT be classified as ErrVerificationFailed: %v", err)
+		}
+		if !strings.Contains(err.Error(), "repository infrastructure error") {
+			t.Fatalf("expected repository infrastructure error, got: %v", err)
+		}
+	})
+
+	t.Run("DumpSample_SnapshotNotFound_FailsVerification", func(t *testing.T) {
+		runner := &mockResticRunner{
+			getSnapshotFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) (*restic.SnapshotItem, error) {
+				return validSnapshot, nil
+			},
+			listSnapshotNodesFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) ([]restic.SnapshotNode, error) {
+				return validNodes, nil
+			},
+			dumpSampleFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID, fn string, maxBytes int) ([]byte, error) {
+				return nil, restic.ErrSnapshotNotFound
 			},
 		}
 
@@ -334,7 +372,115 @@ func TestVerificationEngine_VerifyResticSnapshot(t *testing.T) {
 			expectedLogicalSize,
 		)
 		if err == nil || !errors.Is(err, domain.ErrVerificationFailed) {
-			t.Fatalf("expected ErrVerificationFailed when dump fails, got: %v", err)
+			t.Fatalf("expected ErrVerificationFailed when dump returns ErrSnapshotNotFound, got: %v", err)
+		}
+	})
+
+	t.Run("SizeMismatch_FailsVerification", func(t *testing.T) {
+		runner := &mockResticRunner{
+			getSnapshotFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) (*restic.SnapshotItem, error) {
+				return validSnapshot, nil
+			},
+			listSnapshotNodesFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) ([]restic.SnapshotNode, error) {
+				return []restic.SnapshotNode{
+					{
+						Name: internalFilename,
+						Path: "/" + internalFilename,
+						Type: "file",
+						Size: expectedLogicalSize + 100, // mismatch
+					},
+				}, nil
+			},
+		}
+
+		_, err := engine.VerifyResticSnapshot(
+			context.Background(),
+			runner,
+			target,
+			password,
+			snapID,
+			orgID,
+			resID,
+			runID,
+			artID,
+			targetToken,
+			internalFilename,
+			expectedLogicalSize,
+		)
+		if err == nil || !errors.Is(err, domain.ErrVerificationFailed) {
+			t.Fatalf("expected ErrVerificationFailed for size mismatch, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "snapshot file size mismatch") {
+			t.Fatalf("expected error to mention size mismatch, got: %v", err)
+		}
+	})
+
+	t.Run("SnapshotIDMismatch_FailsVerification", func(t *testing.T) {
+		otherID := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+		runner := &mockResticRunner{
+			getSnapshotFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) (*restic.SnapshotItem, error) {
+				return &restic.SnapshotItem{
+					ID:      otherID,
+					ShortID: otherID[:8],
+					Tags:    validTags,
+				}, nil
+			},
+		}
+
+		_, err := engine.VerifyResticSnapshot(
+			context.Background(),
+			runner,
+			target,
+			password,
+			snapID,
+			orgID,
+			resID,
+			runID,
+			artID,
+			targetToken,
+			internalFilename,
+			expectedLogicalSize,
+		)
+		if err == nil || !errors.Is(err, domain.ErrVerificationFailed) {
+			t.Fatalf("expected ErrVerificationFailed for snapshot ID mismatch, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "snapshot ID mismatch") {
+			t.Fatalf("expected error to mention snapshot ID mismatch, got: %v", err)
+		}
+	})
+
+	t.Run("SQLSanityCheck_FailsVerificationOnGarbage", func(t *testing.T) {
+		runner := &mockResticRunner{
+			getSnapshotFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) (*restic.SnapshotItem, error) {
+				return validSnapshot, nil
+			},
+			listSnapshotNodesFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) ([]restic.SnapshotNode, error) {
+				return validNodes, nil
+			},
+			dumpSampleFunc: func(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID, fn string, maxBytes int) ([]byte, error) {
+				return []byte("BINARY_NON_SQL_GARBAGE_DATA_HERE\x00\x01\x02"), nil
+			},
+		}
+
+		_, err := engine.VerifyResticSnapshot(
+			context.Background(),
+			runner,
+			target,
+			password,
+			snapID,
+			orgID,
+			resID,
+			runID,
+			artID,
+			targetToken,
+			internalFilename,
+			expectedLogicalSize,
+		)
+		if err == nil || !errors.Is(err, domain.ErrVerificationFailed) {
+			t.Fatalf("expected ErrVerificationFailed for invalid SQL dump marker, got: %v", err)
+		}
+		if !strings.Contains(err.Error(), "SQL sanity check") {
+			t.Fatalf("expected error to mention SQL sanity check, got: %v", err)
 		}
 	})
 

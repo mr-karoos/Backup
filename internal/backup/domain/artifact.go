@@ -70,6 +70,26 @@ type BackupArtifact struct {
 	UpdatedAt           time.Time
 }
 
+// ResticArtifactMetadata holds the safe minimal engine metadata persisted for a restic snapshot artifact.
+type ResticArtifactMetadata struct {
+	InternalFilename string `json:"internal_filename"`
+	TargetToken      string `json:"target_token,omitempty"`
+}
+
+// IsValidCanonicalResticSnapshotID checks if a snapshot ID is exactly 64 lowercase hexadecimal characters.
+func IsValidCanonicalResticSnapshotID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	for i := 0; i < 64; i++ {
+		c := id[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
 // SafeArtifactFilenameWithType generates a deterministic, safe, logical filename for a backup artifact with type awareness.
 func SafeArtifactFilenameWithType(targetName string, format ArtifactFormat, artType ArtifactType, artifactID uuid.UUID) string {
 	ext := ".bin"

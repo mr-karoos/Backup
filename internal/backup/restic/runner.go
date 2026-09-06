@@ -186,12 +186,12 @@ func (r *ResticRunner) GetSnapshot(ctx context.Context, target RepositoryTarget,
 	}
 
 	for _, s := range snapshots {
-		if s.ID == cleanID || strings.HasPrefix(s.ID, cleanID) || s.ShortID == cleanID {
+		if s.ID == cleanID || s.ShortID == cleanID {
 			return &s, nil
 		}
 	}
 
-	return &snapshots[0], nil
+	return nil, fmt.Errorf("%w: snapshot ID %q not found in snapshots response", ErrSnapshotNotFound, cleanID)
 }
 
 // ListSnapshotNodes lists the files and directories inside a snapshot.
@@ -217,13 +217,19 @@ func (r *ResticRunner) ListSnapshotNodes(ctx context.Context, target RepositoryT
 	var nodes []SnapshotNode
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if line == "" || !strings.HasPrefix(line, "{") {
+		if line == "" {
 			continue
 		}
 		var node SnapshotNode
-		if err := json.Unmarshal([]byte(line), &node); err == nil && node.Name != "" {
+		if err := json.Unmarshal([]byte(line), &node); err != nil {
+			return nil, fmt.Errorf("malformed JSON in restic ls output: %w", err)
+		}
+		if node.Name != "" {
 			nodes = append(nodes, node)
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed scanning snapshot nodes output: %w", err)
 	}
 	return nodes, nil
 }
@@ -262,20 +268,60 @@ func (r *ResticRunner) DumpSample(ctx context.Context, target RepositoryTarget, 
 	return buf[:n], nil
 }
 
-// dumpReadCloser wraps restic dump stdout and guarantees child process termination and cleanup on Close().
+// dumpReadCloser wraps restic dump stdout and guarantees child process termination, exit code propagation, and secret sanitation on EOF or Close().
 type dumpReadCloser struct {
 	stdout    io.ReadCloser
 	cmd       *exec.Cmd
 	cancel    context.CancelFunc
-	target    RepositoryTarget
 	password  []byte
+	targetEnv []string
+	stderrBuf *boundedBuffer
 	waitDone  chan struct{}
 	waitErr   error
 	closeOnce sync.Once
+	eofSeen   bool
 }
 
 func (d *dumpReadCloser) Read(p []byte) (int, error) {
-	return d.stdout.Read(p)
+	if d.eofSeen {
+		return 0, io.EOF
+	}
+
+	n, err := d.stdout.Read(p)
+	if err == nil {
+		return n, nil
+	}
+
+	if errors.Is(err, io.EOF) {
+		// Reached stdout EOF: wait for child process to finish before returning EOF to caller
+		<-d.waitDone
+		d.eofSeen = true
+
+		if d.waitErr != nil {
+			// Process exited with non-zero status: return sanitized error INSTEAD of successful EOF
+			return n, d.sanitizedWaitError()
+		}
+
+		return n, io.EOF
+	}
+
+	return n, err
+}
+
+func (d *dumpReadCloser) sanitizedWaitError() error {
+	if d.waitErr == nil {
+		return nil
+	}
+	errStr := d.waitErr.Error()
+	if errors.Is(d.waitErr, context.Canceled) || strings.Contains(errStr, "signal: killed") {
+		return d.waitErr
+	}
+	stderrStr := sanitizeSecrets(d.stderrBuf.String(), string(d.password), d.targetEnv)
+	sanitizedErr := sanitizeSecrets(d.waitErr.Error(), string(d.password), d.targetEnv)
+	if stderrStr != "" {
+		return fmt.Errorf("restic dump failed: %s: %s", sanitizedErr, stderrStr)
+	}
+	return fmt.Errorf("restic dump failed: %s", sanitizedErr)
 }
 
 func (d *dumpReadCloser) Close() error {
@@ -297,18 +343,16 @@ func (d *dumpReadCloser) Close() error {
 			if !errors.Is(d.waitErr, context.Canceled) &&
 				!strings.Contains(errStr, "signal: killed") &&
 				!strings.Contains(errStr, "Access is denied") {
-				retErr = d.waitErr
+				retErr = d.sanitizedWaitError()
 			}
 		}
 		secretcrypto.ZeroBytes(d.password)
-		if d.target != nil {
-			d.target.Cleanup()
-		}
 	})
 	return retErr
 }
 
 // DumpStream opens a streaming reader for the specified file inside the snapshot using restic dump.
+// The repository target is caller-owned; DumpStream does NOT clean up the target.
 func (r *ResticRunner) DumpStream(ctx context.Context, target RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error) {
 	if target == nil {
 		return nil, errors.New("repository target is required")
@@ -349,7 +393,6 @@ func (r *ResticRunner) DumpStream(ctx context.Context, target RepositoryTarget, 
 	if err != nil {
 		childCancel()
 		secretcrypto.ZeroBytes(passwordCopy)
-		target.Cleanup()
 		return nil, fmt.Errorf("failed creating dump stdout pipe: %w", err)
 	}
 
@@ -360,19 +403,19 @@ func (r *ResticRunner) DumpStream(ctx context.Context, target RepositoryTarget, 
 		childCancel()
 		_ = stdoutPipe.Close()
 		secretcrypto.ZeroBytes(passwordCopy)
-		target.Cleanup()
 		sanitizedErr := sanitizeSecrets(err.Error(), string(password), targetEnv)
 		return nil, fmt.Errorf("failed starting restic dump: %s", sanitizedErr)
 	}
 
 	waitDone := make(chan struct{})
 	d := &dumpReadCloser{
-		stdout:   stdoutPipe,
-		cmd:      cmd,
-		cancel:   childCancel,
-		target:   target,
-		password: passwordCopy,
-		waitDone: waitDone,
+		stdout:    stdoutPipe,
+		cmd:       cmd,
+		cancel:    childCancel,
+		password:  passwordCopy,
+		targetEnv: targetEnv,
+		stderrBuf: stderrBuf,
+		waitDone:  waitDone,
 	}
 
 	go func() {
@@ -387,6 +430,7 @@ func (r *ResticRunner) DumpStream(ctx context.Context, target RepositoryTarget, 
 }
 
 // runCommand handles safe subprocess dispatch with child-only secret environment and sanitized output.
+// The repository target is caller-owned; runCommand does NOT clean up the target.
 func (r *ResticRunner) runCommand(
 	ctx context.Context,
 	target RepositoryTarget,
@@ -401,7 +445,7 @@ func (r *ResticRunner) runCommand(
 	// 2. Clean filtered base environment without ambient RESTIC_*, AWS_*, or proxy variables
 	baseEnv := filterCleanEnv(os.Environ())
 
-	// 3. Capture target sensitive environment and repository URL before process launch/cleanup
+	// 3. Capture target sensitive environment and repository URL before process launch
 	targetEnv := target.Env()
 	repoURL := target.ResticRepositoryURL()
 
@@ -427,15 +471,14 @@ func (r *ResticRunner) runCommand(
 	// 4. Execute subprocess
 	runErr := cmd.Run()
 
-	// 5. Sanitize stdout, stderr, and execution errors using original captured secrets BEFORE target.Cleanup()
+	// 5. Sanitize stdout, stderr, and execution errors using original captured secrets
 	stdoutStr := sanitizeSecrets(stdoutLimit.String(), string(password), targetEnv)
 	stderrStr := sanitizeSecrets(stderrLimit.String(), string(password), targetEnv)
 
 	// 6. Zeroize temporary password copy
 	secretcrypto.ZeroBytes(passwordCopy)
 
-	// 7. Clean up target resources and zero in-memory credentials
-	target.Cleanup()
+	// 7. RepositoryTarget is caller-owned; do NOT call target.Cleanup() here!
 
 	if runErr != nil {
 		sanitizedErr := sanitizeSecrets(runErr.Error(), string(password), targetEnv)

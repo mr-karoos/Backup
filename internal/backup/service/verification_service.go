@@ -11,7 +11,10 @@ import (
 	"backup-platform/internal/artifactcrypto"
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/repository"
+	"backup-platform/internal/backup/restic"
 	"backup-platform/internal/backup/verification"
+	credDomain "backup-platform/internal/credential/domain"
+	"backup-platform/internal/credential/secretcrypto"
 	orgDomain "backup-platform/internal/organization/domain"
 	"backup-platform/internal/storage"
 	"backup-platform/pkg/uuid"
@@ -41,6 +44,12 @@ type VerificationService struct {
 	verifier        verification.Verifier
 	logger          *slog.Logger
 	nowFunc         func() time.Time
+
+	// Restic dependencies
+	resticRunner   restic.CommandRunner
+	coordinator    restic.RepositoryOperationCoordinator
+	vault          SystemCredentialVault
+	targetResolver RepositoryTargetResolver
 }
 
 // NewVerificationService constructs a new VerificationService.
@@ -60,6 +69,19 @@ func NewVerificationService(
 		logger:   logger,
 		nowFunc:  time.Now,
 	}
+}
+
+// SetResticDependencies configures the components necessary for verifying Restic repository snapshots.
+func (s *VerificationService) SetResticDependencies(
+	runner restic.CommandRunner,
+	coordinator restic.RepositoryOperationCoordinator,
+	vault SystemCredentialVault,
+	targetResolver RepositoryTargetResolver,
+) {
+	s.resticRunner = runner
+	s.coordinator = coordinator
+	s.vault = vault
+	s.targetResolver = targetResolver
 }
 
 // SetStorageResolver configures a dynamic storage provider resolver.
@@ -159,76 +181,136 @@ func (s *VerificationService) VerifyRun(
 		var verMsg string
 		var verErr error
 
-		storeProvider, err := s.resolveStorageProvider(ctx, art.OrganizationID, art.StorageTargetID)
-		if err != nil {
-			s.logger.Error("failed resolving storage provider for artifact verification",
-				slog.String("org_id", orgID.String()),
-				slog.String("artifact_id", art.ID.String()),
-				slog.String("target_id", art.StorageTargetID.String()),
-				slog.String("error", err.Error()),
-			)
-			// Infrastructure error: DO NOT mark verification_status = failed!
-			return nil, domain.ErrBackupServiceUnavailable
-		}
+		if art.Format == domain.ArtifactFormatResticSnapshot {
+			if s.resticRunner == nil || s.coordinator == nil || s.vault == nil || s.targetResolver == nil {
+				s.logger.Error("restic verification dependencies not configured")
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+			if art.RepositoryID == nil || *art.RepositoryID == uuid.Nil || strings.TrimSpace(art.SnapshotID) == "" {
+				s.logger.Error("invalid restic artifact metadata: missing repository_id or snapshot_id")
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+			var meta domain.ResticArtifactMetadata
+			if err := json.Unmarshal(art.EngineMetadata, &meta); err != nil || strings.TrimSpace(meta.InternalFilename) == "" {
+				s.logger.Error("missing or invalid internal_filename in engine_metadata for restic verification", slog.Any("error", err))
+				return nil, domain.ErrBackupServiceUnavailable
+			}
 
-		if art.StoredSizeBytes != nil {
-			var meta struct {
-				CiphertextSHA256 string `json:"ciphertext_sha256"`
+			repoID := *art.RepositoryID
+			releaseLock, err := s.coordinator.AcquireShared(ctx, repoID)
+			if err != nil {
+				s.logger.Error("failed acquiring shared lock for restic verification", slog.String("repo_id", repoID.String()), slog.String("error", err.Error()))
+				return nil, domain.ErrBackupServiceUnavailable
 			}
-			if len(art.EngineMetadata) > 0 {
-				_ = json.Unmarshal(art.EngineMetadata, &meta)
+
+			repo, err := s.repo.GetRepositoryByID(ctx, orgID, repoID)
+			if err != nil {
+				releaseLock()
+				s.logger.Error("failed loading restic repository record", slog.String("repo_id", repoID.String()), slog.String("error", err.Error()))
+				return nil, domain.ErrBackupServiceUnavailable
 			}
-			if meta.CiphertextSHA256 == "" {
-				verErr = errors.New("missing ciphertext_sha256 in engine_metadata for encrypted artifact")
-			} else {
-				if art.Format == domain.ArtifactFormatSQLGzip || art.ArtifactType == domain.ArtifactTypeDatabaseDump {
-					verMsg, verErr = s.verifier.VerifyEncryptedDatabaseArtifact(
-						ctx,
-						storeProvider,
-						art.StorageReference,
-						art.SizeBytes,
-						art.ChecksumHash,
-						*art.StoredSizeBytes,
-						meta.CiphertextSHA256,
-						art.OrganizationID,
-						art.ID,
-					)
-				} else if art.Format == domain.ArtifactFormatTarGzip || art.ArtifactType == domain.ArtifactTypeFilesArchive {
-					verMsg, verErr = s.verifier.VerifyEncryptedFilesArtifact(
-						ctx,
-						storeProvider,
-						art.StorageReference,
-						art.SizeBytes,
-						art.ChecksumHash,
-						*art.StoredSizeBytes,
-						meta.CiphertextSHA256,
-						art.OrganizationID,
-						art.ID,
-					)
-				} else {
-					verErr = errors.New("unsupported artifact format for verification")
-				}
+
+			storageTarget, err := s.repo.GetStorageTargetByID(ctx, orgID, repo.StorageTargetID)
+			if err != nil {
+				releaseLock()
+				s.logger.Error("failed loading storage target for restic verification", slog.String("target_id", repo.StorageTargetID.String()), slog.String("error", err.Error()))
+				return nil, domain.ErrBackupServiceUnavailable
 			}
+
+			target, err := s.targetResolver.ResolveTarget(ctx, orgID, repo.ResourceID, storageTarget)
+			if err != nil {
+				releaseLock()
+				s.logger.Error("failed resolving repository target for restic verification", slog.String("error", err.Error()))
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+
+			credType, repoKey, err := s.vault.LoadCredentialForUse(ctx, orgID, repo.CredentialID)
+			if err != nil {
+				target.Cleanup()
+				releaseLock()
+				s.logger.Error("failed loading repository key for restic verification", slog.String("error", err.Error()))
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+			if credType != credDomain.TypeResticRepositoryKey || len(repoKey) == 0 {
+				secretcrypto.ZeroBytes(repoKey)
+				target.Cleanup()
+				releaseLock()
+				s.logger.Error("invalid repository credential type for restic verification")
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+
+			verMsg, verErr = s.verifier.VerifyResticSnapshot(
+				ctx,
+				s.resticRunner,
+				target,
+				repoKey,
+				art.SnapshotID,
+				art.OrganizationID,
+				art.ResourceID,
+				art.RunID,
+				art.ID,
+				meta.TargetToken,
+				strings.TrimSpace(meta.InternalFilename),
+				art.SizeBytes,
+			)
+
+			secretcrypto.ZeroBytes(repoKey)
+			target.Cleanup()
+			releaseLock()
 		} else {
-			switch art.Format {
-			case domain.ArtifactFormatSQLGzip:
-				verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
-					ctx,
-					storeProvider,
-					art.StorageReference,
-					art.SizeBytes,
-					art.ChecksumHash,
+			storeProvider, err := s.resolveStorageProvider(ctx, art.OrganizationID, art.StorageTargetID)
+			if err != nil {
+				s.logger.Error("failed resolving storage provider for artifact verification",
+					slog.String("org_id", orgID.String()),
+					slog.String("artifact_id", art.ID.String()),
+					slog.String("target_id", art.StorageTargetID.String()),
+					slog.String("error", err.Error()),
 				)
-			case domain.ArtifactFormatTarGzip:
-				verMsg, verErr = s.verifier.VerifyFilesArtifact(
-					ctx,
-					storeProvider,
-					art.StorageReference,
-					art.SizeBytes,
-					art.ChecksumHash,
-				)
-			default:
-				if art.ArtifactType == domain.ArtifactTypeDatabaseDump {
+				// Infrastructure error: DO NOT mark verification_status = failed!
+				return nil, domain.ErrBackupServiceUnavailable
+			}
+
+			if art.StoredSizeBytes != nil {
+				var meta struct {
+					CiphertextSHA256 string `json:"ciphertext_sha256"`
+				}
+				if len(art.EngineMetadata) > 0 {
+					_ = json.Unmarshal(art.EngineMetadata, &meta)
+				}
+				if meta.CiphertextSHA256 == "" {
+					verErr = errors.New("missing ciphertext_sha256 in engine_metadata for encrypted artifact")
+				} else {
+					if art.Format == domain.ArtifactFormatSQLGzip || art.ArtifactType == domain.ArtifactTypeDatabaseDump {
+						verMsg, verErr = s.verifier.VerifyEncryptedDatabaseArtifact(
+							ctx,
+							storeProvider,
+							art.StorageReference,
+							art.SizeBytes,
+							art.ChecksumHash,
+							*art.StoredSizeBytes,
+							meta.CiphertextSHA256,
+							art.OrganizationID,
+							art.ID,
+						)
+					} else if art.Format == domain.ArtifactFormatTarGzip || art.ArtifactType == domain.ArtifactTypeFilesArchive {
+						verMsg, verErr = s.verifier.VerifyEncryptedFilesArtifact(
+							ctx,
+							storeProvider,
+							art.StorageReference,
+							art.SizeBytes,
+							art.ChecksumHash,
+							*art.StoredSizeBytes,
+							meta.CiphertextSHA256,
+							art.OrganizationID,
+							art.ID,
+						)
+					} else {
+						verErr = errors.New("unsupported artifact format for verification")
+					}
+				}
+			} else {
+				switch art.Format {
+				case domain.ArtifactFormatSQLGzip:
 					verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
 						ctx,
 						storeProvider,
@@ -236,7 +318,7 @@ func (s *VerificationService) VerifyRun(
 						art.SizeBytes,
 						art.ChecksumHash,
 					)
-				} else if art.ArtifactType == domain.ArtifactTypeFilesArchive {
+				case domain.ArtifactFormatTarGzip:
 					verMsg, verErr = s.verifier.VerifyFilesArtifact(
 						ctx,
 						storeProvider,
@@ -244,8 +326,26 @@ func (s *VerificationService) VerifyRun(
 						art.SizeBytes,
 						art.ChecksumHash,
 					)
-				} else {
-					verErr = errors.New("unsupported artifact format for verification")
+				default:
+					if art.ArtifactType == domain.ArtifactTypeDatabaseDump {
+						verMsg, verErr = s.verifier.VerifyDatabaseArtifact(
+							ctx,
+							storeProvider,
+							art.StorageReference,
+							art.SizeBytes,
+							art.ChecksumHash,
+						)
+					} else if art.ArtifactType == domain.ArtifactTypeFilesArchive {
+						verMsg, verErr = s.verifier.VerifyFilesArtifact(
+							ctx,
+							storeProvider,
+							art.StorageReference,
+							art.SizeBytes,
+							art.ChecksumHash,
+						)
+					} else {
+						verErr = errors.New("unsupported artifact format for verification")
+					}
 				}
 			}
 		}
@@ -275,6 +375,16 @@ func (s *VerificationService) VerifyRun(
 			s.logger.Error("storage infrastructure error opening artifact for verification",
 				slog.String("org_id", orgID.String()),
 				slog.String("artifact_id", art.ID.String()),
+			)
+			return nil, domain.ErrBackupServiceUnavailable
+		}
+
+		// Handle restic repository infrastructure failure (not an integrity failure)
+		if verErr != nil && strings.Contains(verErr.Error(), "repository infrastructure error") {
+			s.logger.Error("restic repository infrastructure error during verification",
+				slog.String("org_id", orgID.String()),
+				slog.String("artifact_id", art.ID.String()),
+				slog.String("error", verErr.Error()),
 			)
 			return nil, domain.ErrBackupServiceUnavailable
 		}
@@ -370,6 +480,16 @@ func sanitizeVerificationError(err error) string {
 		return "decompressed database dump is empty"
 	case strings.Contains(msg, "failed basic SQL dump format sanity check"):
 		return "decompressed stream failed basic SQL dump format sanity check"
+	case strings.Contains(msg, "snapshot not found"), strings.Contains(msg, "snapshot ID mismatch"):
+		return "snapshot not found or snapshot ID mismatch in repository index"
+	case strings.Contains(msg, "missing mandatory snapshot tag"):
+		return "missing mandatory snapshot tag in repository"
+	case strings.Contains(msg, "expected internal file") && strings.Contains(msg, "not found"):
+		return "expected internal file not found in snapshot tree"
+	case strings.Contains(msg, "snapshot file size mismatch"):
+		return "snapshot file size differs from recorded size"
+	case strings.Contains(msg, "database dump sample failed SQL sanity check"):
+		return "database dump sample failed SQL sanity check"
 	case strings.Contains(msg, "tar archive is empty"):
 		return "tar archive is empty (zero entries)"
 	default:

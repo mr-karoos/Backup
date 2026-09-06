@@ -753,7 +753,9 @@ func (h *Handler) DownloadBackupArtifact(w http.ResponseWriter, r *http.Request)
 		}
 		return
 	}
-	defer desc.Reader.Close()
+	defer func() {
+		_ = desc.Close()
+	}()
 
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, desc.Filename))
 	w.Header().Set("Content-Type", desc.ContentType)
@@ -763,8 +765,14 @@ func (h *Handler) DownloadBackupArtifact(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusOK)
 
 	written, copyErr := io.Copy(w, desc.Reader)
+	closeErr := desc.Close()
+
 	if copyErr != nil || (desc.OptionalContentLength != nil && *desc.OptionalContentLength > 0 && written != *desc.OptionalContentLength) {
-		reqLogger.Error("interrupted while streaming artifact download")
+		reqLogger.Error("interrupted while streaming artifact download", slog.Any("copy_error", copyErr))
+		return
+	}
+	if closeErr != nil {
+		reqLogger.Error("artifact download stream closed with error", slog.Any("close_error", closeErr))
 		return
 	}
 

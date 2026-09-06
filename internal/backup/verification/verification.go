@@ -788,8 +788,8 @@ func (v *VerificationEngine) VerifyResticSnapshot(
 		return "", fmt.Errorf("repository infrastructure error during verification: %w", err)
 	}
 
-	// 2. Exact snapshot ID match
-	if snap.ID != snapshotID && !strings.HasPrefix(snap.ID, snapshotID) && snap.ShortID != snapshotID {
+	// 2. Exact snapshot ID match (exact 64 lowercase hex canonical ID)
+	if snap.ID != snapshotID {
 		return "", fmt.Errorf("%w: snapshot ID mismatch: expected %q, got %q", domain.ErrVerificationFailed, snapshotID, snap.ID)
 	}
 
@@ -818,7 +818,13 @@ func (v *VerificationEngine) VerifyResticSnapshot(
 	// 4. Verify expected internal filename exists in snapshot tree
 	nodes, err := runner.ListSnapshotNodes(ctx, target, password, snapshotID)
 	if err != nil {
-		return "", fmt.Errorf("failed listing snapshot nodes during verification: %w", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
+		}
+		if errors.Is(err, restic.ErrSnapshotNotFound) {
+			return "", fmt.Errorf("%w: snapshot %q not found during list nodes: %v", domain.ErrVerificationFailed, snapshotID, err)
+		}
+		return "", fmt.Errorf("repository infrastructure error during list nodes: %w", err)
 	}
 
 	var foundFile bool
@@ -835,18 +841,34 @@ func (v *VerificationEngine) VerifyResticSnapshot(
 		return "", fmt.Errorf("%w: expected internal file %q not found in snapshot tree", domain.ErrVerificationFailed, internalFilename)
 	}
 
-	// 5. Verify logical size is non-zero
-	if fileSize <= 0 && expectedLogicalSize <= 0 {
-		return "", fmt.Errorf("%w: snapshot internal file has zero size", domain.ErrVerificationFailed)
+	// 5. Verify logical size is non-zero and matches expected size
+	if fileSize <= 0 {
+		return "", fmt.Errorf("%w: snapshot internal file %q has invalid size %d (must be > 0)", domain.ErrVerificationFailed, internalFilename, fileSize)
+	}
+	if expectedLogicalSize <= 0 {
+		return "", fmt.Errorf("%w: expected logical size %d is invalid (must be > 0)", domain.ErrVerificationFailed, expectedLogicalSize)
+	}
+	if fileSize != expectedLogicalSize {
+		return "", fmt.Errorf("%w: snapshot file size mismatch: expected %d bytes, got %d bytes", domain.ErrVerificationFailed, expectedLogicalSize, fileSize)
 	}
 
 	// 6. Verify first up-to-64-KiB sample can be read using restic dump
 	sample, err := runner.DumpSample(ctx, target, password, snapshotID, internalFilename, maxSanityHeaderBytes)
 	if err != nil {
-		return "", fmt.Errorf("%w: failed reading restic dump sample: %v", domain.ErrVerificationFailed, err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", err
+		}
+		if errors.Is(err, restic.ErrSnapshotNotFound) {
+			return "", fmt.Errorf("%w: snapshot %q not found during dump sample: %v", domain.ErrVerificationFailed, snapshotID, err)
+		}
+		// Infrastructure failure (process start failure, network timeout, S3 error, pipe failure)
+		return "", fmt.Errorf("repository infrastructure error during dump sample: %w", err)
 	}
 	if len(sample) == 0 {
 		return "", fmt.Errorf("%w: restic dump returned empty sample", domain.ErrVerificationFailed)
+	}
+	if strings.HasSuffix(internalFilename, ".sql") && !hasValidMySQLDumpMarker(sample) {
+		return "", fmt.Errorf("%w: database dump sample failed SQL sanity check", domain.ErrVerificationFailed)
 	}
 
 	return canonicalResticVerifiedMsg, nil

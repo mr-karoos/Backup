@@ -1177,9 +1177,11 @@ func (p *WorkerPool) executeResticDatabaseTarget(
 	}
 
 	// 7. Insert unverified polymorphic artifact record
-	engineMeta, metaErr := json.Marshal(map[string]any{
-		"snapshot_id": saveRes.SnapshotID,
-	})
+	resticMeta := domain.ResticArtifactMetadata{
+		InternalFilename: saveRes.InternalFilename,
+		TargetToken:      saveRes.TargetToken,
+	}
+	engineMeta, metaErr := json.Marshal(resticMeta)
 	if metaErr != nil {
 		return fmt.Errorf("failed marshaling engine metadata: %w", metaErr)
 	}
@@ -1210,9 +1212,6 @@ func (p *WorkerPool) executeResticDatabaseTarget(
 	}
 
 	// 8. Level-1 Verification Phase
-	targetToken := engine.BuildDeterministicTargetToken(domain.BackupTypeMySQLDatabase, dbName)
-	internalFilename := targetToken + ".sql"
-
 	verDetails, verErr := p.verifier.VerifyResticSnapshot(
 		ctx,
 		p.resticRunner,
@@ -1223,8 +1222,8 @@ func (p *WorkerPool) executeResticDatabaseTarget(
 		job.ResourceID,
 		run.ID,
 		artifactID,
-		targetToken,
-		internalFilename,
+		saveRes.TargetToken,
+		saveRes.InternalFilename,
 		saveRes.LogicalSizeBytes,
 	)
 	if verErr != nil {
@@ -1348,9 +1347,11 @@ func (p *WorkerPool) executeResticFileTarget(
 	}
 
 	// 7. Insert unverified polymorphic artifact record
-	engineMeta, metaErr := json.Marshal(map[string]any{
-		"snapshot_id": saveRes.SnapshotID,
-	})
+	resticMeta := domain.ResticArtifactMetadata{
+		InternalFilename: saveRes.InternalFilename,
+		TargetToken:      saveRes.TargetToken,
+	}
+	engineMeta, metaErr := json.Marshal(resticMeta)
 	if metaErr != nil {
 		return fmt.Errorf("failed marshaling engine metadata: %w", metaErr)
 	}
@@ -1381,9 +1382,6 @@ func (p *WorkerPool) executeResticFileTarget(
 	}
 
 	// 8. Level-1 Verification Phase
-	targetToken := engine.BuildDeterministicTargetToken(domain.BackupTypeWebsiteFiles, sourcePath)
-	internalFilename := targetToken + ".tar"
-
 	verDetails, verErr := p.verifier.VerifyResticSnapshot(
 		ctx,
 		p.resticRunner,
@@ -1394,8 +1392,8 @@ func (p *WorkerPool) executeResticFileTarget(
 		job.ResourceID,
 		run.ID,
 		artifactID,
-		targetToken,
-		internalFilename,
+		saveRes.TargetToken,
+		saveRes.InternalFilename,
 		saveRes.LogicalSizeBytes,
 	)
 	if verErr != nil {

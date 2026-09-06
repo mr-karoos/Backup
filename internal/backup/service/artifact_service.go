@@ -31,6 +31,18 @@ type DownloadDescriptor struct {
 	Filename              string
 	ContentType           string
 	OptionalContentLength *int64
+	closeOnce             sync.Once
+	closeErr              error
+}
+
+// Close releases any resources, locks, and child processes associated with the download stream.
+func (d *DownloadDescriptor) Close() error {
+	d.closeOnce.Do(func() {
+		if d.Reader != nil {
+			d.closeErr = d.Reader.Close()
+		}
+	})
+	return d.closeErr
 }
 
 // ArtifactService coordinates artifact queries, authorized streaming downloads, and physical deletions.
@@ -245,9 +257,22 @@ func (s *ArtifactService) openResticArtifactDownload(
 		return nil, domain.ErrBackupServiceUnavailable
 	}
 
+	// 1. Resolve internal filename from artifact.EngineMetadata upfront (fail closed, no heuristics)
+	if len(artifact.EngineMetadata) == 0 {
+		s.logger.Error("missing engine metadata for restic artifact download")
+		return nil, domain.ErrBackupServiceUnavailable
+	}
+
+	var meta domain.ResticArtifactMetadata
+	if err := json.Unmarshal(artifact.EngineMetadata, &meta); err != nil || strings.TrimSpace(meta.InternalFilename) == "" {
+		s.logger.Error("invalid or missing internal_filename in engine metadata for restic artifact download", slog.Any("error", err))
+		return nil, domain.ErrBackupServiceUnavailable
+	}
+	internalFilename := strings.TrimSpace(meta.InternalFilename)
+
 	repoID := *artifact.RepositoryID
 
-	// 1. Acquire shared lock on repository
+	// 2. Acquire shared lock on repository
 	releaseLock, err := s.coordinator.AcquireShared(ctx, repoID)
 	if err != nil {
 		s.logger.Error("failed acquiring shared lock for restic download", slog.String("repo_id", repoID.String()), slog.String("error", err.Error()))
@@ -266,28 +291,28 @@ func (s *ArtifactService) openResticArtifactDownload(
 		}
 	}()
 
-	// 2. Fetch repository metadata
+	// 3. Fetch repository metadata
 	repo, err := s.repo.GetRepositoryByID(ctx, orgID, repoID)
-	if err != nil {
-		s.logger.Error("failed loading restic repository record", slog.String("repo_id", repoID.String()), slog.String("error", err.Error()))
+	if err != nil || repo == nil {
+		s.logger.Error("failed loading restic repository record", slog.String("repo_id", repoID.String()), slog.Any("error", err))
 		return nil, domain.ErrBackupServiceUnavailable
 	}
 
-	// 3. Fetch storage target
+	// 4. Fetch storage target
 	storageTarget, err := s.repo.GetStorageTargetByID(ctx, orgID, repo.StorageTargetID)
-	if err != nil {
-		s.logger.Error("failed loading storage target for restic download", slog.String("target_id", repo.StorageTargetID.String()), slog.String("error", err.Error()))
+	if err != nil || storageTarget == nil {
+		s.logger.Error("failed loading storage target for restic download", slog.String("target_id", repo.StorageTargetID.String()), slog.Any("error", err))
 		return nil, domain.ErrBackupServiceUnavailable
 	}
 
-	// 4. Resolve concrete repository target
+	// 5. Resolve concrete repository target
 	target, err := s.targetResolver.ResolveTarget(ctx, orgID, repo.ResourceID, storageTarget)
 	if err != nil {
 		s.logger.Error("failed resolving repository target for restic download", slog.String("error", err.Error()))
 		return nil, domain.ErrBackupServiceUnavailable
 	}
 
-	// 5. Load repository key
+	// 6. Load repository key
 	credType, repoKey, err := s.vault.LoadCredentialForUse(ctx, orgID, repo.CredentialID)
 	if err != nil {
 		target.Cleanup()
@@ -299,26 +324,6 @@ func (s *ArtifactService) openResticArtifactDownload(
 		target.Cleanup()
 		s.logger.Error("invalid repository credential type for restic download")
 		return nil, domain.ErrBackupServiceUnavailable
-	}
-
-	// 6. Resolve internal filename in snapshot
-	internalFilename := ""
-	nodes, listErr := s.resticRunner.ListSnapshotNodes(ctx, target, repoKey, artifact.SnapshotID)
-	if listErr == nil {
-		for _, node := range nodes {
-			if node.Type == "file" || (node.Type == "" && !strings.HasSuffix(node.Name, "/")) {
-				internalFilename = node.Name
-				break
-			}
-		}
-	}
-	if internalFilename == "" {
-		base := domain.SafeArtifactFilenameWithType(artifact.TargetName, artifact.Format, artifact.ArtifactType, artifact.ID)
-		if artifact.ArtifactType == domain.ArtifactTypeDatabaseDump {
-			internalFilename = strings.TrimSuffix(base, ".sql.gz") + ".sql"
-		} else {
-			internalFilename = strings.TrimSuffix(base, ".tar.gz") + ".tar"
-		}
 	}
 
 	// 7. Start restic dump streaming
@@ -333,6 +338,7 @@ func (s *ArtifactService) openResticArtifactDownload(
 	// 8. Stream on-the-fly gzip compression into io.Pipe
 	pr, pw := io.Pipe()
 	gw := gzip.NewWriter(pw)
+	copyDone := make(chan error, 1)
 
 	go func() {
 		var copyErr error
@@ -340,12 +346,14 @@ func (s *ArtifactService) openResticArtifactDownload(
 		if closeErr := gw.Close(); copyErr == nil {
 			copyErr = closeErr
 		}
+		copyDone <- copyErr
 		_ = pw.CloseWithError(copyErr)
 	}()
 
 	wrappedReader := &resticDownloadReader{
 		pipeReader:    pr,
 		rawStream:     rawStream,
+		copyDone:      copyDone,
 		releaseLock:   safeReleaseLock,
 		cleanupTarget: target.Cleanup,
 		repoKey:       repoKey,
@@ -366,6 +374,7 @@ func (s *ArtifactService) openResticArtifactDownload(
 type resticDownloadReader struct {
 	pipeReader    io.ReadCloser
 	rawStream     io.ReadCloser
+	copyDone      <-chan error
 	releaseLock   func()
 	cleanupTarget func()
 	repoKey       []byte
@@ -388,6 +397,15 @@ func (r *resticDownloadReader) Close() error {
 		if r.rawStream != nil {
 			if err := r.rawStream.Close(); err != nil {
 				errs = append(errs, err)
+			}
+		}
+		if r.copyDone != nil {
+			select {
+			case cErr := <-r.copyDone:
+				if cErr != nil && !errors.Is(cErr, io.ErrClosedPipe) && !errors.Is(cErr, context.Canceled) {
+					errs = append(errs, cErr)
+				}
+			default:
 			}
 		}
 		if r.cleanupTarget != nil {

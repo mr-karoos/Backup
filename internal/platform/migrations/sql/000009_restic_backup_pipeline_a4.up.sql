@@ -51,6 +51,9 @@ END $$;
 -- 6. Add indexes on new polymorphic columns
 CREATE INDEX IF NOT EXISTS idx_backup_artifacts_repository_id ON backup_artifacts(repository_id);
 CREATE INDEX IF NOT EXISTS idx_backup_artifacts_snapshot_id ON backup_artifacts(snapshot_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_backup_artifacts_repository_snapshot
+    ON backup_artifacts (repository_id, snapshot_id, artifact_type)
+    WHERE repository_id IS NOT NULL AND snapshot_id IS NOT NULL;
 
 -- 7. Update checksum constraints to allow NULL for restic_snapshot
 ALTER TABLE backup_artifacts DROP CONSTRAINT IF EXISTS chk_backup_artifacts_checksum_algorithm;
@@ -69,7 +72,7 @@ ALTER TABLE backup_artifacts ADD CONSTRAINT chk_backup_artifacts_checksum_hash_f
 ALTER TABLE backup_artifacts DROP CONSTRAINT IF EXISTS chk_backup_artifacts_direct_stream_fields;
 ALTER TABLE backup_artifacts ADD CONSTRAINT chk_backup_artifacts_direct_stream_fields CHECK (
     format NOT IN ('sql_gzip', 'tar_gzip') OR (
-        storage_reference IS NOT NULL AND
+        storage_reference IS NOT NULL AND length(btrim(storage_reference)) > 0 AND
         size_bytes IS NOT NULL AND size_bytes > 0 AND
         checksum_algorithm = 'sha256' AND
         checksum_hash IS NOT NULL AND
@@ -89,7 +92,16 @@ ALTER TABLE backup_artifacts ADD CONSTRAINT chk_backup_artifacts_restic_fields C
         checksum_algorithm IS NULL AND
         checksum_hash IS NULL AND
         repository_id IS NOT NULL AND
-        snapshot_id IS NOT NULL AND snapshot_id ~ '^[0-9a-f]{8,64}$' AND
+        snapshot_id IS NOT NULL AND snapshot_id ~ '^[0-9a-f]{64}$' AND
         logical_size_bytes IS NOT NULL AND logical_size_bytes > 0
     )
 );
+
+-- 10. Update backup_plans and backup_jobs engine_type check constraints to include 'restic'
+ALTER TABLE backup_plans DROP CONSTRAINT IF EXISTS chk_backup_plans_engine_type;
+ALTER TABLE backup_plans ADD CONSTRAINT chk_backup_plans_engine_type
+    CHECK (engine_type IN ('direct_stream', 'restic'));
+
+ALTER TABLE backup_jobs DROP CONSTRAINT IF EXISTS chk_backup_jobs_engine_type;
+ALTER TABLE backup_jobs ADD CONSTRAINT chk_backup_jobs_engine_type
+    CHECK (engine_type IN ('direct_stream', 'restic'));

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"backup-platform/internal/backup/domain"
 	"backup-platform/pkg/uuid"
@@ -392,13 +393,13 @@ func TestGatedEOFSupervisor_Matrix_A_Through_Y(t *testing.T) {
 		}
 	})
 
-	// Matrix O: Child process outputs non-JSON garbage -> returns missing summary
+	// Matrix O: Child process outputs non-JSON garbage -> returns malformed JSON error
 	t.Run("Scenario_O_ChildMalformedJSON", func(t *testing.T) {
 		t.Setenv("MOCK_RESTIC_MODE", "corrupt_json")
 		req := baseReq()
 		_, err := supervisor.ExecuteBackup(context.Background(), req)
-		if err == nil || !strings.Contains(err.Error(), "missing summary event in restic backup output") {
-			t.Fatalf("expected missing summary event error, got: %v", err)
+		if err == nil || !strings.Contains(err.Error(), "malformed JSON in restic backup output") {
+			t.Fatalf("expected malformed JSON error, got: %v", err)
 		}
 	})
 
@@ -442,16 +443,13 @@ func TestGatedEOFSupervisor_Matrix_A_Through_Y(t *testing.T) {
 		}
 	})
 
-	// Matrix T: Child process outputs identical duplicate summaries -> accepted
+	// Matrix T: Child process outputs duplicate summaries -> rejected (enforcing exactly one summary)
 	t.Run("Scenario_T_IdenticalDuplicateSummaries", func(t *testing.T) {
 		t.Setenv("MOCK_RESTIC_MODE", "duplicate_identical_summaries")
 		req := baseReq()
-		res, err := supervisor.ExecuteBackup(context.Background(), req)
-		if err != nil {
-			t.Fatalf("expected success with identical duplicate summaries, got: %v", err)
-		}
-		if res.SnapshotID != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-			t.Fatalf("unexpected snapshot ID: %s", res.SnapshotID)
+		_, err := supervisor.ExecuteBackup(context.Background(), req)
+		if err == nil || !strings.Contains(err.Error(), "duplicate snapshot summary events in restic output") {
+			t.Fatalf("expected duplicate snapshot summary events error, got: %v", err)
 		}
 	})
 
@@ -713,4 +711,153 @@ func TestGatedEOF_StrictGatedProtocol(t *testing.T) {
 			t.Fatalf("expected child process to receive EOF on producer success, but eofFile was not created")
 		}
 	})
+}
+
+func TestStreamParseResticBackupStdout(t *testing.T) {
+	snapID := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	t.Run("5000_Status_Events_Followed_By_Summary", func(t *testing.T) {
+		var sb strings.Builder
+		for i := 0; i < 5000; i++ {
+			sb.WriteString(fmt.Sprintf(`{"message_type":"status","percent_done":%0.4f,"total_files":1,"total_bytes":%d}`+"\n", float64(i)/5000.0, i*100))
+		}
+		sb.WriteString(fmt.Sprintf(`{"message_type":"summary","files_new":1,"snapshot_id":"%s","total_bytes_processed":500000}`+"\n", snapID))
+
+		out, err := StreamParseResticBackupStdout(strings.NewReader(sb.String()))
+		if err != nil {
+			t.Fatalf("expected success on large streaming output, got: %v", err)
+		}
+		if out.SnapshotID != snapID {
+			t.Fatalf("expected snapshot ID %s, got: %s", snapID, out.SnapshotID)
+		}
+		if out.TotalBytesProcessed != 500000 {
+			t.Fatalf("expected 500000 total bytes, got: %d", out.TotalBytesProcessed)
+		}
+	})
+
+	t.Run("Oversized_Hostile_Line_FailsClosed", func(t *testing.T) {
+		// Line length > 64 KiB
+		oversized := strings.Repeat("A", (65*1024)) + "\n"
+		_, err := StreamParseResticBackupStdout(strings.NewReader(oversized))
+		if err == nil {
+			t.Fatalf("expected error on line exceeding MaxBackupJSONLineBytes, got nil")
+		}
+		if !strings.Contains(err.Error(), "exceeds maximum allowed length") && !errors.Is(err, io.ErrShortBuffer) {
+			t.Logf("got error as expected: %v", err)
+		}
+	})
+
+	t.Run("Malformed_JSON_Line_FailsClosed", func(t *testing.T) {
+		malformed := `{"message_type":"status", BROKEN_JSON` + "\n"
+		_, err := StreamParseResticBackupStdout(strings.NewReader(malformed))
+		if err == nil {
+			t.Fatalf("expected error on malformed JSON, got nil")
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "malformed json") {
+			t.Fatalf("expected malformed json error, got: %v", err)
+		}
+	})
+
+	t.Run("Missing_Snapshot_ID_FailsClosed", func(t *testing.T) {
+		noSnap := `{"message_type":"summary","files_new":1,"total_bytes_processed":1024}` + "\n"
+		_, err := StreamParseResticBackupStdout(strings.NewReader(noSnap))
+		if err == nil {
+			t.Fatalf("expected error on missing snapshot_id, got nil")
+		}
+		if !strings.Contains(err.Error(), "missing snapshot_id") {
+			t.Fatalf("expected missing snapshot_id error, got: %v", err)
+		}
+	})
+
+	t.Run("NonHex_Snapshot_ID_FailsClosed", func(t *testing.T) {
+		badSnap := `{"message_type":"summary","files_new":1,"snapshot_id":"xyznotvalidhexid","total_bytes_processed":1024}` + "\n"
+		_, err := StreamParseResticBackupStdout(strings.NewReader(badSnap))
+		if err == nil {
+			t.Fatalf("expected error on non-hex snapshot_id, got nil")
+		}
+		if !strings.Contains(err.Error(), "invalid snapshot ID format") {
+			t.Fatalf("expected invalid snapshot ID format error, got: %v", err)
+		}
+	})
+
+	t.Run("UppercaseHex_Snapshot_ID_FailsClosed", func(t *testing.T) {
+		upperSnap := `{"message_type":"summary","files_new":1,"snapshot_id":"0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF","total_bytes_processed":1024}` + "\n"
+		_, err := StreamParseResticBackupStdout(strings.NewReader(upperSnap))
+		if err == nil {
+			t.Fatalf("expected error on uppercase hex snapshot_id, got nil")
+		}
+		if !strings.Contains(err.Error(), "invalid snapshot ID format") {
+			t.Fatalf("expected invalid snapshot ID format error, got: %v", err)
+		}
+	})
+
+	t.Run("Duplicate_Summary_Events_FailsClosed", func(t *testing.T) {
+		dups := fmt.Sprintf(`{"message_type":"summary","snapshot_id":"%s","total_bytes_processed":100}`+"\n"+
+			`{"message_type":"summary","snapshot_id":"%s","total_bytes_processed":100}`+"\n", snapID, snapID)
+		_, err := StreamParseResticBackupStdout(strings.NewReader(dups))
+		if err == nil {
+			t.Fatalf("expected error on duplicate summary, got nil")
+		}
+		if !strings.Contains(err.Error(), "duplicate snapshot summary events") {
+			t.Fatalf("expected duplicate snapshot summary events error, got: %v", err)
+		}
+	})
+
+	t.Run("Empty_Stream_FailsClosed", func(t *testing.T) {
+		_, err := StreamParseResticBackupStdout(strings.NewReader(""))
+		if err == nil {
+			t.Fatalf("expected error on empty stream, got nil")
+		}
+		if !strings.Contains(err.Error(), "missing summary event in restic backup output") {
+			t.Fatalf("expected missing summary event error, got: %v", err)
+		}
+	})
+}
+
+func TestGatedEOF_EarlyChildExit(t *testing.T) {
+	mockBin := buildMockResticBinary(t)
+	supervisor := NewGatedEOFSupervisor(mockBin, slog.Default())
+
+	validTarget := &mockTarget{
+		url:     "local:/tmp/test-repo",
+		env:     nil,
+		locator: "test-locator",
+	}
+
+	t.Setenv("MOCK_RESTIC_MODE", "fail_exit_1")
+
+	req := StdinBackupRequest{
+		Target:           validTarget,
+		Password:         []byte("secure-pw"),
+		OrgID:            uuid.New(),
+		ResourceID:       uuid.New(),
+		RunID:            uuid.New(),
+		ArtifactID:       uuid.New(),
+		BackupType:       domain.BackupTypeMySQLDatabase,
+		TargetName:       "db",
+		InternalFilename: "db.sql",
+		StreamProducer: func(ctx context.Context, stdin io.Writer) error {
+			// Write continuously in small chunks until error or context cancelled
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					_, err := stdin.Write([]byte("chunk of database dump...\n"))
+					if err != nil {
+						return err
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+		},
+	}
+
+	_, err := supervisor.ExecuteBackup(context.Background(), req)
+	if err == nil {
+		t.Fatalf("expected error when restic exits with error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exit status 1") {
+		t.Logf("early exit error: %v", err)
+	}
 }

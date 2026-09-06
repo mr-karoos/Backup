@@ -51,9 +51,9 @@ func TestPostgresBackupRepository_StepA2_Integration(t *testing.T) {
 		_, _ = m.Close()
 	}()
 
-	// Ensure database is migrated through version 7 (Step A.2: artifact encryption metadata)
-	if err := m.Migrate(7); err != nil && !errors.Is(err, migrate.ErrNoChange) {
-		t.Fatalf("failed migrating to version 7: %v", err)
+	// Ensure database is migrated through version 9 (Step A.4: polymorphic artifacts)
+	if err := m.Migrate(9); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		t.Fatalf("failed migrating to version 9: %v", err)
 	}
 
 	pool, err := database.New(ctx, testDBURL)
