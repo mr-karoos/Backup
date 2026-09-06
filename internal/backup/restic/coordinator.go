@@ -9,6 +9,9 @@ import (
 	"backup-platform/pkg/uuid"
 )
 
+// ErrRepositoryBusy is returned or indicated when another operation currently holds the repository lock.
+var ErrRepositoryBusy = errors.New("repository is busy with active operations")
+
 // RepositoryOperationCoordinator coordinates concurrent access to dedicated Restic repositories (ADR-035).
 // Shared access is required for backup, download/dump, and Level-1 verification.
 // Exclusive access is required for maintenance operations (forget, prune, check, key rotation).

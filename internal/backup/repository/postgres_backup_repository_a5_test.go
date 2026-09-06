@@ -238,12 +238,12 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		}
 
 		// Heartbeat run
-		if err := repo.HeartbeatMaintenanceRun(ctx, run.ID, 5*time.Minute); err != nil {
+		if err := repo.HeartbeatMaintenanceRun(ctx, orgID, run.ID, 5*time.Minute); err != nil {
 			t.Fatalf("failed heartbeating maintenance run: %v", err)
 		}
 
 		// Complete job
-		if err := repo.CompleteMaintenanceJob(ctx, claimedJob.ID, run.ID, []byte("{\"result\":\"ok\"}")); err != nil {
+		if err := repo.CompleteMaintenanceJob(ctx, orgID, claimedJob.ID, run.ID, []byte("{\"result\":\"ok\"}")); err != nil {
 			t.Fatalf("failed completing maintenance job: %v", err)
 		}
 
@@ -265,7 +265,7 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		}
 
 		// Fail with retryable = true -> job status should revert to pending
-		if err := repo.FailMaintenanceJob(ctx, claimedJob.ID, run.ID, "temporary failure", true); err != nil {
+		if err := repo.FailMaintenanceJob(ctx, orgID, claimedJob.ID, run.ID, "temporary failure", true); err != nil {
 			t.Fatalf("failed failing maintenance job: %v", err)
 		}
 
@@ -287,7 +287,7 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		}
 
 		// Fail with retryable = false -> job status should be failed
-		if err := repo.FailMaintenanceJob(ctx, reclaimedJob.ID, run2.ID, "permanent fatal failure", false); err != nil {
+		if err := repo.FailMaintenanceJob(ctx, orgID, reclaimedJob.ID, run2.ID, "permanent fatal failure", false); err != nil {
 			t.Fatalf("failed failing maintenance job permanently: %v", err)
 		}
 
@@ -308,7 +308,7 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		}
 
 		// Complete deep check as success
-		if err := repo.CompleteMaintenanceJob(ctx, checkJob.ID, run.ID, []byte("{\"check\":\"success\"}")); err != nil {
+		if err := repo.CompleteMaintenanceJob(ctx, orgID, checkJob.ID, run.ID, []byte("{\"check\":\"success\"}")); err != nil {
 			t.Fatalf("failed completing deep check: %v", err)
 		}
 

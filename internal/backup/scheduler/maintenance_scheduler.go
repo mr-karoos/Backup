@@ -14,17 +14,21 @@ import (
 
 // MaintenanceSchedulerConfig defines schedule intervals and parameters for maintenance orchestration.
 type MaintenanceSchedulerConfig struct {
-	PollInterval     time.Duration
-	TotalSubsets     int
-	DeepCheckEnabled bool
+	PollInterval       time.Duration
+	DueInterval        time.Duration
+	TotalSubsets       int
+	DeepCheckEnabled   bool
+	RepositoryPageSize int
 }
 
 // DefaultMaintenanceSchedulerConfig returns default production settings.
 func DefaultMaintenanceSchedulerConfig() MaintenanceSchedulerConfig {
 	return MaintenanceSchedulerConfig{
-		PollInterval:     15 * time.Minute,
-		TotalSubsets:     4,
-		DeepCheckEnabled: true,
+		PollInterval:       15 * time.Minute,
+		DueInterval:        24 * time.Hour,
+		TotalSubsets:       domain.DefaultMaintenanceDeepCheckSubsets,
+		DeepCheckEnabled:   true,
+		RepositoryPageSize: 100,
 	}
 }
 
@@ -50,8 +54,17 @@ func NewMaintenanceScheduler(
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 15 * time.Minute
 	}
+	if cfg.DueInterval <= 0 {
+		cfg.DueInterval = 24 * time.Hour
+	}
 	if cfg.TotalSubsets < 1 {
-		cfg.TotalSubsets = 4
+		cfg.TotalSubsets = domain.DefaultMaintenanceDeepCheckSubsets
+	}
+	if cfg.TotalSubsets > domain.MaxMaintenanceDeepCheckSubsets {
+		cfg.TotalSubsets = domain.MaxMaintenanceDeepCheckSubsets
+	}
+	if cfg.RepositoryPageSize <= 0 {
+		cfg.RepositoryPageSize = 100
 	}
 
 	return &MaintenanceScheduler{
@@ -111,30 +124,73 @@ func (s *MaintenanceScheduler) Tick(ctx context.Context) {
 		return
 	}
 
-	repos, err := s.maintRepo.ListActiveRepositories(ctx, 100)
-	if err != nil {
-		s.logger.Warn("failed listing active repositories for maintenance schedule", slog.String("error", err.Error()))
-		return
-	}
+	var (
+		cursorCreatedAt *time.Time
+		cursorID        *uuid.UUID
+		pageSize        = s.cfg.RepositoryPageSize
+	)
 
-	for _, r := range repos {
-		if r == nil {
-			continue
-		}
-		job, err := s.EnqueueNextDeepCheck(ctx, r.OrganizationID, r.ID)
+	for {
+		repos, err := s.maintRepo.ListActiveRepositories(ctx, pageSize, cursorCreatedAt, cursorID)
 		if err != nil {
-			s.logger.Warn("failed enqueuing deep check for repository",
-				slog.String("org_id", r.OrganizationID.String()),
-				slog.String("repo_id", r.ID.String()),
-				slog.String("error", err.Error()),
-			)
-			continue
+			s.logger.Warn("failed listing active repositories for maintenance schedule", slog.String("error", err.Error()))
+			return
 		}
-		s.logger.Debug("ensured deep check maintenance job for repository",
-			slog.String("repo_id", r.ID.String()),
-			slog.String("job_id", job.ID.String()),
-			slog.Int("subset", *job.SubsetIndex),
-		)
+		if len(repos) == 0 {
+			break
+		}
+
+		for _, r := range repos {
+			if r == nil {
+				continue
+			}
+			due, nextSubset, err := s.maintRepo.GetDeepCheckDueStatus(ctx, r.OrganizationID, r.ID, r.CreatedAt, s.cfg.DueInterval, s.cfg.TotalSubsets)
+			if err != nil {
+				s.logger.Warn("failed evaluating deep check due status",
+					slog.String("org_id", r.OrganizationID.String()),
+					slog.String("repo_id", r.ID.String()),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			if !due {
+				continue
+			}
+
+			total := s.cfg.TotalSubsets
+			job, err := s.maintRepo.EnqueueMaintenanceJob(ctx, domain.EnqueueMaintenanceJobParams{
+				OrganizationID: r.OrganizationID,
+				RepositoryID:   r.ID,
+				OperationType:  domain.MaintenanceOpResticDeepCheck,
+				SubsetIndex:    &nextSubset,
+				SubsetTotal:    &total,
+				Metadata: map[string]interface{}{
+					"source": "maintenance_scheduler",
+				},
+			})
+			if err != nil {
+				s.logger.Warn("failed enqueuing deep check for repository",
+					slog.String("org_id", r.OrganizationID.String()),
+					slog.String("repo_id", r.ID.String()),
+					slog.String("error", err.Error()),
+				)
+				continue
+			}
+			if job != nil {
+				s.logger.Debug("ensured deep check maintenance job for repository",
+					slog.String("repo_id", r.ID.String()),
+					slog.String("job_id", job.ID.String()),
+					slog.Int("subset", *job.SubsetIndex),
+				)
+			}
+		}
+
+		if len(repos) < pageSize {
+			break
+		}
+		last := repos[len(repos)-1]
+		cursorCreatedAt = &last.CreatedAt
+		cursorID = &last.ID
 	}
 }
 

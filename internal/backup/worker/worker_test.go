@@ -3414,6 +3414,9 @@ func (f *fakeCommandRunner) Prune(ctx context.Context, target restic.RepositoryT
 func (f *fakeCommandRunner) CheckSubset(ctx context.Context, target restic.RepositoryTarget, password []byte, subsetIndex, subsetTotal int) error {
 	return nil
 }
+func (f *fakeCommandRunner) VerifySnapshotAbsent(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) error {
+	return nil
+}
 
 func TestWorkerPool_ResticExecution(t *testing.T) {
 	orgID := uuid.New()

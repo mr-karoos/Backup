@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"testing"
+	"time"
 )
 
 const validTestJWTKey = "test-jwt-secret-key-must-be-at-least-32-bytes!"
@@ -612,6 +613,9 @@ func TestConfig_ValidateDirect(t *testing.T) {
 		EncryptionMasterKeyVersion:         1,
 		ArtifactEncryptionMasterKey:        validTestArtifactKeyBytes,
 		ArtifactEncryptionMasterKeyVersion: 1,
+		MaintenanceDeepCheckEnabled:        true,
+		MaintenanceDeepCheckInterval:       7 * 24 * time.Hour,
+		MaintenanceDeepCheckSubsets:        4,
 	}
 
 	t.Run("valid config succeeds", func(t *testing.T) {
@@ -650,6 +654,26 @@ func TestConfig_ValidateDirect(t *testing.T) {
 		c.ArtifactEncryptionMasterKeyVersion = 0
 		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "ARTIFACT_ENCRYPTION_MASTER_KEY_VERSION must be an integer between 1 and 2147483647") {
 			t.Errorf("expected artifact version validation error, got: %v", err)
+		}
+	})
+
+	t.Run("invalid maintenance deep check interval", func(t *testing.T) {
+		c := validCfg
+		c.MaintenanceDeepCheckInterval = 0
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "MAINTENANCE_DEEP_CHECK_INTERVAL must be positive") {
+			t.Errorf("expected interval validation error, got: %v", err)
+		}
+	})
+
+	t.Run("invalid maintenance deep check subsets", func(t *testing.T) {
+		c := validCfg
+		c.MaintenanceDeepCheckSubsets = 0
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "MAINTENANCE_DEEP_CHECK_SUBSETS must be between 1 and 100") {
+			t.Errorf("expected subsets validation error, got: %v", err)
+		}
+		c.MaintenanceDeepCheckSubsets = 101
+		if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "MAINTENANCE_DEEP_CHECK_SUBSETS must be between 1 and 100") {
+			t.Errorf("expected subsets validation error, got: %v", err)
 		}
 	})
 

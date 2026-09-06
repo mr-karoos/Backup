@@ -76,13 +76,18 @@ type BackupRepository interface {
 type MaintenanceRepository interface {
 	EnqueueMaintenanceJob(ctx context.Context, params domain.EnqueueMaintenanceJobParams) (*domain.MaintenanceJob, error)
 	ClaimNextMaintenanceJob(ctx context.Context, leaseDuration time.Duration) (*domain.MaintenanceJob, *domain.MaintenanceRun, error)
-	HeartbeatMaintenanceRun(ctx context.Context, runID uuid.UUID, leaseDuration time.Duration) error
-	CompleteMaintenanceJob(ctx context.Context, jobID, runID uuid.UUID, logsSummary []byte) error
-	FailMaintenanceJob(ctx context.Context, jobID, runID uuid.UUID, errMsg string, retryable bool) error
+	HeartbeatMaintenanceRun(ctx context.Context, orgID, runID uuid.UUID, leaseDuration time.Duration) error
+	CompleteMaintenanceJob(ctx context.Context, orgID, jobID, runID uuid.UUID, logsSummary []byte) error
+	FailMaintenanceJob(ctx context.Context, orgID, jobID, runID uuid.UUID, errMsg string, retryable bool) error
+	UpdateJobPhase(ctx context.Context, orgID, jobID uuid.UUID, phase string) error
+	FinalizeSuccessfulResticForget(ctx context.Context, orgID, jobID, runID, artifactID, repoID uuid.UUID, snapshotID string, logsSummary []byte) error
 	GetLastSuccessfulDeepCheckSubset(ctx context.Context, orgID, repoID uuid.UUID) (int, error)
+	GetDeepCheckDueStatus(ctx context.Context, orgID, repoID uuid.UUID, repoCreatedAt time.Time, dueInterval time.Duration, totalSubsets int) (due bool, nextSubset int, err error)
+	RecoverInterruptedMaintenanceRuns(ctx context.Context) ([]domain.RecoveredMaintenanceRunInfo, error)
+	ReapStaleMaintenanceRuns(ctx context.Context) ([]domain.RecoveredMaintenanceRunInfo, error)
 	GetMaintenanceJobByID(ctx context.Context, orgID, jobID uuid.UUID) (*domain.MaintenanceJob, error)
 	GetMaintenanceRunByID(ctx context.Context, orgID, runID uuid.UUID) (*domain.MaintenanceRun, error)
 	ListMaintenanceJobs(ctx context.Context, orgID, repoID uuid.UUID, limit int) ([]*domain.MaintenanceJob, error)
 	ListMaintenanceRuns(ctx context.Context, orgID, jobID uuid.UUID) ([]*domain.MaintenanceRun, error)
-	ListActiveRepositories(ctx context.Context, limit int) ([]*domain.BackupRepository, error)
+	ListActiveRepositories(ctx context.Context, limit int, afterCreatedAt *time.Time, afterID *uuid.UUID) ([]*domain.BackupRepository, error)
 }

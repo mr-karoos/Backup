@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Standard environment constants.
@@ -46,6 +47,9 @@ type Config struct {
 	ArtifactEncryptionMasterKeyVersion int
 	S3PrivateEndpointsAllowlist        []string
 	S3AllowInsecureEndpoints           bool
+	MaintenanceDeepCheckEnabled        bool
+	MaintenanceDeepCheckInterval       time.Duration
+	MaintenanceDeepCheckSubsets        int
 }
 
 // Load reads configuration from environment variables and validates all constraints.
@@ -150,6 +154,34 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Maintenance deep check configuration
+	deepCheckEnabled := true
+	if deepCheckStr := strings.TrimSpace(os.Getenv("MAINTENANCE_DEEP_CHECK_ENABLED")); deepCheckStr != "" {
+		parsed, err := strconv.ParseBool(deepCheckStr)
+		if err != nil {
+			return nil, errors.New("invalid MAINTENANCE_DEEP_CHECK_ENABLED: must be a valid boolean")
+		}
+		deepCheckEnabled = parsed
+	}
+
+	deepCheckInterval := 24 * time.Hour
+	if rawInterval := strings.TrimSpace(os.Getenv("MAINTENANCE_DEEP_CHECK_INTERVAL")); rawInterval != "" {
+		d, err := time.ParseDuration(rawInterval)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MAINTENANCE_DEEP_CHECK_INTERVAL: %w", err)
+		}
+		deepCheckInterval = d
+	}
+
+	deepCheckSubsets := 4
+	if rawSubsets := strings.TrimSpace(os.Getenv("MAINTENANCE_DEEP_CHECK_SUBSETS")); rawSubsets != "" {
+		s, err := strconv.Atoi(rawSubsets)
+		if err != nil {
+			return nil, errors.New("invalid MAINTENANCE_DEEP_CHECK_SUBSETS: must be an integer")
+		}
+		deepCheckSubsets = s
+	}
+
 	cfg := &Config{
 		AppEnv:                             appEnv,
 		HTTPAddr:                           httpAddr,
@@ -166,6 +198,9 @@ func Load() (*Config, error) {
 		ArtifactEncryptionMasterKeyVersion: artifactKeyVersion,
 		S3PrivateEndpointsAllowlist:        s3Allowlist,
 		S3AllowInsecureEndpoints:           s3AllowInsecure,
+		MaintenanceDeepCheckEnabled:        deepCheckEnabled,
+		MaintenanceDeepCheckInterval:       deepCheckInterval,
+		MaintenanceDeepCheckSubsets:        deepCheckSubsets,
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -265,6 +300,14 @@ func (c *Config) Validate() error {
 
 	if c.BootstrapAdminEmail != "" && !strings.Contains(c.BootstrapAdminEmail, "@") {
 		return errors.New("invalid BOOTSTRAP_ADMIN_EMAIL: must contain '@'")
+	}
+
+	if c.MaintenanceDeepCheckInterval <= 0 {
+		return errors.New("MAINTENANCE_DEEP_CHECK_INTERVAL must be positive")
+	}
+
+	if c.MaintenanceDeepCheckSubsets < 1 || c.MaintenanceDeepCheckSubsets > 100 {
+		return errors.New("MAINTENANCE_DEEP_CHECK_SUBSETS must be between 1 and 100")
 	}
 
 	return nil

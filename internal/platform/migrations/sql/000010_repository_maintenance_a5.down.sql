@@ -25,6 +25,7 @@ BEGIN
     END IF;
 END $$;
 
--- 2. Drop tables in reverse dependency order
+-- 2. Drop tables and index in reverse dependency order
+DROP INDEX IF EXISTS idx_backup_repositories_active_cursor;
 DROP TABLE IF EXISTS repository_maintenance_runs;
 DROP TABLE IF EXISTS repository_maintenance_jobs;

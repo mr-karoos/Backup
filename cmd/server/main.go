@@ -329,6 +329,18 @@ func run() error {
 	}
 	recoveryCancel()
 
+	// 15b. Run Startup Recovery for Interrupted Maintenance Runs (Fail-fast)
+	maintRecoveryCtx, maintRecoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	recoveredMaint, err := backupRepository.RecoverInterruptedMaintenanceRuns(maintRecoveryCtx)
+	maintRecoveryCancel()
+	if err != nil {
+		log.Error("startup maintenance recovery failed", slog.String("error", err.Error()))
+		return fmt.Errorf("startup maintenance recovery failed: %w", err)
+	}
+	if len(recoveredMaint) > 0 {
+		log.Info("recovered interrupted maintenance runs at startup", slog.Int("count", len(recoveredMaint)))
+	}
+
 	// 16. Initialize and Start In-Process Mutex, Worker Pool, Stale Reaper & Scheduler
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	defer backgroundCancel()
@@ -388,7 +400,13 @@ func run() error {
 
 	maintenanceSched := backupScheduler.NewMaintenanceScheduler(
 		backupRepository,
-		backupScheduler.DefaultMaintenanceSchedulerConfig(),
+		backupScheduler.MaintenanceSchedulerConfig{
+			PollInterval:       15 * time.Minute,
+			DueInterval:        cfg.MaintenanceDeepCheckInterval,
+			TotalSubsets:       cfg.MaintenanceDeepCheckSubsets,
+			DeepCheckEnabled:   cfg.MaintenanceDeepCheckEnabled,
+			RepositoryPageSize: 100,
+		},
 		log,
 	)
 	maintenanceSched.Start(backgroundCtx)

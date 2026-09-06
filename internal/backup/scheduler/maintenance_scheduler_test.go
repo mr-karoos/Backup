@@ -13,6 +13,7 @@ import (
 
 type mockMaintenanceRepo struct {
 	lastSubset   map[uuid.UUID]int
+	dueMap       map[uuid.UUID]bool
 	enqueuedJobs []*domain.MaintenanceJob
 	activeRepos  []*domain.BackupRepository
 }
@@ -20,6 +21,7 @@ type mockMaintenanceRepo struct {
 func newMockMaintenanceRepo() *mockMaintenanceRepo {
 	return &mockMaintenanceRepo{
 		lastSubset: make(map[uuid.UUID]int),
+		dueMap:     make(map[uuid.UUID]bool),
 	}
 }
 
@@ -47,20 +49,45 @@ func (m *mockMaintenanceRepo) ClaimNextMaintenanceJob(ctx context.Context, lease
 	return nil, nil, nil
 }
 
-func (m *mockMaintenanceRepo) HeartbeatMaintenanceRun(ctx context.Context, runID uuid.UUID, leaseDuration time.Duration) error {
+func (m *mockMaintenanceRepo) HeartbeatMaintenanceRun(ctx context.Context, orgID, runID uuid.UUID, leaseDuration time.Duration) error {
 	return nil
 }
 
-func (m *mockMaintenanceRepo) CompleteMaintenanceJob(ctx context.Context, jobID, runID uuid.UUID, logsSummary []byte) error {
+func (m *mockMaintenanceRepo) CompleteMaintenanceJob(ctx context.Context, orgID, jobID, runID uuid.UUID, logsSummary []byte) error {
 	return nil
 }
 
-func (m *mockMaintenanceRepo) FailMaintenanceJob(ctx context.Context, jobID, runID uuid.UUID, errMsg string, retryable bool) error {
+func (m *mockMaintenanceRepo) FailMaintenanceJob(ctx context.Context, orgID, jobID, runID uuid.UUID, errMsg string, retryable bool) error {
+	return nil
+}
+
+func (m *mockMaintenanceRepo) UpdateJobPhase(ctx context.Context, orgID, jobID uuid.UUID, phase string) error {
+	return nil
+}
+
+func (m *mockMaintenanceRepo) FinalizeSuccessfulResticForget(ctx context.Context, orgID, jobID, runID, artifactID, repoID uuid.UUID, snapshotID string, logsSummary []byte) error {
 	return nil
 }
 
 func (m *mockMaintenanceRepo) GetLastSuccessfulDeepCheckSubset(ctx context.Context, orgID, repoID uuid.UUID) (int, error) {
 	return m.lastSubset[repoID], nil
+}
+
+func (m *mockMaintenanceRepo) GetDeepCheckDueStatus(ctx context.Context, orgID, repoID uuid.UUID, repoCreatedAt time.Time, dueInterval time.Duration, totalSubsets int) (due bool, nextSubset int, err error) {
+	if isDue, ok := m.dueMap[repoID]; ok && !isDue {
+		return false, 0, nil
+	}
+	lastIndex := m.lastSubset[repoID]
+	next := (lastIndex % totalSubsets) + 1
+	return true, next, nil
+}
+
+func (m *mockMaintenanceRepo) RecoverInterruptedMaintenanceRuns(ctx context.Context) ([]domain.RecoveredMaintenanceRunInfo, error) {
+	return nil, nil
+}
+
+func (m *mockMaintenanceRepo) ReapStaleMaintenanceRuns(ctx context.Context) ([]domain.RecoveredMaintenanceRunInfo, error) {
+	return nil, nil
 }
 
 func (m *mockMaintenanceRepo) GetMaintenanceJobByID(ctx context.Context, orgID, jobID uuid.UUID) (*domain.MaintenanceJob, error) {
@@ -79,8 +106,28 @@ func (m *mockMaintenanceRepo) ListMaintenanceRuns(ctx context.Context, orgID, jo
 	return nil, nil
 }
 
-func (m *mockMaintenanceRepo) ListActiveRepositories(ctx context.Context, limit int) ([]*domain.BackupRepository, error) {
-	return m.activeRepos, nil
+func (m *mockMaintenanceRepo) ListActiveRepositories(ctx context.Context, limit int, afterCreatedAt *time.Time, afterID *uuid.UUID) ([]*domain.BackupRepository, error) {
+	if afterID == nil {
+		if len(m.activeRepos) <= limit {
+			return m.activeRepos, nil
+		}
+		return m.activeRepos[:limit], nil
+	}
+	// Simple simulated cursor
+	var result []*domain.BackupRepository
+	found := false
+	for _, r := range m.activeRepos {
+		if found {
+			result = append(result, r)
+			if len(result) >= limit {
+				break
+			}
+		}
+		if r.ID == *afterID {
+			found = true
+		}
+	}
+	return result, nil
 }
 
 func TestMaintenanceScheduler_DeterministicSubsetRotation(t *testing.T) {
@@ -172,5 +219,103 @@ func TestMaintenanceScheduler_TickActiveRepositories(t *testing.T) {
 
 	if len(repo.enqueuedJobs) != 2 {
 		t.Fatalf("expected 2 enqueued jobs for active repos, got %d", len(repo.enqueuedJobs))
+	}
+}
+
+func TestMaintenanceScheduler_SubsetConfigMatrix(t *testing.T) {
+	orgID := uuid.New()
+	repoID := uuid.New()
+
+	matrix := []struct {
+		configuredSubsets int
+		expectedSubsets   int
+	}{
+		{configuredSubsets: 1, expectedSubsets: 1},
+		{configuredSubsets: 4, expectedSubsets: 4},
+		{configuredSubsets: 10, expectedSubsets: 10},
+		{configuredSubsets: 100, expectedSubsets: 100},
+		{configuredSubsets: 101, expectedSubsets: 100}, // Clamped to MaxMaintenanceDeepCheckSubsets
+		{configuredSubsets: 0, expectedSubsets: 4},     // Defaulted
+		{configuredSubsets: -5, expectedSubsets: 4},    // Defaulted
+	}
+
+	for _, tc := range matrix {
+		repo := newMockMaintenanceRepo()
+		cfg := MaintenanceSchedulerConfig{
+			PollInterval:     10 * time.Minute,
+			TotalSubsets:     tc.configuredSubsets,
+			DeepCheckEnabled: true,
+		}
+		sched := NewMaintenanceScheduler(repo, cfg, nil)
+		if sched.cfg.TotalSubsets != tc.expectedSubsets {
+			t.Fatalf("for input %d, expected TotalSubsets %d, got %d", tc.configuredSubsets, tc.expectedSubsets, sched.cfg.TotalSubsets)
+		}
+
+		job, err := sched.EnqueueNextDeepCheck(context.Background(), orgID, repoID)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if *job.SubsetTotal != tc.expectedSubsets {
+			t.Fatalf("for input %d, expected job SubsetTotal %d, got %d", tc.configuredSubsets, tc.expectedSubsets, *job.SubsetTotal)
+		}
+	}
+}
+
+func TestMaintenanceScheduler_DueCalculation(t *testing.T) {
+	repo := newMockMaintenanceRepo()
+	cfg := MaintenanceSchedulerConfig{
+		PollInterval:     10 * time.Minute,
+		TotalSubsets:     4,
+		DeepCheckEnabled: true,
+	}
+	sched := NewMaintenanceScheduler(repo, cfg, nil)
+
+	orgID := uuid.New()
+	dueRepo := &domain.BackupRepository{ID: uuid.New(), OrganizationID: orgID, Status: domain.BackupRepositoryStatusActive}
+	notDueRepo := &domain.BackupRepository{ID: uuid.New(), OrganizationID: orgID, Status: domain.BackupRepositoryStatusActive}
+
+	repo.activeRepos = []*domain.BackupRepository{dueRepo, notDueRepo}
+	repo.dueMap[dueRepo.ID] = true
+	repo.dueMap[notDueRepo.ID] = false
+
+	sched.Tick(context.Background())
+
+	// Only the due repository should have an enqueued job
+	if len(repo.enqueuedJobs) != 1 {
+		t.Fatalf("expected exactly 1 enqueued job for due repo, got %d", len(repo.enqueuedJobs))
+	}
+	if repo.enqueuedJobs[0].RepositoryID != dueRepo.ID {
+		t.Fatalf("expected enqueued job for repo %s, got %s", dueRepo.ID, repo.enqueuedJobs[0].RepositoryID)
+	}
+}
+
+func TestMaintenanceScheduler_KeysetPagination(t *testing.T) {
+	repo := newMockMaintenanceRepo()
+	cfg := MaintenanceSchedulerConfig{
+		PollInterval:       10 * time.Minute,
+		TotalSubsets:       4,
+		DeepCheckEnabled:   true,
+		RepositoryPageSize: 2, // 2 per page to test multi-page traversal
+	}
+	sched := NewMaintenanceScheduler(repo, cfg, nil)
+
+	orgID := uuid.New()
+	now := time.Now()
+	var repos []*domain.BackupRepository
+	for i := 0; i < 5; i++ {
+		repos = append(repos, &domain.BackupRepository{
+			ID:             uuid.New(),
+			OrganizationID: orgID,
+			Status:         domain.BackupRepositoryStatusActive,
+			CreatedAt:      now.Add(time.Duration(i) * time.Minute),
+		})
+	}
+	repo.activeRepos = repos
+
+	sched.Tick(context.Background())
+
+	// All 5 repositories across 3 pages (2 + 2 + 1) should be processed
+	if len(repo.enqueuedJobs) != 5 {
+		t.Fatalf("expected 5 enqueued jobs across pagination pages, got %d", len(repo.enqueuedJobs))
 	}
 }

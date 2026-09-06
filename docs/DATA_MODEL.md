@@ -479,10 +479,15 @@
 | `repository_id` | `UUID` | کلید خارجی به جدول `backup_repositories.id` (اجباری، حذف RESTRICT). |
 | `operation_type` | `VARCHAR(50)` | نوع عملیات نگهداری (`restic_prune`, `restic_deep_check`, `restic_forget`). |
 | `status` | `VARCHAR(30)` | وضعیت چرخه حیات (`pending`, `running`, `completed`, `failed`, `cancelled` - پیش‌فرض: `pending`). |
-| `artifact_id` | `UUID` | ارجاع به آرتیفکت در حال حذف برای `restic_forget` (برای سایر عملیات NULL). |
+| `artifact_id` | `UUID` | ارجاع به آرتیفکت در حال حذف برای `restic_forget` (برای سایر عملیات NULL). دارای کلید خارجی سازمانی `(organization_id, artifact_id)` به `backup_artifacts`. |
 | `snapshot_id` | `VARCHAR(64)` | شناسه ۶۴ کاراکتری هگزادسیمال اسنپ‌شات هدف برای `restic_forget` (برای سایر عملیات NULL). |
 | `subset_index` | `INTEGER` | اندیس زیرمجموعه در حال بررسی برای `restic_deep_check` (برای سایر عملیات NULL). |
-| `subset_total` | `INTEGER` | تعداد کل زیرمجموعه‌های تقسیم‌شده برای `restic_deep_check` (برای سایر عملیات NULL). |
+| `subset_total` | `INTEGER` | تعداد کل زیرمجموعه‌های تقسیم‌شده برای `restic_deep_check` (برای سایر عملیات NULL؛ دارای قید سقف `subset_total <= 100`). |
+| `attempt_count` | `INTEGER` | تعداد دفعات تلاش اجرایی پردازش‌شده برای این جاب (پیش‌فرض: 0). |
+| `max_attempts` | `INTEGER` | حداکثر تلاش‌های مجاز برای اجرای جاب قبل از شکست قطعی (پیش‌فرض: 3). |
+| `next_attempt_at` | `TIMESTAMPTZ` | زمان برنامه‌ریزی‌شده تلاش بعدی پس از خطای گذرا با تأخیر تصاعدی (Exponential Backoff). |
+| `phase` | `VARCHAR(50)` | نشانگر فاز پیشرفت غیرمحرمانه برای تضمین Idempotency (مانند `forget_executed`). |
+| `completed_at` | `TIMESTAMPTZ` | زمان تکمیل موفقیت‌آمیز جاب. |
 | `metadata` | `JSONB` | ابرداده پاک‌سازی‌شده عملیاتی (پیش‌فرض: `{}`::jsonb). |
 | `created_at` | `TIMESTAMPTZ` | زمان ایجاد و صف‌بندی جاب. |
 | `updated_at` | `TIMESTAMPTZ` | زمان آخرین تغییر وضعیت. |
@@ -490,9 +495,15 @@
 * **قیدهای مانعةالجمع چندریختی (Polymorphic Field Constraints)**:
   * برای `restic_forget`: فیلدهای `artifact_id` و `snapshot_id` (دقیقاً ۶۴ هگز کوچک) الزامی و فیلدهای `subset_*` باید NULL باشند.
   * برای `restic_prune`: فیلدهای `artifact_id`، `snapshot_id` و `subset_*` باید همگی NULL باشند.
-  * برای `restic_deep_check`: فیلدهای `artifact_id` و `snapshot_id` باید NULL، و فیلدهای `subset_index >= 1` و `subset_total >= subset_index` الزامی هستند.
+  * برای `restic_deep_check`: فیلدهای `artifact_id` و `snapshot_id` باید NULL، و فیلدهای `subset_index >= 1` و `subset_total >= subset_index` و `subset_total <= 100` الزامی هستند.
+* **قیدهای یکپارچگی سازمانی (Composite Tenant FKs)**:
+  * قید یکتایی `uq_repo_maint_jobs_org_id (organization_id, id)` جهت اتصال کلیدهای خارجی ترکیبی.
+  * قید کلید خارجی سازمانی `fk_repo_maint_jobs_org_artifact` بر روی `(organization_id, artifact_id)` ارجاع‌دهنده به `backup_artifacts(organization_id, id)`.
 * **ایندکس‌های یکتای ددابلیکاسیون (Partial Unique Indexes)**:
   * مانع از ایجاد جاب‌های تکراری در وضعیت‌های `pending` و `running` برای همان مخزن یا اسنپ‌شات (`uq_repo_maint_jobs_active_prune`, `uq_repo_maint_jobs_active_check`, `uq_repo_maint_jobs_active_forget`).
+* **ایندکس‌های بهینه‌سازی ادعا و پیجینیشن**:
+  * ایندکس `idx_repo_maint_jobs_claim` بر روی `(status, next_attempt_at) WHERE status = 'pending'` جهت ادعای سریع جاب‌ها.
+  * ایندکس `idx_backup_repositories_active_cursor` بر روی `(status, created_at, id) WHERE status = 'active'` جهت Keyset Pagination زمان‌بند.
 
 ---
 
@@ -505,19 +516,20 @@
 | :--- | :--- | :--- |
 | `id` | `UUID` | کلید اصلی (Primary Key). |
 | `organization_id` | `UUID` | کلید خارجی به جدول `organizations.id` (اجباری، حذف RESTRICT). |
-| `job_id` | `UUID` | کلید خارجی به جدول `repository_maintenance_jobs.id` (اجباری، حذف RESTRICT). |
+| `job_id` | `UUID` | کلید خارجی به جدول `repository_maintenance_jobs.id` (اجباری، حذف RESTRICT؛ دارای کلید خارجی ترکیبی `fk_repo_maint_runs_org_job` بر روی `(organization_id, job_id)`). |
 | `attempt_number` | `INTEGER` | شماره تلاش اجرایی برای این جاب (شروع از ۱). |
-| `status` | `VARCHAR(30)` | وضعیت اجرا (`running`, `success`, `failed` - پیش‌فرض: `running`). |
+| `status` | `VARCHAR(30)` | وضعیت اجرا (`running`, `completed`, `failed`, `cancelled` - پیش‌فرض: `running`). |
 | `started_at` | `TIMESTAMPTZ` | زمان شروع فیزیکی اجرا. |
 | `ended_at` | `TIMESTAMPTZ` | زمان پایان موفق یا ناموفق اجرا. |
 | `heartbeat_at` | `TIMESTAMPTZ` | آخرین زمان ارسال سیگنال حیات توسط کارگر نگهداری. |
 | `lease_until` | `TIMESTAMPTZ` | زمان انقضای اجاره کارگر جهت تشخیص زامبی/کرش. |
 | `error_message` | `TEXT` | پیام خطای پاک‌سازی‌شده در صورت بروز خطا. |
-| `result_payload` | `JSONB` | جزئیات نتایج حاصل از اجرای دستور (پیش‌فرض: `{}`::jsonb). |
+| `logs_summary` | `JSONB` | خلاصه نتایج و خروجی فاقد سکرت حاصل از اجرای دستور (پیش‌فرض: `{}`::jsonb). |
 | `created_at` | `TIMESTAMPTZ` | زمان ایجاد رکورد. |
 | `updated_at` | `TIMESTAMPTZ` | زمان به‌روزرسانی رکورد. |
 
 * **کنترل یکتایی تلاش‌ها**: شاخص یکتای `uq_repo_maint_runs_job_attempt` بر روی ترکیب `(job_id, attempt_number)` مانع از ثبت تکراری شماره تلاش می‌شود.
+* **قید یکپارچگی سازمانی**: قید کلید خارجی ترکیبی `fk_repo_maint_runs_org_job` بر روی `(organization_id, job_id)` مانع از هرگونه ارجاع بین‌سازمانی میان تلاش‌های اجرا و جاب‌های نگهداری می‌شود.
 
 ---
 

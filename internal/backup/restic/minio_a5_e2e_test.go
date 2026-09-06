@@ -118,10 +118,9 @@ func TestResticRunner_A5_MinIO_E2E_MaintenanceLifecycle(t *testing.T) {
 	}
 	t.Logf("Successfully forgot snapshot %s in S3 repository", res.SnapshotID)
 
-	// Verify snapshot is gone from S3
-	item, err := runner.GetSnapshot(ctx, target, password, res.SnapshotID)
-	if err == nil || item != nil {
-		t.Fatalf("expected snapshot %s to be gone from S3 repo, but found it", res.SnapshotID)
+	// Verify snapshot is gone from S3 using VerifySnapshotAbsent
+	if err := runner.VerifySnapshotAbsent(ctx, target, password, res.SnapshotID); err != nil {
+		t.Fatalf("expected snapshot %s to be verified absent from S3 repo, but got err: %v", res.SnapshotID, err)
 	}
 
 	// 5. Prune S3 repository

@@ -77,6 +77,10 @@ func (m *mockResticRunner) CheckSubset(ctx context.Context, target restic.Reposi
 	return nil
 }
 
+func (m *mockResticRunner) VerifySnapshotAbsent(ctx context.Context, target restic.RepositoryTarget, password []byte, snapshotID string) error {
+	return nil
+}
+
 type mockTarget struct{}
 
 func (m *mockTarget) Type() string                { return "local" }

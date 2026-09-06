@@ -332,11 +332,11 @@ BackupArtifact + Update Run (success) + Update Job (completed)
   * پیاده‌سازی اعتبارسنجی سطح ۱ (Post-Backup) درون کارگر بلافاصله پس از ایجاد اسنپ‌شات.
   * پیاده‌سازی دانلود جریانی `restic dump` با فشرده‌سازی در لحظه Gzip و انتقال Chunked بر بستر انتزاع `DownloadDescriptor`.
 
-* **گام A.5 — ارکستراسیون مخزن، سیاست نگهداری و صف پایدار نگهداری دوره‌ای (`Step A.5`) [تکمیل‌شده]**:
-  * [x] پیاده‌سازی سرویس هماهنگ‌کننده `RepositoryOperationCoordinator` درون‌برنامه‌ای جهت جلوگیری از تداخل عملیات متضاد (ADR-035).
-  * [x] یکپارچه‌سازی فرآیند Retention با دستور `restic forget` و حذف فیزیکی ایمن.
-  * [x] ایجاد صف پایدار مستقل در دیتابیس (`repository_maintenance_jobs` و `repository_maintenance_runs`) و پیاده‌سازی کارگر `RepositoryMaintenanceWorker`.
-  * [x] پیاده‌سازی اعتبارسنجی سطح ۲ (Deep Check) با بررسی زیرمجموعه‌های چرخشی قطعی ($1/N$).
+* **گام A.5 — ارکستراسیون مخزن، سیاست نگهداری و صف پایدار نگهداری دوره‌ای (`Step A.5`) [A.5 IMPLEMENTED — Awaiting External Review]**:
+  * [x] پیاده‌سازی سرویس هماهنگ‌کننده `RepositoryOperationCoordinator` درون‌برنامه‌ای با قابلیت `TryAcquireExclusive` و تسلیم فوری اولویت (ADR-035).
+  * [x] یکپارچه‌سازی فرآیند Retention با دستور `restic forget`، اعتبارسنجی عدم حضور و نهایی‌سازی اتمیک دیتابیس (`FinalizeSuccessfulResticForget`).
+  * [x] ایجاد صف پایدار مستقل در دیتابیس (`repository_maintenance_jobs` و `repository_maintenance_runs`) با قیدهای کلید خارجی ترکیبی چندسازمانی و پیاده‌سازی کارگر `RepositoryMaintenanceWorker`.
+  * [x] پیاده‌سازی اعتبارسنجی سطح ۲ (Deep Check) با زیرمجموعه‌های چرخشی قطعی ($1/N$ با محدوده $1 \le N \le 100$) و زمان‌بند مبتنی بر Keyset Pagination.
   * [x] اعمال سیاست قطعی عدم آنلاک خودکار (`NO AUTOMATIC RESTIC UNLOCK`) و تثبیت هاست‌نیم کانتینر با `hostname: backup-platform-node-1`.
 
 

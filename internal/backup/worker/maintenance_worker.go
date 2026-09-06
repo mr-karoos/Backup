@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -135,11 +136,20 @@ func (w *RepositoryMaintenanceWorker) Stop() {
 func (w *RepositoryMaintenanceWorker) runLoop(ctx context.Context) {
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
+	reapTicker := time.NewTicker(time.Minute)
+	defer reapTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-reapTicker.C:
+			reaped, err := w.maintRepo.ReapStaleMaintenanceRuns(ctx)
+			if err != nil {
+				w.logger.Warn("failed reaping stale maintenance runs", slog.String("error", err.Error()))
+			} else if len(reaped) > 0 {
+				w.logger.Info("reaped stale maintenance runs", slog.Int("reaped_count", len(reaped)))
+			}
 		case <-ticker.C:
 			w.ProcessNextJob(ctx)
 		}
@@ -175,20 +185,31 @@ func (w *RepositoryMaintenanceWorker) executeJob(ctx context.Context, job *domai
 	if err != nil {
 		errMsg := fmt.Sprintf("repository not found: %v", err)
 		w.logger.Error("maintenance failed: repository not found", slog.String("job_id", job.ID.String()), slog.String("error", errMsg))
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, errMsg, false)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
 		return
 	}
 
-	// 2. Acquire Exclusive Lock with bounded timeout (Yield if busy to avoid starving customer operations)
-	coordCtx, coordCancel := context.WithTimeout(ctx, w.cfg.CoordinatorTimeout)
-	unlock, err := w.coordinator.AcquireExclusive(coordCtx, job.RepositoryID)
-	coordCancel()
+	if repo.Status != domain.BackupRepositoryStatusActive {
+		errMsg := fmt.Sprintf("repository status is %s, not active", repo.Status)
+		w.logger.Error("maintenance failed: repository not active", slog.String("job_id", job.ID.String()), slog.String("error", errMsg))
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
+		return
+	}
+
+	// 2. TryAcquireExclusive (Yield immediately if busy to avoid starving customer operations)
+	unlock, acquired, err := w.coordinator.TryAcquireExclusive(job.RepositoryID)
 	if err != nil {
+		errMsg := fmt.Sprintf("coordinator error: %v", err)
+		w.logger.Error("maintenance failed: coordinator error", slog.String("job_id", job.ID.String()), slog.String("error", errMsg))
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
+		return
+	}
+	if !acquired {
 		w.logger.Info("repository is busy with active operations, yielding maintenance job",
 			slog.String("job_id", job.ID.String()),
 			slog.String("repo_id", job.RepositoryID.String()),
 		)
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, "repository busy with concurrent operations, yielding for retry", true)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "repository busy with concurrent operations, yielding for retry", true)
 		return
 	}
 	defer unlock()
@@ -198,7 +219,7 @@ func (w *RepositoryMaintenanceWorker) executeJob(ctx context.Context, job *domai
 	if err != nil {
 		errMsg := fmt.Sprintf("storage target not found: %v", err)
 		w.logger.Error("maintenance failed: storage target not found", slog.String("job_id", job.ID.String()), slog.String("error", errMsg))
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, errMsg, false)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
 		return
 	}
 
@@ -206,7 +227,7 @@ func (w *RepositoryMaintenanceWorker) executeJob(ctx context.Context, job *domai
 	if err != nil {
 		errMsg := fmt.Sprintf("failed resolving repository target: %v", err)
 		w.logger.Error("maintenance failed: target resolution failed", slog.String("job_id", job.ID.String()), slog.String("error", errMsg))
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, errMsg, false)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
 		return
 	}
 	defer repoTarget.Cleanup()
@@ -216,7 +237,7 @@ func (w *RepositoryMaintenanceWorker) executeJob(ctx context.Context, job *domai
 	if err != nil {
 		errMsg := fmt.Sprintf("failed loading repository key: %v", err)
 		w.logger.Error("maintenance failed: key load failed", slog.String("job_id", job.ID.String()), slog.String("error", errMsg))
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, errMsg, false)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
 		return
 	}
 	defer secretcrypto.ZeroBytes(repoKey)
@@ -224,7 +245,7 @@ func (w *RepositoryMaintenanceWorker) executeJob(ctx context.Context, job *domai
 	if credType != credDomain.TypeResticRepositoryKey || len(repoKey) == 0 {
 		errMsg := "invalid restic repository key format"
 		w.logger.Error("maintenance failed: invalid repository key", slog.String("job_id", job.ID.String()))
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, errMsg, false)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
 		return
 	}
 
@@ -239,7 +260,7 @@ func (w *RepositoryMaintenanceWorker) executeJob(ctx context.Context, job *domai
 			case <-hbCtx.Done():
 				return
 			case <-ticker.C:
-				_ = w.maintRepo.HeartbeatMaintenanceRun(ctx, run.ID, w.cfg.LeaseDuration)
+				_ = w.maintRepo.HeartbeatMaintenanceRun(ctx, job.OrganizationID, run.ID, w.cfg.LeaseDuration)
 			}
 		}
 	}()
@@ -247,7 +268,7 @@ func (w *RepositoryMaintenanceWorker) executeJob(ctx context.Context, job *domai
 	// 6. Execute Subprocess by Operation Type
 	switch job.OperationType {
 	case domain.MaintenanceOpResticForget:
-		w.handleForget(ctx, job, run, repoTarget, repoKey)
+		w.handleForget(ctx, job, run, repo, repoTarget, repoKey)
 
 	case domain.MaintenanceOpResticPrune:
 		w.handlePrune(ctx, job, run, repoTarget, repoKey)
@@ -258,7 +279,7 @@ func (w *RepositoryMaintenanceWorker) executeJob(ctx context.Context, job *domai
 	default:
 		errMsg := fmt.Sprintf("unsupported operation type: %s", job.OperationType)
 		w.logger.Error("maintenance failed", slog.String("error", errMsg))
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, errMsg, false)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
 	}
 }
 
@@ -266,37 +287,114 @@ func (w *RepositoryMaintenanceWorker) handleForget(
 	ctx context.Context,
 	job *domain.MaintenanceJob,
 	run *domain.MaintenanceRun,
+	repo *domain.BackupRepository,
 	repoTarget restic.RepositoryTarget,
 	repoKey []byte,
 ) {
 	if job.ArtifactID == nil || *job.ArtifactID == uuid.Nil || job.SnapshotID == "" {
 		errMsg := "restic_forget missing artifact_id or snapshot_id"
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, errMsg, false)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
 		return
 	}
 
-	// Execute Restic Forget (NO prune inline!)
-	err := w.resticRunner.ForgetSnapshot(ctx, repoTarget, repoKey, job.SnapshotID)
+	if !domain.IsValidCanonicalResticSnapshotID(job.SnapshotID) {
+		errMsg := fmt.Sprintf("invalid canonical snapshot id format: %s", job.SnapshotID)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
+		return
+	}
+
+	// Invariant validations against artifact entity (Fail closed terminally)
+	artifact, err := w.backupRepo.GetArtifactByID(ctx, job.OrganizationID, *job.ArtifactID)
 	if err != nil {
-		w.logger.Error("restic forget failed",
+		errMsg := fmt.Sprintf("failed fetching artifact: %v", err)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
+		return
+	}
+	if artifact == nil {
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "artifact not found", false)
+		return
+	}
+	if artifact.OrganizationID != job.OrganizationID {
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "artifact organization mismatch", false)
+		return
+	}
+	if artifact.ID != *job.ArtifactID {
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "artifact id mismatch", false)
+		return
+	}
+	if artifact.Format != domain.ArtifactFormatResticSnapshot {
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "artifact format is not restic_snapshot", false)
+		return
+	}
+	if artifact.IsDeleted {
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "artifact is already marked deleted", false)
+		return
+	}
+	if artifact.RepositoryID == nil || *artifact.RepositoryID != job.RepositoryID {
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "artifact repository mismatch", false)
+		return
+	}
+	if artifact.SnapshotID != job.SnapshotID {
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "artifact snapshot id mismatch", false)
+		return
+	}
+	if artifact.ResourceID != repo.ResourceID {
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "artifact resource mismatch with repository", false)
+		return
+	}
+	if artifact.StorageTargetID != repo.StorageTargetID {
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, "artifact storage target mismatch with repository", false)
+		return
+	}
+
+	alreadyForgotten := job.Phase != nil && *job.Phase == domain.MaintenancePhaseForgetExecuted
+
+	if !alreadyForgotten {
+		// Execute Restic Forget (NO prune inline!)
+		err := w.resticRunner.ForgetSnapshot(ctx, repoTarget, repoKey, job.SnapshotID)
+		if err != nil {
+			w.logger.Error("restic forget failed",
+				slog.String("job_id", job.ID.String()),
+				slog.String("snapshot_id", job.SnapshotID),
+				slog.String("error", err.Error()),
+			)
+			_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, err.Error(), isRetryable(err))
+			return
+		}
+
+		// Update phase to forget_executed
+		if pErr := w.maintRepo.UpdateJobPhase(ctx, job.OrganizationID, job.ID, domain.MaintenancePhaseForgetExecuted); pErr != nil {
+			w.logger.Warn("failed updating job phase to forget_executed", slog.String("error", pErr.Error()))
+		}
+	}
+
+	// Verify snapshot is truly absent from repository
+	if vErr := w.resticRunner.VerifySnapshotAbsent(ctx, repoTarget, repoKey, job.SnapshotID); vErr != nil {
+		w.logger.Error("snapshot absence verification failed",
 			slog.String("job_id", job.ID.String()),
 			slog.String("snapshot_id", job.SnapshotID),
-			slog.String("error", err.Error()),
+			slog.String("error", vErr.Error()),
 		)
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, err.Error(), isRetryable(err))
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, vErr.Error(), isRetryable(vErr))
 		return
 	}
 
-	// Database Tombstone: is_deleted = true, deleted_at = NOW()
-	tbErr := w.backupRepo.TombstoneArtifact(ctx, job.OrganizationID, *job.ArtifactID)
-	if tbErr != nil {
-		w.logger.Warn("failed tombstoning artifact after restic forget",
-			slog.String("artifact_id", job.ArtifactID.String()),
-			slog.String("error", tbErr.Error()),
+	// Atomic Finalize: Tombstone artifact, debounce enqueue prune, complete run, complete job
+	logsSummary, _ := json.Marshal(map[string]string{
+		"operation":   "restic_forget",
+		"snapshot_id": job.SnapshotID,
+		"status":      "success",
+	})
+	if fErr := w.maintRepo.FinalizeSuccessfulResticForget(ctx, job.OrganizationID, job.ID, run.ID, *job.ArtifactID, job.RepositoryID, job.SnapshotID, logsSummary); fErr != nil {
+		w.logger.Error("failed finalizing restic forget in database",
+			slog.String("job_id", job.ID.String()),
+			slog.String("error", fErr.Error()),
 		)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, fErr.Error(), isRetryable(fErr))
+		return
 	}
 
-	// Audit Log Emission
+	// Audit Log Emission (user_id = nil)
 	if w.auditRecorder != nil {
 		metaObj := map[string]any{
 			"artifact_id": job.ArtifactID.String(),
@@ -311,6 +409,7 @@ func (w *RepositoryMaintenanceWorker) handleForget(
 			Action:         auditDomain.ActionRetentionCleanup,
 			EntityType:     auditDomain.EntityTypeBackupArtifact,
 			EntityID:       job.ArtifactID,
+			UserID:         nil,
 			Metadata:       metaBytes,
 			CreatedAt:      w.nowFunc(),
 		}
@@ -319,23 +418,6 @@ func (w *RepositoryMaintenanceWorker) handleForget(
 		}
 	}
 
-	// Debounced Prune Enqueue
-	_, _ = w.maintRepo.EnqueueMaintenanceJob(ctx, domain.EnqueueMaintenanceJobParams{
-		OrganizationID: job.OrganizationID,
-		RepositoryID:   job.RepositoryID,
-		OperationType:  domain.MaintenanceOpResticPrune,
-		Metadata: map[string]interface{}{
-			"source":                "post_forget_cleanup",
-			"forgotten_snapshot_id": job.SnapshotID,
-		},
-	})
-
-	logsSummary, _ := json.Marshal(map[string]string{
-		"operation":   "restic_forget",
-		"snapshot_id": job.SnapshotID,
-		"status":      "success",
-	})
-	_ = w.maintRepo.CompleteMaintenanceJob(ctx, job.ID, run.ID, logsSummary)
 	w.logger.Info("restic forget completed successfully",
 		slog.String("job_id", job.ID.String()),
 		slog.String("snapshot_id", job.SnapshotID),
@@ -355,7 +437,26 @@ func (w *RepositoryMaintenanceWorker) handlePrune(
 			slog.String("job_id", job.ID.String()),
 			slog.String("error", err.Error()),
 		)
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, err.Error(), isRetryable(err))
+		if w.auditRecorder != nil {
+			metaObj := map[string]any{
+				"repo_id": job.RepositoryID.String(),
+				"job_id":  job.ID.String(),
+				"run_id":  run.ID.String(),
+				"error":   err.Error(),
+			}
+			metaBytes, _ := json.Marshal(metaObj)
+			_ = w.auditRecorder.Record(ctx, &auditDomain.AuditLog{
+				ID:             uuid.New(),
+				OrganizationID: &job.OrganizationID,
+				Action:         auditDomain.ActionMaintenancePruneFail,
+				EntityType:     auditDomain.EntityTypeBackupRepository,
+				EntityID:       &job.RepositoryID,
+				UserID:         nil,
+				Metadata:       metaBytes,
+				CreatedAt:      w.nowFunc(),
+			})
+		}
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, err.Error(), isRetryable(err))
 		return
 	}
 
@@ -363,7 +464,28 @@ func (w *RepositoryMaintenanceWorker) handlePrune(
 		"operation": "restic_prune",
 		"status":    "success",
 	})
-	_ = w.maintRepo.CompleteMaintenanceJob(ctx, job.ID, run.ID, logsSummary)
+	_ = w.maintRepo.CompleteMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, logsSummary)
+
+	if w.auditRecorder != nil {
+		metaObj := map[string]any{
+			"repo_id": job.RepositoryID.String(),
+			"job_id":  job.ID.String(),
+			"run_id":  run.ID.String(),
+			"status":  "success",
+		}
+		metaBytes, _ := json.Marshal(metaObj)
+		_ = w.auditRecorder.Record(ctx, &auditDomain.AuditLog{
+			ID:             uuid.New(),
+			OrganizationID: &job.OrganizationID,
+			Action:         auditDomain.ActionMaintenancePrune,
+			EntityType:     auditDomain.EntityTypeBackupRepository,
+			EntityID:       &job.RepositoryID,
+			UserID:         nil,
+			Metadata:       metaBytes,
+			CreatedAt:      w.nowFunc(),
+		})
+	}
+
 	w.logger.Info("restic prune completed successfully", slog.String("job_id", job.ID.String()))
 }
 
@@ -376,7 +498,13 @@ func (w *RepositoryMaintenanceWorker) handleDeepCheck(
 ) {
 	if job.SubsetIndex == nil || job.SubsetTotal == nil {
 		errMsg := "restic_deep_check missing subset_index or subset_total"
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, errMsg, false)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
+		return
+	}
+
+	if *job.SubsetTotal > domain.MaxMaintenanceDeepCheckSubsets || *job.SubsetIndex < 1 || *job.SubsetIndex > *job.SubsetTotal {
+		errMsg := fmt.Sprintf("invalid subset parameters: index %d, total %d", *job.SubsetIndex, *job.SubsetTotal)
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, errMsg, false)
 		return
 	}
 
@@ -388,7 +516,28 @@ func (w *RepositoryMaintenanceWorker) handleDeepCheck(
 			slog.Int("subset_total", *job.SubsetTotal),
 			slog.String("error", err.Error()),
 		)
-		_ = w.maintRepo.FailMaintenanceJob(ctx, job.ID, run.ID, err.Error(), isRetryable(err))
+		if w.auditRecorder != nil {
+			metaObj := map[string]any{
+				"repo_id":      job.RepositoryID.String(),
+				"job_id":       job.ID.String(),
+				"run_id":       run.ID.String(),
+				"subset_index": *job.SubsetIndex,
+				"subset_total": *job.SubsetTotal,
+				"error":        err.Error(),
+			}
+			metaBytes, _ := json.Marshal(metaObj)
+			_ = w.auditRecorder.Record(ctx, &auditDomain.AuditLog{
+				ID:             uuid.New(),
+				OrganizationID: &job.OrganizationID,
+				Action:         auditDomain.ActionMaintenanceCheckFail,
+				EntityType:     auditDomain.EntityTypeBackupRepository,
+				EntityID:       &job.RepositoryID,
+				UserID:         nil,
+				Metadata:       metaBytes,
+				CreatedAt:      w.nowFunc(),
+			})
+		}
+		_ = w.maintRepo.FailMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, err.Error(), isRetryable(err))
 		return
 	}
 
@@ -398,7 +547,30 @@ func (w *RepositoryMaintenanceWorker) handleDeepCheck(
 		"subset_total": *job.SubsetTotal,
 		"status":       "success",
 	})
-	_ = w.maintRepo.CompleteMaintenanceJob(ctx, job.ID, run.ID, logsSummary)
+	_ = w.maintRepo.CompleteMaintenanceJob(ctx, job.OrganizationID, job.ID, run.ID, logsSummary)
+
+	if w.auditRecorder != nil {
+		metaObj := map[string]any{
+			"repo_id":      job.RepositoryID.String(),
+			"job_id":       job.ID.String(),
+			"run_id":       run.ID.String(),
+			"subset_index": *job.SubsetIndex,
+			"subset_total": *job.SubsetTotal,
+			"status":       "success",
+		}
+		metaBytes, _ := json.Marshal(metaObj)
+		_ = w.auditRecorder.Record(ctx, &auditDomain.AuditLog{
+			ID:             uuid.New(),
+			OrganizationID: &job.OrganizationID,
+			Action:         auditDomain.ActionMaintenanceCheck,
+			EntityType:     auditDomain.EntityTypeBackupRepository,
+			EntityID:       &job.RepositoryID,
+			UserID:         nil,
+			Metadata:       metaBytes,
+			CreatedAt:      w.nowFunc(),
+		})
+	}
+
 	w.logger.Info("restic deep check completed successfully",
 		slog.String("job_id", job.ID.String()),
 		slog.Int("subset_index", *job.SubsetIndex),
@@ -410,13 +582,18 @@ func isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, restic.ErrRepositoryBusy) {
+		return true
+	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "deadline exceeded") ||
 		strings.Contains(msg, "timeout") ||
 		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "temporary") ||
 		strings.Contains(msg, "reset by peer") ||
-		strings.Contains(msg, "busy") {
+		strings.Contains(msg, "busy") ||
+		strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "network is unreachable") {
 		return true
 	}
 	return false

@@ -33,6 +33,7 @@ type CommandRunner interface {
 	DumpSample(ctx context.Context, target RepositoryTarget, password []byte, snapshotID, internalFilename string, maxBytes int) ([]byte, error)
 	DumpStream(ctx context.Context, target RepositoryTarget, password []byte, snapshotID, internalFilename string) (io.ReadCloser, error)
 	ForgetSnapshot(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) error
+	VerifySnapshotAbsent(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) error
 	Prune(ctx context.Context, target RepositoryTarget, password []byte) error
 	CheckSubset(ctx context.Context, target RepositoryTarget, password []byte, subsetIndex, subsetTotal int) error
 }
@@ -158,7 +159,8 @@ func (r *ResticRunner) ValidateVersion(ctx context.Context) error {
 }
 
 var (
-	ErrSnapshotNotFound = errors.New("snapshot not found in repository")
+	ErrSnapshotNotFound    = errors.New("snapshot not found in repository")
+	ErrSnapshotStillExists = errors.New("snapshot still exists in repository")
 )
 
 // GetSnapshot retrieves the metadata for a specific snapshot by its canonical full 64-hex ID.
@@ -453,6 +455,35 @@ func (r *ResticRunner) ForgetSnapshot(ctx context.Context, target RepositoryTarg
 	return nil
 }
 
+// VerifySnapshotAbsent checks that the exact canonical snapshot no longer exists in the repository.
+// It returns nil if the snapshot is verified to be absent (ErrSnapshotNotFound).
+// If the snapshot still exists, it returns ErrSnapshotStillExists.
+// If an infrastructure, authentication, or network error occurs, it returns that error wrapped without claiming absence.
+func (r *ResticRunner) VerifySnapshotAbsent(ctx context.Context, target RepositoryTarget, password []byte, snapshotID string) error {
+	if target == nil {
+		return errors.New("repository target is required")
+	}
+	if len(password) == 0 {
+		return errors.New("repository password cannot be empty")
+	}
+	cleanID := strings.TrimSpace(snapshotID)
+	if !domain.IsValidCanonicalResticSnapshotID(cleanID) {
+		return errors.New("invalid snapshot ID: must be exactly 64 lowercase hexadecimal characters")
+	}
+
+	snap, err := r.GetSnapshot(ctx, target, password, cleanID)
+	if err != nil {
+		if errors.Is(err, ErrSnapshotNotFound) {
+			return nil // Verified absent!
+		}
+		return fmt.Errorf("failed verifying snapshot absence: %w", err)
+	}
+	if snap != nil {
+		return fmt.Errorf("%w: snapshot %s is still present in repository", ErrSnapshotStillExists, cleanID)
+	}
+	return nil
+}
+
 // Prune removes unreferenced data blobs from the repository.
 func (r *ResticRunner) Prune(ctx context.Context, target RepositoryTarget, password []byte) error {
 	if target == nil {
@@ -480,6 +511,9 @@ func (r *ResticRunner) CheckSubset(ctx context.Context, target RepositoryTarget,
 	}
 	if subsetIndex < 1 {
 		return fmt.Errorf("subsetIndex must be >= 1, got %d", subsetIndex)
+	}
+	if subsetTotal > domain.MaxMaintenanceDeepCheckSubsets {
+		return fmt.Errorf("subsetTotal exceeds maximum %d: got %d", domain.MaxMaintenanceDeepCheckSubsets, subsetTotal)
 	}
 	if subsetTotal < subsetIndex {
 		return fmt.Errorf("subsetTotal must be >= subsetIndex, got total %d, index %d", subsetTotal, subsetIndex)

@@ -28,13 +28,25 @@ const (
 	MaintenanceJobCancelled MaintenanceJobStatus = "cancelled"
 )
 
+// Operational defaults and bounds for deep checks
+const (
+	DefaultMaintenanceDeepCheckSubsets = 4
+	MaxMaintenanceDeepCheckSubsets     = 100
+)
+
+// MaintenancePhase markers
+const (
+	MaintenancePhaseForgetExecuted = "forget_executed"
+)
+
 // MaintenanceRunStatus defines the status of an execution attempt for a maintenance job.
 type MaintenanceRunStatus string
 
 const (
 	MaintenanceRunPending   MaintenanceRunStatus = "pending"
 	MaintenanceRunRunning   MaintenanceRunStatus = "running"
-	MaintenanceRunSuccess   MaintenanceRunStatus = "success"
+	MaintenanceRunCompleted MaintenanceRunStatus = "completed"
+	MaintenanceRunSuccess   MaintenanceRunStatus = "completed" // Alias for backwards compatibility
 	MaintenanceRunFailed    MaintenanceRunStatus = "failed"
 	MaintenanceRunCancelled MaintenanceRunStatus = "cancelled"
 )
@@ -50,6 +62,11 @@ type MaintenanceJob struct {
 	SnapshotID     string
 	SubsetIndex    *int
 	SubsetTotal    *int
+	AttemptCount   int
+	MaxAttempts    int
+	NextAttemptAt  time.Time
+	Phase          *string
+	CompletedAt    *time.Time
 	Metadata       []byte
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
@@ -70,6 +87,14 @@ type MaintenanceRun struct {
 	LogsSummary    []byte
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
+}
+
+// RecoveredMaintenanceRunInfo contains metadata for an interrupted or stale maintenance run recovered by the system.
+type RecoveredMaintenanceRunInfo struct {
+	ID             uuid.UUID
+	OrganizationID uuid.UUID
+	JobID          uuid.UUID
+	AttemptNumber  int
 }
 
 // EnqueueMaintenanceJobParams contains parameters for queuing a maintenance job.
@@ -128,6 +153,9 @@ func (p EnqueueMaintenanceJobParams) Validate() error {
 		}
 		if *p.SubsetIndex < 1 {
 			return fmt.Errorf("subset_index must be >= 1")
+		}
+		if *p.SubsetTotal > MaxMaintenanceDeepCheckSubsets {
+			return fmt.Errorf("subset_total cannot exceed %d", MaxMaintenanceDeepCheckSubsets)
 		}
 		if *p.SubsetTotal < *p.SubsetIndex {
 			return fmt.Errorf("subset_total must be >= subset_index")

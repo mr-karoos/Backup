@@ -146,6 +146,17 @@ func TestMigrations_StepA5_Integration(t *testing.T) {
 	}
 	t.Log("Verified operation_type check constraint")
 
+	// Subset total bound check (> 100 must be rejected)
+	jobIDInvalidSubset := uuid.New()
+	_, err = connPool.Exec(ctx, `
+		INSERT INTO repository_maintenance_jobs (id, organization_id, repository_id, operation_type, status, subset_index, subset_total)
+		VALUES ($1, $2, $3, 'restic_deep_check', 'pending', 1, 101);
+	`, jobIDInvalidSubset, orgID, repoID)
+	if err == nil {
+		t.Fatalf("expected check constraint violation on subset_total > 100, got nil")
+	}
+	t.Log("Verified subset_total <= 100 check constraint")
+
 	// Insert run
 	runID1 := uuid.New()
 	_, err = connPool.Exec(ctx, `
@@ -155,6 +166,26 @@ func TestMigrations_StepA5_Integration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed inserting maintenance run: %v", err)
 	}
+
+	// Cross-tenant Run FK violation: run with other org ID pointing to jobID1 must be rejected by composite FK
+	otherOrgID := uuid.New()
+	slugOther := fmt.Sprintf("org-other-%s", otherOrgID.String()[:8])
+	if _, err := connPool.Exec(ctx, `INSERT INTO organizations (id, name, slug, status, metadata, created_at, updated_at) VALUES ($1, 'Other Org', $2, 'active', '{}'::jsonb, NOW(), NOW());`, otherOrgID, slugOther); err != nil {
+		t.Fatalf("failed seeding other organization: %v", err)
+	}
+	defer func() {
+		_, _ = connPool.Exec(context.Background(), "DELETE FROM organizations WHERE id = $1", otherOrgID)
+	}()
+
+	runIDCross := uuid.New()
+	_, err = connPool.Exec(ctx, `
+		INSERT INTO repository_maintenance_runs (id, organization_id, job_id, attempt_number, status, started_at)
+		VALUES ($1, $2, $3, 1, 'running', NOW());
+	`, runIDCross, otherOrgID, jobID1)
+	if err == nil {
+		t.Fatalf("expected composite foreign key fk_repo_maint_runs_org_job to reject cross-tenant run insertion, but got nil")
+	}
+	t.Log("Verified composite tenant foreign key fk_repo_maint_runs_org_job enforcement")
 
 	// 5. Test Rollback Guard: down migration must abort while jobs/runs exist
 	err = m.Migrate(9)
