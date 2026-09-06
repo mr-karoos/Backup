@@ -74,16 +74,35 @@ export const credentialCreateSchema = z
 
 export type CredentialCreateFormValues = z.infer<typeof credentialCreateSchema>;
 
-export const credentialEditSchema = z.object({
-  name: z.string().trim().min(1, 'Credential name is required').max(255),
-  password: z.string().optional(),
-  private_key: z.string().optional(),
-  passphrase: z.string().optional(),
-  api_token: z.string().optional(),
-  access_key_id: z.string().optional(),
-  secret_access_key: z.string().optional(),
-  session_token: z.string().optional(),
-});
+export const credentialEditSchema = z
+  .object({
+    name: z.string().trim().min(1, 'Credential name is required').max(255),
+    password: z.string().optional(),
+    private_key: z.string().optional(),
+    passphrase: z.string().optional(),
+    api_token: z.string().optional(),
+    access_key_id: z.string().optional(),
+    secret_access_key: z.string().optional(),
+    session_token: z.string().optional(),
+  })
+  .superRefine((val, ctx) => {
+    const hasKeyId = Boolean(val.access_key_id && val.access_key_id.trim());
+    const hasSecretKey = Boolean(val.secret_access_key && val.secret_access_key.trim());
+
+    if (hasKeyId && !hasSecretKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Secret Access Key is required when updating Access Key ID',
+        path: ['secret_access_key'],
+      });
+    } else if (!hasKeyId && hasSecretKey) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Access Key ID is required when updating Secret Access Key',
+        path: ['access_key_id'],
+      });
+    }
+  });
 
 export type CredentialEditFormValues = z.infer<typeof credentialEditSchema>;
 

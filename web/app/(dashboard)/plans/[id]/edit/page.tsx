@@ -111,8 +111,8 @@ function BackupPlanEditForm({
     }
 
     try {
-      bypassGuard();
       await updatePlan.mutateAsync({ id, data: payload });
+      bypassGuard();
       router.push(`/plans/${id}`);
     } catch {
       // Handled by onError toast

@@ -149,13 +149,14 @@ export default function NewResourcePage() {
     };
 
     try {
-      bypassGuard();
       await createResource.mutateAsync(payload);
+      bypassGuard();
       router.push('/resources');
     } catch {
       // Handled by onError toast
     }
   };
+
 
   return (
     <div className="max-w-2xl space-y-6">

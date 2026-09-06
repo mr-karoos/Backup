@@ -279,8 +279,8 @@ export default function NewBackupPlanPage() {
     }
 
     try {
-      bypassGuard();
       await createPlan.mutateAsync(payload);
+      bypassGuard();
       router.push('/plans');
     } catch {
       // Handled by onError toast

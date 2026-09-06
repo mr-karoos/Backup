@@ -1,13 +1,22 @@
 'use client';
 
+import * as React from 'react';
 import { useState } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
 import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
 import { usePermissions } from '@/lib/auth/permissions';
 import { useDeleteCredential, useUpdateCredential } from '@/lib/api/mutations';
+import {
+  credentialEditSchema,
+  type CredentialEditFormValues,
+} from '@/lib/forms/schemas';
+import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
+import { useUnsavedChanges } from '@/lib/hooks/use-unsaved-changes';
 import { type CredentialListItemResponse, type UpdateCredentialRequest } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -36,7 +45,288 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { formatDate } from '@/lib/format/formatters';
 import { KeyRound, Shield, Eye, Lock, Plus, Pencil, Trash2 } from 'lucide-react';
 
-import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
+interface EditCredentialDialogProps {
+  cred: CredentialListItemResponse | null;
+  open: boolean;
+  onClose: () => void;
+}
+
+export function EditCredentialDialog({ cred, open, onClose }: EditCredentialDialogProps) {
+  const updateCred = useUpdateCredential();
+
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors, isDirty, isSubmitting },
+  } = useForm<CredentialEditFormValues>({
+    resolver: zodResolver(credentialEditSchema),
+    defaultValues: {
+      name: '',
+      password: '',
+      private_key: '',
+      passphrase: '',
+      api_token: '',
+      access_key_id: '',
+      secret_access_key: '',
+      session_token: '',
+    },
+  });
+
+  const { bypassGuard } = useUnsavedChanges(open && isDirty);
+
+  React.useEffect(() => {
+    if (open && cred) {
+      reset({
+        name: cred.name,
+        password: '',
+        private_key: '',
+        passphrase: '',
+        api_token: '',
+        access_key_id: '',
+        secret_access_key: '',
+        session_token: '',
+      });
+    }
+  }, [open, cred, reset]);
+
+  const clearSecretsAndReset = React.useCallback(() => {
+    reset({
+      name: '',
+      password: '',
+      private_key: '',
+      passphrase: '',
+      api_token: '',
+      access_key_id: '',
+      secret_access_key: '',
+      session_token: '',
+    });
+  }, [reset]);
+
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      clearSecretsAndReset();
+      onClose();
+    },
+  });
+
+  const handleClose = React.useCallback(() => {
+    if (isDirty) {
+      const confirmed =
+        typeof window !== 'undefined'
+          ? window.confirm('You have unsaved changes. Are you sure you want to discard them?')
+          : true;
+      if (!confirmed) return;
+    }
+    clearSecretsAndReset();
+    onClose();
+  }, [isDirty, clearSecretsAndReset, onClose]);
+
+  const onSubmit = async (values: CredentialEditFormValues) => {
+    if (!cred) return;
+
+    const payload: UpdateCredentialRequest = {
+      name: values.name.trim(),
+    };
+
+    if ((cred.type === 'ssh_password' || cred.type === 'cpanel_password') && values.password) {
+      payload.secret = values.password;
+    } else if (cred.type === 'ssh_private_key' && values.private_key?.trim()) {
+      payload.secret = values.private_key.trim();
+      if (values.passphrase) {
+        payload.passphrase = values.passphrase;
+      }
+    } else if (cred.type === 'cpanel_api_token' && values.api_token?.trim()) {
+      payload.secret = values.api_token.trim();
+    } else if (cred.type === 's3_credentials') {
+      if (values.access_key_id?.trim() && values.secret_access_key?.trim()) {
+        payload.access_key_id = values.access_key_id.trim();
+        payload.secret_access_key = values.secret_access_key.trim();
+      }
+      if (values.session_token?.trim()) {
+        payload.session_token = values.session_token.trim();
+      }
+    }
+
+    try {
+      await updateCred.mutateWithSecret({ id: cred.id, data: payload });
+      bypassGuard();
+      clearSecretsAndReset();
+      onClose();
+    } catch {
+      // Form remains dirty and secrets stay in component memory for retry
+    }
+  };
+
+  if (!cred) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Pencil className="h-5 w-5 text-primary" />
+            Edit Credential
+          </DialogTitle>
+          <DialogDescription>
+            Update credential name or replace secret material.
+          </DialogDescription>
+        </DialogHeader>
+
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 py-2" noValidate>
+          <FormField
+            label="Credential Name"
+            htmlFor="edit-cred-name"
+            required
+            error={errors.name?.message}
+          >
+            <input
+              id="edit-cred-name"
+              type="text"
+              {...register('name')}
+              aria-invalid={errors.name ? 'true' : 'false'}
+              aria-describedby={errors.name ? 'edit-cred-name-error' : undefined}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </FormField>
+
+          {/* Secret Replacement (Write-Only) */}
+          <div className="pt-2 border-t space-y-3">
+            <p className="text-xs font-semibold text-muted-foreground">
+              Replace Secret (Leave blank to keep existing secret)
+            </p>
+
+            {(cred.type === 'ssh_password' || cred.type === 'cpanel_password') && (
+              <FormField
+                label="New Password"
+                htmlFor="edit-password"
+                error={errors.password?.message}
+              >
+                <SecretInput
+                  id="edit-password"
+                  {...register('password')}
+                  error={!!errors.password}
+                  aria-invalid={errors.password ? 'true' : 'false'}
+                  placeholder="Enter new password"
+                />
+              </FormField>
+            )}
+
+            {cred.type === 'ssh_private_key' && (
+              <>
+                <FormField
+                  label="New Private Key (PEM)"
+                  htmlFor="edit-pem"
+                  error={errors.private_key?.message}
+                >
+                  <textarea
+                    id="edit-pem"
+                    rows={4}
+                    {...register('private_key')}
+                    aria-invalid={errors.private_key ? 'true' : 'false'}
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </FormField>
+                <FormField
+                  label="New Passphrase (Optional)"
+                  htmlFor="edit-passphrase"
+                  error={errors.passphrase?.message}
+                >
+                  <SecretInput
+                    id="edit-passphrase"
+                    {...register('passphrase')}
+                    error={!!errors.passphrase}
+                    aria-invalid={errors.passphrase ? 'true' : 'false'}
+                    placeholder="New passphrase"
+                  />
+                </FormField>
+              </>
+            )}
+
+            {cred.type === 'cpanel_api_token' && (
+              <FormField
+                label="New API Token"
+                htmlFor="edit-token"
+                error={errors.api_token?.message}
+              >
+                <SecretInput
+                  id="edit-token"
+                  {...register('api_token')}
+                  error={!!errors.api_token}
+                  aria-invalid={errors.api_token ? 'true' : 'false'}
+                  placeholder="Enter new API token"
+                />
+              </FormField>
+            )}
+
+            {cred.type === 's3_credentials' && (
+              <>
+                <FormField
+                  label="New Access Key ID"
+                  htmlFor="edit-access-key"
+                  error={errors.access_key_id?.message}
+                >
+                  <input
+                    id="edit-access-key"
+                    type="text"
+                    {...register('access_key_id')}
+                    aria-invalid={errors.access_key_id ? 'true' : 'false'}
+                    placeholder="AKIA..."
+                    className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  />
+                </FormField>
+                <FormField
+                  label="New Secret Access Key"
+                  htmlFor="edit-secret-key"
+                  error={errors.secret_access_key?.message}
+                >
+                  <SecretInput
+                    id="edit-secret-key"
+                    {...register('secret_access_key')}
+                    error={!!errors.secret_access_key}
+                    aria-invalid={errors.secret_access_key ? 'true' : 'false'}
+                    placeholder="New Secret Key"
+                  />
+                </FormField>
+                <FormField
+                  label="New Session Token (Optional)"
+                  htmlFor="edit-session-token"
+                  error={errors.session_token?.message}
+                >
+                  <SecretInput
+                    id="edit-session-token"
+                    {...register('session_token')}
+                    error={!!errors.session_token}
+                    aria-invalid={errors.session_token ? 'true' : 'false'}
+                    placeholder="New session token (optional)"
+                  />
+                </FormField>
+              </>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleClose}
+              disabled={isSubmitting || updateCred.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={isSubmitting || updateCred.isPending}
+            >
+              {isSubmitting || updateCred.isPending ? 'Saving...' : 'Save Changes'}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 export default function CredentialsPage() {
   const { activeOrgId } = useAuth();
@@ -45,32 +335,10 @@ export default function CredentialsPage() {
   const [editingCred, setEditingCred] = useState<CredentialListItemResponse | null>(null);
   const [deletingCred, setDeletingCred] = useState<CredentialListItemResponse | null>(null);
 
-  // Edit form state
-  const [editName, setEditName] = useState('');
-  const [editPassword, setEditPassword] = useState('');
-  const [editPrivateKey, setEditPrivateKey] = useState('');
-  const [editPassphrase, setEditPassphrase] = useState('');
-  const [editApiToken, setEditApiToken] = useState('');
-  const [editAccessKeyId, setEditAccessKeyId] = useState('');
-  const [editSecretAccessKey, setEditSecretAccessKey] = useState('');
-  const [editSessionToken, setEditSessionToken] = useState('');
-
   const deleteCred = useDeleteCredential();
-  const updateCred = useUpdateCredential();
-
-  const clearSecretState = () => {
-    setEditPassword('');
-    setEditPrivateKey('');
-    setEditPassphrase('');
-    setEditApiToken('');
-    setEditAccessKeyId('');
-    setEditSecretAccessKey('');
-    setEditSessionToken('');
-  };
 
   useTenantFormGuard({
     onTenantChanged: () => {
-      clearSecretState();
       setEditingCred(null);
       setDeletingCred(null);
       setSelectedCred(null);
@@ -104,53 +372,6 @@ export default function CredentialsPage() {
   }
 
   const credentials = data || [];
-
-  const handleOpenEdit = (cred: CredentialListItemResponse) => {
-    setEditingCred(cred);
-    setEditName(cred.name);
-    clearSecretState();
-  };
-
-  const handleCloseEdit = () => {
-    clearSecretState();
-    setEditingCred(null);
-  };
-
-  const handleUpdate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingCred) return;
-
-    const payload: UpdateCredentialRequest = {
-      name: editName.trim() || undefined,
-    };
-
-    if (editingCred.type === 'ssh_password' && editPassword) {
-      payload.secret = editPassword;
-    } else if (editingCred.type === 'ssh_private_key' && editPrivateKey) {
-      payload.secret = editPrivateKey.trim();
-      if (editPassphrase) {
-        payload.passphrase = editPassphrase;
-      }
-    } else if (editingCred.type === 'cpanel_api_token' && editApiToken) {
-      payload.secret = editApiToken;
-    } else if (editingCred.type === 'cpanel_password' && editPassword) {
-      payload.secret = editPassword;
-    } else if (editingCred.type === 's3_credentials') {
-      if (editAccessKeyId && editSecretAccessKey) {
-        payload.access_key_id = editAccessKeyId.trim();
-        payload.secret_access_key = editSecretAccessKey.trim();
-      }
-      if (editSessionToken) {
-        payload.session_token = editSessionToken.trim();
-      }
-    }
-
-    const credId = editingCred.id;
-    // Wipe sensitive state in component memory BEFORE closing dialog
-    clearSecretState();
-    setEditingCred(null);
-    await updateCred.mutateWithSecret({ id: credId, data: payload });
-  };
 
   const handleDelete = async () => {
     if (!deletingCred) return;
@@ -261,7 +482,7 @@ export default function CredentialsPage() {
                                 <Button
                                   variant="ghost"
                                   size="icon"
-                                  onClick={() => handleOpenEdit(cred)}
+                                  onClick={() => setEditingCred(cred)}
                                   className="h-8 w-8 text-muted-foreground hover:text-foreground"
                                   aria-label={`Edit ${cred.name}`}
                                 >
@@ -314,7 +535,7 @@ export default function CredentialsPage() {
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => handleOpenEdit(cred)}
+                          onClick={() => setEditingCred(cred)}
                           className="h-7 text-xs"
                         >
                           Edit
@@ -397,132 +618,11 @@ export default function CredentialsPage() {
       </Dialog>
 
       {/* Edit Credential Dialog */}
-      <Dialog open={!!editingCred} onOpenChange={(open) => !open && handleCloseEdit()}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Pencil className="h-5 w-5 text-primary" />
-              Edit Credential
-            </DialogTitle>
-            <DialogDescription>
-              Update credential name or replace secret material.
-            </DialogDescription>
-          </DialogHeader>
-
-          {editingCred && (
-            <form onSubmit={handleUpdate} className="space-y-4 py-2">
-              <FormField label="Credential Name" htmlFor="edit-cred-name" required>
-                <input
-                  id="edit-cred-name"
-                  type="text"
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                />
-              </FormField>
-
-              {/* Secret Replacement (Write-Only) */}
-              <div className="pt-2 border-t space-y-3">
-                <p className="text-xs font-semibold text-muted-foreground">
-                  Replace Secret (Leave blank to keep existing secret)
-                </p>
-
-                {(editingCred.type === 'ssh_password' || editingCred.type === 'cpanel_password') && (
-                  <FormField label="New Password" htmlFor="edit-password">
-                    <SecretInput
-                      id="edit-password"
-                      value={editPassword}
-                      onChange={(e) => setEditPassword(e.target.value)}
-                      placeholder="Enter new password"
-                    />
-                  </FormField>
-                )}
-
-                {editingCred.type === 'ssh_private_key' && (
-                  <>
-                    <FormField label="New Private Key (PEM)" htmlFor="edit-pem">
-                      <textarea
-                        id="edit-pem"
-                        rows={4}
-                        value={editPrivateKey}
-                        onChange={(e) => setEditPrivateKey(e.target.value)}
-                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                        className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </FormField>
-                    <FormField label="New Passphrase (Optional)" htmlFor="edit-passphrase">
-                      <SecretInput
-                        id="edit-passphrase"
-                        value={editPassphrase}
-                        onChange={(e) => setEditPassphrase(e.target.value)}
-                        placeholder="New passphrase"
-                      />
-                    </FormField>
-                  </>
-                )}
-
-                {editingCred.type === 'cpanel_api_token' && (
-                  <FormField label="New API Token" htmlFor="edit-token">
-                    <SecretInput
-                      id="edit-token"
-                      value={editApiToken}
-                      onChange={(e) => setEditApiToken(e.target.value)}
-                      placeholder="Enter new API token"
-                    />
-                  </FormField>
-                )}
-
-                {editingCred.type === 's3_credentials' && (
-                  <>
-                    <FormField label="New Access Key ID" htmlFor="edit-access-key">
-                      <input
-                        id="edit-access-key"
-                        type="text"
-                        value={editAccessKeyId}
-                        onChange={(e) => setEditAccessKeyId(e.target.value)}
-                        placeholder="AKIA..."
-                        className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-                      />
-                    </FormField>
-                    <FormField label="New Secret Access Key" htmlFor="edit-secret-key">
-                      <SecretInput
-                        id="edit-secret-key"
-                        value={editSecretAccessKey}
-                        onChange={(e) => setEditSecretAccessKey(e.target.value)}
-                        placeholder="New Secret Key"
-                      />
-                    </FormField>
-                    <FormField label="New Session Token (Optional)" htmlFor="edit-session-token">
-                      <SecretInput
-                        id="edit-session-token"
-                        value={editSessionToken}
-                        onChange={(e) => setEditSessionToken(e.target.value)}
-                        placeholder="New session token (optional)"
-                      />
-                    </FormField>
-                  </>
-                )}
-              </div>
-
-              <div className="flex justify-end gap-3 pt-4 border-t">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={handleCloseEdit}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  type="submit"
-                  disabled={updateCred.isPending}
-                >
-                  {updateCred.isPending ? 'Saving...' : 'Save Changes'}
-                </Button>
-              </div>
-            </form>
-          )}
-        </DialogContent>
-      </Dialog>
+      <EditCredentialDialog
+        cred={editingCred}
+        open={!!editingCred}
+        onClose={() => setEditingCred(null)}
+      />
 
       {/* Delete Confirmation Dialog */}
       <ConfirmDialog

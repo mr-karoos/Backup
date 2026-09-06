@@ -129,14 +129,15 @@ export default function NewCredentialPage() {
     }
 
     try {
-      bypassGuard();
-      clearSecrets();
       await createCredential.mutateWithSecret(payload);
+      clearSecrets();
+      bypassGuard();
       router.push('/credentials');
     } catch {
-      // toast shown
+      // Handled by onError toast; form remains dirty and protected
     }
   };
+
 
   return (
     <div className="max-w-2xl space-y-6">

@@ -111,8 +111,8 @@ export default function NewStorageTargetPage() {
     };
 
     try {
-      bypassGuard();
       await createTarget.mutateAsync(payload);
+      bypassGuard();
       router.push('/storage');
     } catch {
       // Handled by onError toast

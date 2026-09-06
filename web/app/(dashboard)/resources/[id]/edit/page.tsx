@@ -109,8 +109,8 @@ function ResourceEditForm({
     };
 
     try {
-      bypassGuard();
       await updateResource.mutateAsync({ id, data: payload });
+      bypassGuard();
       router.push(`/resources/${id}`);
     } catch {
       // Handled by onError toast
