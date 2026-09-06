@@ -214,32 +214,64 @@ describe('Frontend F2B: Runs Operational Filtering & Usability', () => {
   });
 
   describe('D. Invalid Date Range Validation (from > to)', () => {
-    it('blocks request and shows inline validation error when from date is after to date', async () => {
+    it('blocks request, prevents polling, and shows inline validation error when from date is after to date', async () => {
       const getSpy = vi.spyOn(apiClient, 'get').mockResolvedValue(mockRuns);
 
       renderPage();
 
+      // 1 & 2. Allow initial request to settle
       await waitFor(() => {
         expect(getSpy).toHaveBeenCalledWith('/backup-runs');
       });
+      expect(await screen.findByText('Execution Records')).toBeInTheDocument();
 
+      // 3 & 4. Enter a valid From Date and allow that valid filtered request to settle
       const fromInput = screen.getByLabelText('Filter runs from date');
       const toInput = screen.getByLabelText('Filter runs to date');
 
-      // Set from > to
-      fireEvent.change(fromInput, { target: { value: '2026-09-10' } });
-      fireEvent.change(toInput, { target: { value: '2026-09-05' } });
+      fireEvent.change(fromInput, { target: { value: '2026-09-01' } });
+      await waitFor(() => {
+        expect(getSpy).toHaveBeenCalledWith('/backup-runs?from_date=2026-09-01T00%3A00%3A00Z');
+      });
 
-      // Inline error must be displayed
+      // 5. Record current apiClient.get call count
+      const callCountBeforeInvalid = getSpy.mock.calls.length;
+
+      // 6. Enter a To Date that makes from > to (e.g. from=2026-09-01, to=2026-08-20)
+      fireEvent.change(toInput, { target: { value: '2026-08-20' } });
+
+      // 7. Verify alert is displayed
       expect(await screen.findByRole('alert')).toHaveTextContent(
         'From date cannot be after To date.'
       );
 
-      // Verify that invalid date range was NOT dispatched to the backend
-      const callsWithInvalidRange = getSpy.mock.calls.filter((call) =>
-        Boolean(call && call[0] && call[0].includes('from_date=2026-09-10') && call[0].includes('to_date=2026-09-05'))
-      );
-      expect(callsWithInvalidRange).toHaveLength(0);
+      // 8. Verify apiClient.get call count does NOT increase at all
+      expect(getSpy.mock.calls.length).toBe(callCountBeforeInvalid);
+
+      // 9. Verify polling / request does not occur from the invalid query state
+      const query = queryClient
+        .getQueryCache()
+        .findAll()
+        .find((q) => q.queryKey[0] === 'org' && q.queryKey[1] === 'org-1');
+      expect(query).toBeDefined();
+      const observer = (query as any)?.observers?.[0];
+      expect(observer?.options?.enabled).toBe(false);
+      if (typeof observer?.options?.refetchInterval === 'function') {
+        expect(observer.options.refetchInterval(query!)).toBe(false);
+      }
+
+      // 10. Correct the To Date to a valid date (e.g. 2026-09-05)
+      fireEvent.change(toInput, { target: { value: '2026-09-05' } });
+
+      // 11. Verify the valid RFC3339 filtered request resumes
+      await waitFor(() => {
+        expect(getSpy).toHaveBeenCalledWith(
+          expect.stringContaining('from_date=2026-09-01T00%3A00%3A00Z')
+        );
+      });
+      const lastCall = getSpy.mock.calls[getSpy.mock.calls.length - 1];
+      expect(lastCall![0]).toContain('to_date=2026-09-05T23%3A59%3A59Z');
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     });
   });
 
@@ -290,33 +322,98 @@ describe('Frontend F2B: Runs Operational Filtering & Usability', () => {
       expect(org1Key).not.toEqual(org2Key);
       expect(org1Key).not.toEqual(org1Unfiltered);
     });
+
+    it('maintains strict cache and request isolation across tenants when filtered', async () => {
+      const org1Run: BackupRunResponse = {
+        ...mockRuns[0]!,
+        id: '11111111-org1-test-000000000001',
+        status: 'failed',
+      };
+      const org2Run: BackupRunResponse = {
+        ...mockRuns[1]!,
+        id: '22222222-org2-test-000000000002',
+        status: 'failed',
+      };
+
+      const getSpy = vi.spyOn(apiClient, 'get').mockImplementation(async () => {
+        return currentOrgId === 'org-1' ? [org1Run] : [org2Run];
+      });
+
+      // 1. Render under org-1 with filter
+      const { unmount } = renderPage();
+
+      const statusSelect = screen.getByLabelText('Filter runs by status');
+      fireEvent.change(statusSelect, { target: { value: 'failed' } });
+
+      await waitFor(() => {
+        expect(getSpy).toHaveBeenCalledWith('/backup-runs?status=failed');
+      });
+      expect(await screen.findByText('11111111...')).toBeInTheDocument();
+
+      // Verify org-1 cache entry exists under org-1 key
+      const org1Cached = queryClient.getQueryData(['org', 'org-1', 'runs', { status: 'failed' }]);
+      expect(org1Cached).toEqual([org1Run]);
+
+      // 2. Unmount org-1 view and switch active tenant to org-2
+      unmount();
+      currentOrgId = 'org-2';
+
+      // 3. Render under org-2 with filter
+      renderPage();
+
+      const statusSelectOrg2 = screen.getByLabelText('Filter runs by status');
+      fireEvent.change(statusSelectOrg2, { target: { value: 'failed' } });
+
+      await waitFor(() => {
+        expect(screen.getByText('22222222...')).toBeInTheDocument();
+      });
+
+      // Verify org-2 cache entry is isolated and distinct from org-1
+      const org2Cached = queryClient.getQueryData(['org', 'org-2', 'runs', { status: 'failed' }]);
+      expect(org2Cached).toEqual([org2Run]);
+      expect(org1Cached).not.toEqual(org2Cached);
+    });
   });
 
   describe('G. Polling Semantics', () => {
-    it('determines polling interval is 3000ms when active runs exist, and false when none', async () => {
+    it('configures 3000ms polling when active runs exist, disables polling when completed only, and suspends polling on invalid date range', async () => {
       vi.spyOn(apiClient, 'get').mockResolvedValue(mockRuns);
 
       renderPage();
 
       await screen.findByText('Execution Records');
 
-      // Check query state in TanStack queryClient
+      // 1. Check query state in TanStack queryClient with active runs (mockRuns has 'running')
       const query = queryClient
         .getQueryCache()
         .find({ queryKey: ['org', 'org-1', 'runs', {}] });
 
       expect(query).toBeDefined();
+      const observer = (query as any)?.observers?.[0];
+      expect(observer).toBeDefined();
+      const refetchIntervalFn = observer?.options?.refetchInterval;
+      expect(typeof refetchIntervalFn).toBe('function');
 
-      // mockRuns has a 'running' run, so hasActive is true
-      const hasActive = mockRuns.some((r) => r.status === 'running' || r.status === 'pending');
-      expect(hasActive).toBe(true);
+      // Active runs -> 3000ms
+      expect(refetchIntervalFn(query)).toBe(3000);
 
-      // Only completed runs
-      const completedRuns = mockRuns.filter((r) => r.status === 'success' || r.status === 'failed');
-      const hasActiveCompleted = completedRuns.some(
-        (r) => r.status === 'running' || r.status === 'pending'
-      );
-      expect(hasActiveCompleted).toBe(false);
+      // 2. Completed-only runs -> false
+      const completedQueryMock = {
+        state: {
+          data: mockRuns.filter((r) => r.status === 'success' || r.status === 'failed'),
+        },
+      };
+      expect(refetchIntervalFn(completedQueryMock)).toBe(false);
+
+      // 3. Invalid date range -> false and query disabled
+      const fromInput = screen.getByLabelText('Filter runs from date');
+      const toInput = screen.getByLabelText('Filter runs to date');
+      fireEvent.change(fromInput, { target: { value: '2026-09-10' } });
+      fireEvent.change(toInput, { target: { value: '2026-09-05' } });
+
+      expect(await screen.findByRole('alert')).toBeInTheDocument();
+      expect(observer?.options?.enabled).toBe(false);
+      expect(observer?.options?.refetchInterval(query)).toBe(false);
     });
   });
 

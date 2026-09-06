@@ -90,12 +90,15 @@ export default function BackupRunsPage() {
     return qs ? `/backup-runs?${qs}` : '/backup-runs';
   }, [activeFilters]);
 
+  const isQueryEnabled = Boolean(activeOrgId && !dateError);
+
   const { data, isLoading, isError, error, refetch } = useQuery<BackupRunResponse[]>({
     queryKey: activeOrgId ? queryKeys.org(activeOrgId).runs.all(activeFilters) : ['disabled'],
     queryFn: () => apiClient.get<BackupRunResponse[]>(queryPath),
-    enabled: !!activeOrgId,
-    // Conservative polling if active jobs exist
+    enabled: isQueryEnabled,
+    // Conservative polling if active jobs exist and date range is valid
     refetchInterval: (query) => {
+      if (!isQueryEnabled) return false;
       const runs = query.state.data;
       const hasActive = runs?.some((r) => r.status === 'running' || r.status === 'pending');
       return hasActive ? 3000 : false;
