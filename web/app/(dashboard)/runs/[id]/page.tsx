@@ -8,19 +8,37 @@ import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
 import { usePermissions } from '@/lib/auth/permissions';
-import { useVerifyBackupRun } from '@/lib/api/mutations';
-import { type BackupRunResponse, type VerifyBackupRunResponse } from '@/types/domain';
+import {
+  useVerifyBackupRun,
+  useDownloadBackupArtifact,
+  useDeleteBackupArtifact,
+} from '@/lib/api/mutations';
+import {
+  type BackupRunResponse,
+  type VerifyBackupRunResponse,
+  type BackupArtifactResponse,
+} from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import {
+  Table,
+  TableHeader,
+  TableBody,
+  TableRow,
+  TableHead,
+  TableCell,
+} from '@/components/ui/table';
 import {
   formatDate,
   formatDuration,
   formatBytes,
   getStatusBadgeVariant,
 } from '@/lib/format/formatters';
+import { cn } from '@/lib/utils';
 import {
   ArrowLeft,
   History,
@@ -30,15 +48,24 @@ import {
   ShieldCheck,
   CheckCircle2,
   XCircle,
+  Download,
+  Trash2,
+  ChevronRight,
+  FileArchive,
+  Archive,
 } from 'lucide-react';
 
 export default function BackupRunDetailPage() {
   const params = useParams();
   const id = params?.id as string;
   const { activeOrgId } = useAuth();
-  const { canVerifyRun } = usePermissions();
+  const { canVerifyRun, canDownloadArtifact, canDeleteArtifact } = usePermissions();
   const verifyRun = useVerifyBackupRun();
+  const downloadArtifact = useDownloadBackupArtifact();
+  const deleteArtifact = useDeleteBackupArtifact();
+
   const [verificationResult, setVerificationResult] = React.useState<VerifyBackupRunResponse | null>(null);
+  const [deletingArtifact, setDeletingArtifact] = React.useState<BackupArtifactResponse | null>(null);
 
   const { data, isLoading, isError, error, refetch } = useQuery<BackupRunResponse>({
     queryKey: activeOrgId && id ? queryKeys.org(activeOrgId).runs.detail(id) : ['disabled'],
@@ -49,6 +76,20 @@ export default function BackupRunDetailPage() {
       return run?.status === 'running' || run?.status === 'pending' ? 3000 : false;
     },
   });
+
+  const { data: allArtifacts, isLoading: artifactsLoading } = useQuery<BackupArtifactResponse[]>({
+    queryKey: activeOrgId ? queryKeys.org(activeOrgId).artifacts.all() : ['disabled'],
+    queryFn: () => apiClient.get<BackupArtifactResponse[]>('/backup-artifacts'),
+    enabled: !!activeOrgId,
+  });
+
+  const artifacts = (allArtifacts || []).filter((a) => a.run_id === id);
+
+  const handleDeleteArtifact = async () => {
+    if (!deletingArtifact) return;
+    await deleteArtifact.mutateAsync(deletingArtifact.id);
+    setDeletingArtifact(null);
+  };
 
   const handleVerify = async () => {
     const res = await verifyRun.mutateAsync(id);
@@ -259,6 +300,196 @@ export default function BackupRunDetailPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Produced Artifacts Section */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base font-semibold flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Archive className="h-4 w-4 text-muted-foreground" />
+              <span>Produced Artifacts ({artifacts.length})</span>
+            </div>
+            <span className="text-xs font-mono font-normal text-muted-foreground">
+              Total: {formatBytes(data.total_artifact_size_bytes)}
+            </span>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-0">
+          {artifactsLoading ? (
+            <div className="p-6 space-y-3">
+              <Skeleton className="h-9 w-full" />
+              <Skeleton className="h-9 w-full" />
+            </div>
+          ) : artifacts.length === 0 ? (
+            <div className="p-6 text-center text-sm text-muted-foreground">
+              {data.status === 'running' || data.status === 'pending'
+                ? 'Artifacts will appear here once the backup run completes.'
+                : 'No artifacts were recorded for this backup run.'}
+            </div>
+          ) : (
+            <>
+              {/* Desktop Table */}
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Filename</TableHead>
+                      <TableHead>Size</TableHead>
+                      <TableHead>Compression</TableHead>
+                      <TableHead>Verification</TableHead>
+                      <TableHead>Verified At</TableHead>
+                      <TableHead>Created</TableHead>
+                      <TableHead className="w-[100px] text-right"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {artifacts.map((art) => {
+                      const { label, variant } = getStatusBadgeVariant(art.verification_status);
+                      return (
+                        <TableRow key={art.id}>
+                          <TableCell className="font-mono text-xs font-medium text-foreground">
+                            <Link
+                              href={`/artifacts/${art.id}`}
+                              className="hover:underline flex items-center gap-2"
+                            >
+                              <FileArchive className="h-4 w-4 text-muted-foreground shrink-0" />
+                              <span className="truncate max-w-[240px]">{art.artifact_name}</span>
+                            </Link>
+                          </TableCell>
+                          <TableCell className="font-mono text-xs text-muted-foreground">
+                            {formatBytes(art.size_bytes)}
+                          </TableCell>
+                          <TableCell className="capitalize text-xs text-muted-foreground font-mono">
+                            {art.compression_type || 'standard'}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={variant} className="capitalize">
+                              {label}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {art.verified_at ? formatDate(art.verified_at) : 'Unverified'}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {formatDate(art.created_at)}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <div className="flex items-center justify-end gap-1">
+                              {canDownloadArtifact && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => downloadArtifact.mutate(art.id)}
+                                  disabled={downloadArtifact.isPending && downloadArtifact.variables === art.id}
+                                  className="h-8 w-8 text-primary hover:text-primary hover:bg-primary/10"
+                                  aria-label={`Download ${art.artifact_name}`}
+                                >
+                                  <Download className={cn("h-4 w-4", downloadArtifact.isPending && downloadArtifact.variables === art.id && "animate-pulse")} />
+                                </Button>
+                              )}
+                              {canDeleteArtifact && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => setDeletingArtifact(art)}
+                                  className="h-8 w-8 text-rose-500 hover:text-rose-400 hover:bg-rose-950/20"
+                                  aria-label={`Delete ${art.artifact_name}`}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </Button>
+                              )}
+                              <Link
+                                href={`/artifacts/${art.id}`}
+                                className="text-muted-foreground hover:text-foreground inline-flex p-1"
+                                aria-label={`View artifact ${art.artifact_name}`}
+                              >
+                                <ChevronRight className="h-4 w-4" />
+                              </Link>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Mobile Stacked Cards */}
+              <div className="md:hidden divide-y">
+                {artifacts.map((art) => {
+                  const { label, variant } = getStatusBadgeVariant(art.verification_status);
+                  return (
+                    <div
+                      key={art.id}
+                      className="p-4 hover:bg-muted/30 transition-colors space-y-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <Link
+                          href={`/artifacts/${art.id}`}
+                          className="flex items-center gap-2 font-mono text-xs font-medium truncate hover:underline"
+                        >
+                          <FileArchive className="h-4 w-4 text-muted-foreground shrink-0" />
+                          <span className="truncate text-foreground">{art.artifact_name}</span>
+                        </Link>
+                        <Badge variant={variant} className="capitalize shrink-0">
+                          {label}
+                        </Badge>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1 text-xs text-muted-foreground font-mono">
+                        <div>
+                          <span>Size: {formatBytes(art.size_bytes)}</span>
+                        </div>
+                        <div className="text-right font-sans">
+                          <span>{formatDate(art.created_at)}</span>
+                        </div>
+                      </div>
+                      {(canDownloadArtifact || canDeleteArtifact) && (
+                        <div className="flex justify-end items-center gap-2 pt-1">
+                          {canDownloadArtifact && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => downloadArtifact.mutate(art.id)}
+                              disabled={downloadArtifact.isPending && downloadArtifact.variables === art.id}
+                              className="h-7 text-xs gap-1"
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              Download
+                            </Button>
+                          )}
+                          {canDeleteArtifact && (
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              onClick={() => setDeletingArtifact(art)}
+                              className="h-7 text-xs"
+                            >
+                              Delete
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        open={!!deletingArtifact}
+        onOpenChange={(open) => !open && setDeletingArtifact(null)}
+        title="Delete Backup Artifact"
+        description="Are you sure you want to permanently delete this backup artifact from storage? This action cannot be reversed."
+        objectName={deletingArtifact?.artifact_name}
+        confirmText="Delete Artifact"
+        destructive
+        isLoading={deleteArtifact.isPending}
+        onConfirm={handleDeleteArtifact}
+      />
     </div>
   );
 }

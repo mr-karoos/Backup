@@ -7,7 +7,7 @@ import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
 import { usePermissions } from '@/lib/auth/permissions';
-import { useDeleteBackupArtifact } from '@/lib/api/mutations';
+import { useDeleteBackupArtifact, useDownloadBackupArtifact } from '@/lib/api/mutations';
 import { type BackupArtifactResponse } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -30,15 +30,17 @@ import {
   formatBytes,
   getStatusBadgeVariant,
 } from '@/lib/format/formatters';
-import { Archive, Search, ChevronRight, FileArchive, Trash2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { Archive, Search, ChevronRight, FileArchive, Trash2, Download } from 'lucide-react';
 
 export default function BackupArtifactsPage() {
   const { activeOrgId } = useAuth();
-  const { canDeleteArtifact } = usePermissions();
+  const { canDeleteArtifact, canDownloadArtifact } = usePermissions();
   const [search, setSearch] = useState('');
   const [deletingArtifact, setDeletingArtifact] = useState<BackupArtifactResponse | null>(null);
 
   const deleteArtifact = useDeleteBackupArtifact();
+  const downloadArtifact = useDownloadBackupArtifact();
 
   // Critical: Send NO query parameters to /backup-artifacts
   const { data, isLoading, isError, error, refetch } = useQuery<BackupArtifactResponse[]>({
@@ -162,6 +164,18 @@ export default function BackupArtifactsPage() {
                           </TableCell>
                           <TableCell className="text-right">
                             <div className="flex items-center justify-end gap-1">
+                              {canDownloadArtifact && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  onClick={() => downloadArtifact.mutate(art.id)}
+                                  disabled={downloadArtifact.isPending && downloadArtifact.variables === art.id}
+                                  className="h-8 w-8 text-primary hover:text-primary hover:bg-primary/10"
+                                  aria-label={`Download ${art.artifact_name}`}
+                                >
+                                  <Download className={cn("h-4 w-4", downloadArtifact.isPending && downloadArtifact.variables === art.id && "animate-pulse")} />
+                                </Button>
+                              )}
                               {canDeleteArtifact && (
                                 <Button
                                   variant="ghost"
@@ -218,16 +232,30 @@ export default function BackupArtifactsPage() {
                           <span>{formatDate(art.created_at)}</span>
                         </div>
                       </div>
-                      {canDeleteArtifact && (
-                        <div className="flex justify-end pt-1">
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            onClick={() => setDeletingArtifact(art)}
-                            className="h-7 text-xs"
-                          >
-                            Delete
-                          </Button>
+                      {(canDownloadArtifact || canDeleteArtifact) && (
+                        <div className="flex justify-end items-center gap-2 pt-1">
+                          {canDownloadArtifact && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => downloadArtifact.mutate(art.id)}
+                              disabled={downloadArtifact.isPending && downloadArtifact.variables === art.id}
+                              className="h-7 text-xs gap-1"
+                            >
+                              <Download className="h-3.5 w-3.5" />
+                              Download
+                            </Button>
+                          )}
+                          {canDeleteArtifact && (
+                            <Button
+                              variant="destructive"
+                              size="sm"
+                              onClick={() => setDeletingArtifact(art)}
+                              className="h-7 text-xs"
+                            >
+                              Delete
+                            </Button>
+                          )}
                         </div>
                       )}
                     </div>

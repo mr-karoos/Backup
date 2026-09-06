@@ -79,7 +79,9 @@ export function usePermissions() {
     canExecuteAdHocBackup: isOrgAdmin && checkPermission('backup_job:execute'),
 
     canVerifyRun: checkPermission('backup_run:verify'),
+    canDownloadArtifact: checkPermission('backup_artifact:download'),
     canDeleteArtifact: checkPermission('backup_artifact:delete'),
+    canViewAuditLogs: checkPermission('audit_log:read'),
 
     canUpdateOrganization: isOrgAdmin || isSystemAdmin,
   };

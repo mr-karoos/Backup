@@ -8,7 +8,7 @@ import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
 import { usePermissions } from '@/lib/auth/permissions';
-import { useDeleteBackupArtifact } from '@/lib/api/mutations';
+import { useDeleteBackupArtifact, useDownloadBackupArtifact } from '@/lib/api/mutations';
 import { type BackupArtifactResponse } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -17,17 +17,18 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { formatDate, formatBytes, getStatusBadgeVariant } from '@/lib/format/formatters';
-import { ArrowLeft, Archive, ShieldCheck, FileArchive, Trash2 } from 'lucide-react';
+import { ArrowLeft, Archive, ShieldCheck, FileArchive, Trash2, Download } from 'lucide-react';
 
 export default function BackupArtifactDetailPage() {
   const params = useParams();
   const id = params?.id as string;
   const router = useRouter();
   const { activeOrgId } = useAuth();
-  const { canDeleteArtifact } = usePermissions();
+  const { canDeleteArtifact, canDownloadArtifact } = usePermissions();
 
   const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
   const deleteArtifact = useDeleteBackupArtifact();
+  const downloadArtifact = useDownloadBackupArtifact();
 
   const { data, isLoading, isError, error, refetch } = useQuery<BackupArtifactResponse>({
     queryKey: activeOrgId && id ? queryKeys.org(activeOrgId).artifacts.detail(id) : ['disabled'],
@@ -100,17 +101,30 @@ export default function BackupArtifactDetailPage() {
           </div>
 
           {/* Action Buttons */}
-          {canDeleteArtifact && (
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setDeleteDialogOpen(true)}
-              className="gap-1.5 text-rose-500 hover:text-rose-400 hover:bg-rose-950/20"
-            >
-              <Trash2 className="h-4 w-4" />
-              Delete Artifact
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {canDownloadArtifact && (
+              <Button
+                size="sm"
+                onClick={() => downloadArtifact.mutate(data.id)}
+                disabled={downloadArtifact.isPending}
+                className="gap-1.5 bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                <Download className="h-4 w-4" />
+                {downloadArtifact.isPending ? 'Downloading...' : 'Download'}
+              </Button>
+            )}
+            {canDeleteArtifact && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setDeleteDialogOpen(true)}
+                className="gap-1.5 text-rose-500 hover:text-rose-400 hover:bg-rose-950/20"
+              >
+                <Trash2 className="h-4 w-4" />
+                Delete Artifact
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 

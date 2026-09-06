@@ -13,12 +13,17 @@ import {
   useDiscoverDatabases,
   useArchiveResource,
 } from '@/lib/api/mutations';
-import { type ResourceResponse, type DiscoveredDatabaseResponse } from '@/types/domain';
+import {
+  type ResourceResponse,
+  type DiscoveredDatabaseResponse,
+  type BackupRunResponse,
+} from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ErrorState } from '@/components/ui/error-state';
+import { EmptyState } from '@/components/ui/empty-state';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { ManualBackupDialog } from '@/components/backup/manual-backup-dialog';
 import {
@@ -29,7 +34,14 @@ import {
   TableHead,
   TableCell,
 } from '@/components/ui/table';
-import { formatDate, formatBytes, formatResourceType, getStatusBadgeVariant } from '@/lib/format/formatters';
+import {
+  formatDate,
+  formatBytes,
+  formatResourceType,
+  formatDuration,
+  truncateId,
+  getStatusBadgeVariant,
+} from '@/lib/format/formatters';
 import {
   ArrowLeft,
   Server,
@@ -42,6 +54,9 @@ import {
   Archive,
   CheckCircle2,
   XCircle,
+  History,
+  ChevronRight,
+  AlertCircle,
 } from 'lucide-react';
 
 export default function ResourceDetailPage() {
@@ -70,6 +85,24 @@ export default function ResourceDetailPage() {
     queryFn: () => apiClient.get<ResourceResponse>(`/resources/${id}`),
     enabled: !!activeOrgId && !!id,
   });
+
+  const {
+    data: runsData,
+    isLoading: runsLoading,
+    isError: runsError,
+    error: runsErr,
+    refetch: refetchRuns,
+  } = useQuery<BackupRunResponse[]>({
+    queryKey: activeOrgId && id ? queryKeys.org(activeOrgId).runs.all({ resource_id: id }) : ['disabled'],
+    queryFn: () => apiClient.get<BackupRunResponse[]>(`/backup-runs?resource_id=${id}`),
+    enabled: !!activeOrgId && !!id,
+    refetchInterval: (query) => {
+      const runs = query.state.data;
+      const hasActive = runs?.some((r) => r.status === 'running' || r.status === 'pending');
+      return hasActive ? 3000 : false;
+    },
+  });
+  const runs = runsData || [];
 
   const handleTestConnection = async () => {
     await testConn.mutateAsync(id);
@@ -382,6 +415,159 @@ export default function ResourceDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Recent Backup Runs Section */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              <History className="h-4 w-4 text-muted-foreground" />
+              Recent Backup Runs ({runs.length})
+            </CardTitle>
+            <Link
+              href="/runs"
+              className="text-xs text-muted-foreground hover:text-foreground hover:underline"
+            >
+              View all runs
+            </Link>
+          </div>
+        </CardHeader>
+        <CardContent className="p-0">
+          {runsLoading ? (
+            <div className="p-6 space-y-3">
+              <Skeleton className="h-9 w-full" />
+              <Skeleton className="h-9 w-full" />
+            </div>
+          ) : runsError ? (
+            <div className="p-6">
+              <ErrorState
+                title="Could not load backup runs for this resource"
+                error={runsErr}
+                onRetry={() => refetchRuns()}
+              />
+            </div>
+          ) : runs.length === 0 ? (
+            <div className="p-6">
+              <EmptyState
+                icon={History}
+                title="No backup runs recorded for this resource"
+                description="Runs will appear here once backup jobs are executed for this resource."
+              />
+            </div>
+          ) : (
+            <>
+              {/* Desktop Table */}
+              <div className="hidden md:block">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Run ID</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Attempt</TableHead>
+                      <TableHead>Started At</TableHead>
+                      <TableHead>Duration</TableHead>
+                      <TableHead>Artifacts</TableHead>
+                      <TableHead>Total Size</TableHead>
+                      <TableHead className="w-[80px]"></TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {runs.map((run) => {
+                      const { label, variant } = getStatusBadgeVariant(run.status);
+                      return (
+                        <TableRow key={run.id}>
+                          <TableCell className="font-mono text-xs font-medium text-foreground">
+                            <Link
+                              href={`/runs/${run.id}`}
+                              className="hover:underline flex items-center gap-1.5"
+                            >
+                              {truncateId(run.id)}
+                            </Link>
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={variant} className="capitalize">
+                              {label}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            #{run.attempt_number}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {formatDate(run.started_at)}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {formatDuration(run.duration_seconds)}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {run.artifacts_count}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground font-mono">
+                            {formatBytes(run.total_artifact_size_bytes)}
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Link
+                              href={`/runs/${run.id}`}
+                              className="text-muted-foreground hover:text-foreground inline-flex p-1"
+                              aria-label={`View run ${run.id}`}
+                            >
+                              <ChevronRight className="h-4 w-4" />
+                            </Link>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Mobile Stacked Cards */}
+              <div className="md:hidden divide-y">
+                {runs.map((run) => {
+                  const { label, variant } = getStatusBadgeVariant(run.status);
+                  return (
+                    <Link
+                      key={run.id}
+                      href={`/runs/${run.id}`}
+                      className="block p-4 hover:bg-muted/30 transition-colors"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex flex-col">
+                          <span className="font-mono font-medium text-sm text-foreground">
+                            Run {truncateId(run.id)}
+                          </span>
+                          <span className="text-[11px] text-muted-foreground">
+                            {formatDate(run.started_at)}
+                          </span>
+                        </div>
+                        <Badge variant={variant} className="capitalize shrink-0">
+                          {label}
+                        </Badge>
+                      </div>
+
+                      <div className="mt-2 grid grid-cols-2 gap-1 text-xs text-muted-foreground">
+                        <div>
+                          <span>Duration: </span>
+                          <span className="text-foreground">{formatDuration(run.duration_seconds)}</span>
+                        </div>
+                        <div className="text-right font-mono">
+                          <span>{formatBytes(run.total_artifact_size_bytes)}</span>
+                        </div>
+                      </div>
+
+                      {run.error_message && (
+                        <div className="mt-2 flex items-center gap-1.5 text-destructive text-xs font-mono truncate">
+                          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate">{run.error_message}</span>
+                        </div>
+                      )}
+                    </Link>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Manual Ad-Hoc Backup Dialog */}
       <ManualBackupDialog

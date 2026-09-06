@@ -1,11 +1,53 @@
 'use client';
 
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { apiClient } from '@/lib/api/api-client';
+import { apiClient, triggerBlobDownload } from '@/lib/api/api-client';
 import { useAuth } from '@/lib/auth/auth-context';
 import { queryKeys } from '@/lib/query/query-client';
 import { useToast } from '@/lib/toast/toast-context';
 import { ApiError } from '@/types/api';
+
+export function useDownloadBackupArtifact() {
+  const { activeOrgId } = useAuth();
+  const { toast } = useToast();
+
+  return useMutation({
+    mutationFn: async (artifactId: string) => {
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      const { blob, filename } = await apiClient.download(
+        `/backup-artifacts/${artifactId}/download`,
+        { tenantOrgId }
+      );
+      triggerBlobDownload(blob, filename);
+      return filename;
+    },
+    onSuccess: (filename) => {
+      toast({
+        title: 'Download complete',
+        description: `Downloaded ${filename} successfully.`,
+        variant: 'success',
+      });
+    },
+    onError: (err: unknown) => {
+      let message = 'Failed to download artifact.';
+      if (err instanceof ApiError) {
+        if (err.status === 403) {
+          message = 'You do not have permission to download this backup artifact.';
+        } else if (err.status === 404) {
+          message = 'Backup artifact not found or has been removed from storage.';
+        } else {
+          message = err.message;
+        }
+      }
+      toast({
+        title: 'Download failed',
+        description: message,
+        variant: 'destructive',
+      });
+    },
+  });
+}
 
 export function useDeleteBackupArtifact() {
   const queryClient = useQueryClient();
