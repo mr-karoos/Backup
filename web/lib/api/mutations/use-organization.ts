@@ -15,16 +15,20 @@ export function useUpdateOrganization() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async ({ id, data }: { id: string; data: UpdateOrganizationRequest }) => {
-      return apiClient.put<OrganizationDetail>(`/organizations/${id}`, data);
+      return apiClient.put<OrganizationDetail>(`/organizations/${id}`, data, {
+        tenantOrgId: id,
+      });
     },
-    onSuccess: (res) => {
+    onSuccess: (res, _vars, context) => {
       queryClient.invalidateQueries({
         queryKey: queryKeys.auth.me(),
       });
-      if (activeOrgId) {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).settings(),
+          queryKey: queryKeys.org(targetOrg).settings(),
         });
       }
       toast({

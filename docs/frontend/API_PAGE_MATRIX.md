@@ -1,9 +1,9 @@
 # API & Page Integration Matrix
 ## Phase F0 — Frontend Architecture & UX Design Freeze
 
-**Status**: F0 REVIEW CANDIDATE — Awaiting External Approval
+**Status**: F1B REVIEW CANDIDATE — Awaiting External Approval
 **Target Repository Directory**: `/web`
-**Baseline Git Commit**: `59d90ae074385ba27e1f14f00f886af6803a76b3`
+**Baseline Git Commit**: `413b1b24c8c3b53eec566b05bf626a518cf19ff3`
 **Companion Documents**:
 * [./FRONTEND_ARCHITECTURE.md](./FRONTEND_ARCHITECTURE.md)
 * [./UX_INFORMATION_ARCHITECTURE.md](./UX_INFORMATION_ARCHITECTURE.md)
@@ -29,28 +29,28 @@
 | **10** | **ثبت منبع جدید**<br>`/resources/new` | تعریف سرور لینوکس ابونتو یا هاست سی‌پنل | `POST /api/v1/resources` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
 | **11** | **جزئیات و ویرایش منبع**<br>`/resources/[id]` | مشاهده مشخصات، تب‌های پلن‌ها و ویرایش کانکتور | `GET /api/v1/resources/{id}`<br>`PUT /api/v1/resources/{id}` | Admin (کامل)<br>Member/Viewer (مشاهده) | **پشتیبانی کامل** | فاقد تلمتری زنده سخت‌افزاری سرور | **F1 Scope** |
 | **12** | **آرشیو کردن منبع**<br>`/resources/[id]` | غیرفعال‌سازی نرم (Soft Delete) سرور و حفظ تاریخچه | `DELETE /api/v1/resources/{id}` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
-| **13** | **تست زنده اتصال شبکه**<br>`(Modal / Button)` | بررسی بلادرنگ اتصال SSH/cPanel و تاخیر میلی‌ثانیه | `POST /api/v1/resources/{id}/test-connection` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
+| **13** | **تست زنده اتصال شبکه**<br>`(Modal / Button)` | بررسی بلادرنگ اتصال SSH/cPanel و تاخیر میلی‌ثانیه | `POST /api/v1/resources/{id}/test-connection` | Admin | **پشتیبانی کامل** | نیازمند ارسال بدنه خالی و بدون Content-Type | **F1 Scope** |
 | **14** | **شناسایی خودکار دیتابیس**<br>`(Modal / Discovery)` | لیست‌کردن خودکار دیتابیس‌های MySQL روی سرور هدف | `GET /api/v1/resources/{id}/databases` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
 | **15** | **لیست صندوقچه گواهی‌ها**<br>`/credentials` | مشاهده نام، نوع، اثرانگشت کلید و نسخه کلید سکرت‌ها | `GET /api/v1/credentials` | Admin | **پشتیبانی کامل** | فاقد دسترسی برای Member و Viewer | **F1 Scope** |
 | **16** | **ثبت کردانشال جدید**<br>`/credentials/new` | دریافت امن و رمزنگاری سکرت (SSH Key, S3, Password) | `POST /api/v1/credentials` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
 | **17** | **تعویض سکرت / ادیت نام**<br>`(Credential Modal)` | تغییر نام یا چرخش کلید/پسورد به صورت یک‌طرفه | `PUT /api/v1/credentials/{id}` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
 | **18** | **حذف کردانشال**<br>`(Delete Action)` | حذف فیزیکی سکرت در صورت عدم استفاده در منابع | `DELETE /api/v1/credentials/{id}` | Admin | **پشتیبانی کامل** | **GAP-08**: سرور نام منبع وابسته را برنمی‌گرداند | **F1 Scope** |
 | **19** | **لیست برنامه‌های بکاپ**<br>`/plans` | مشاهده پلن‌های تعریف‌شده، زمان‌بندی و وضعیت | `GET /api/v1/backup-plans` | Admin, Member, Viewer | **پشتیبانی کامل** | فیلتر محدود به resource_id و status | **F1 Scope** |
-| **20** | **ویزارد ایجاد Plan**<br>`/plans/new` | فرآیند ۷ مرحله‌ای تعریف پلن خودکار زمان‌بندی‌شده | `POST /api/v1/backup-plans` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
+| **20** | **ویزارد ایجاد Plan**<br>`/plans/new` | فرآیند ۶ مرحله‌ای تعریف پلن خودکار زمان‌بندی‌شده | `POST /api/v1/backup-plans` | Admin | **پشتیبانی کامل** | منابع cPanel در حال حاضر پشتیبانی نمی‌شوند | **F1 Scope** |
 | **21** | **جزئیات و ویرایش Plan**<br>`/plans/[id]` | تغییر زمان‌بندی کرون، اهداف داده، و نگهداری | `GET /api/v1/backup-plans/{id}`<br>`PUT /api/v1/backup-plans/{id}` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
 | **22** | **آرشیو کردن Plan**<br>`(Archive Action)` | توقف دائمی زمان‌بندی و حفظ سوابق گذشته | `DELETE /api/v1/backup-plans/{id}` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
 | **23** | **اجرای بکاپ دستی Plan**<br>`(Run Plan Now Button)` | تحریک اجرای فوری یک Plan تاییدشده توسط Member/Admin | `POST /api/v1/backup-jobs`<br>`{"backup_plan_id": "..."}` | Admin, Member | **پشتیبانی کامل** | هیچ | **F1 Scope** |
-| **24** | **اجرای بکاپ سفارشی**<br>`(Ad-hoc Backup Modal)` | اجرای فوری بکاپ دستی با تعیین مستقیم منبع و دیتابیس | `POST /api/v1/backup-jobs`<br>`{"resource_id": ..., ...}` | منحصراً Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
+| **24** | **اجرای بکاپ سفارشی**<br>`(Ad-hoc Backup Modal)` | اجرای فوری بکاپ دستی با تعیین مستقیم منبع و دیتابیس | `POST /api/v1/backup-jobs`<br>`{"resource_id": ..., ...}` | منحصراً Admin | **پشتیبانی کامل** | منحصراً برای منابع ubuntu_ssh | **F1 Scope** |
 | **25** | **لیست تاریخچه اجراها**<br>`/runs` | رصد وضعیت ران‌ها با فیلتر وضعیت، بازه زمانی و منبع | `GET /api/v1/backup-runs` | Admin, Member, Viewer | **پشتیبانی کامل** | فاقد Pagination (بک‌اند کل ران‌ها را می‌دهد) | **F1 Scope** |
 | **26** | **جزئیات و پایش وضعیت ران**<br>`/runs/[id]` | مشاهده مدت زمان، تلاش، خلاصه خطای امن و آمار بایت | `GET /api/v1/backup-runs/{id}` | Admin, Member, Viewer | **پشتیبانی کامل** | **GAP-09**: فاقد استریم لاگ‌های خام کارگر | **F1 Scope** |
-| **27** | **اعتبارسنجی آنلاین ران**<br>`(Verify Action Button)` | اجرای تست سلامت هش SHA-256 و ساختار فایل فشرده | `POST /api/v1/backup-runs/{id}/verify` | Admin, Member | **پشتیبانی کامل** | هیچ | **F1 Scope** |
+| **27** | **اعتبارسنجی آنلاین ران**<br>`(Verify Action Button)` | اجرای تست سلامت هش SHA-256 و ساختار فایل فشرده | `POST /api/v1/backup-runs/{id}/verify` | Admin, Member | **پشتیبانی کامل** | نیازمند ارسال درخواست Bodyless | **F1 Scope** |
 | **28** | **لیست آرتیفکت‌های بکاپ**<br>`/artifacts` | مشاهده نام فایل (`artifact_name`)، حجم، و وضعیت | `GET /api/v1/backup-artifacts` | Admin, Member, Viewer | **پشتیبانی کامل** | رد سخت‌گیرانه هرگونه Query Param در سرور | **F1 Scope** |
 | **29** | **مشاهده مشخصات آرتیفکت**<br>`/artifacts/[id]` | جزئیات فنی فایل، الگوریتم فشرده‌سازی، زمان وریفای | `GET /api/v1/backup-artifacts/{id}` | Admin, Member, Viewer | **پشتیبانی کامل** | هیچ | **F1 Scope** |
 | **30** | **دانلود امن آرتیفکت**<br>`(Download Action)` | دریافت مستقیم فایل از اپلیکیشن بدون افشای آدرس دیسک | `GET /api/v1/backup-artifacts/{id}/download` | Admin, Member | **پشتیبانی بک‌اند (فاقد هندآف کلاینت)** | **GAP-11**: نیازمند هدر Authorization و عدم امکان بافر Blob در حافظه | **Deferred (GAP-11)** |
 | **31** | **حذف فیزیکی آرتیفکت**<br>`(Delete Action Dialog)` | حذف بایت‌های فایل از Local/S3 با حفظ تاریخچه جاب | `DELETE /api/v1/backup-artifacts/{id}` | منحصراً Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
 | **32** | **لیست مقاصد ذخیره‌سازی**<br>`/storage` | مشاهده مقاصد دیسک محلی و باکت‌های S3 فعال | `GET /api/v1/storage-targets` | Admin, Member, Viewer | **پشتیبانی کامل** | هیچ | **F1 Scope** |
-| **33** | **افزودن مقصد ذخیره S3**<br>`/storage/new` | تعریف باکت AWS S3, Cloudflare R2, MinIO با کلید S3 | `POST /api/v1/storage-targets` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
-| **34** | **ویرایش و حذف Storage**<br>`/storage/[id]` | ویرایش باکت یا حذف مقصد در صورت عدم وابستگی | `PUT /api/v1/storage-targets/{id}`<br>`DELETE /api/v1/storage-targets/{id}` | Admin | **پشتیبانی کامل** | هیچ | **F1 Scope** |
+| **33** | **افزودن مقصد ذخیره S3**<br>`/storage/new` | تعریف باکت AWS S3 با کلید S3 | `POST /api/v1/storage-targets` | Admin | **پشتیبانی S3** | **GAP-12**: ایجاد و ویرایش مقاصد سفارشی `s3_compatible` در سرویس بک‌اند پشتیبانی نمی‌شود | **F1 Scope (S3 Only)** |
+| **34** | **ویرایش و حذف Storage**<br>`/storage/[id]` | ویرایش باکت یا حذف مقصد در صورت عدم وابستگی | `PUT /api/v1/storage-targets/{id}`<br>`DELETE /api/v1/storage-targets/{id}` | Admin | **پشتیبانی کامل** | ویرایش کانفیگ منحصراً برای S3؛ برای s3_compatible فقط نام | **F1 Scope** |
 | **35** | **پایش سلامت سیستم**<br>`/health` | بررسی مینیمال اتصال پایگاه داده پلتفرم | `GET /api/v1/health` | عمومی (Unauthenticated) | **پشتیبانی کامل** | **GAP-10**: پاسخ مینیمال ok/unavailable بدون آمار آپ‌تایم | **F1 Scope** |
 | **36** | **گزارش وقایع حسابرسی**<br>`/audit` | مشاهده لاگ‌های امنیتی ورود، تغییر سکرت و دانلودها | `GET /api/v1/audit-logs` | Admin | **فاقد Endpoint** | **GAP-01**: سرویس دیتابیس دارد، HTTP Handler ندارد | **Deferred (F2)** |
 | **37** | **مدیریت تیم و اعضا**<br>`/team` | دعوت همکار جدید، تغییر نقش‌های سازمانی و حذف عضو | `GET/POST /organizations/{id}/members` | Admin | **فاقد Endpoint** | **GAP-02**: فاقد کنترلرهای مدیریت اعضا در HTTP | **Deferred (F2)** |
@@ -120,6 +120,13 @@
   3. استفاده از جاوااسکریپت برای فراخوانی `fetch` و تبدیل پاسخ استریم به `Blob` درون حافظه و تولید Object URL، برای فایل‌های چند گیگابایتی بکاپ‌های حجیم دیتابیس و فایل‌های سیستمی، منجر به مصرف کل رم تب مرورگر و کرش حتمی Out-Of-Memory (OOM) در کلاینت کاربر می‌گردد.
 * **راهبرد فرانت‌اند**: طبق دستورالعمل صریح امنیتی فاز F1B، دکمه و اکشن دانلود آرتیفکت تا زمان پیاده‌سازی یک سازوکار هندآف امن در بک‌اند (نظیر بلیت دانلود یک‌بارمصرف یا لینک امضاشده موقت)، از رابط کاربری اجرایی **حذف** و به فازهای آتی موکول می‌گردد.
 
+### شکاف ۱۲ — عدم پشتیبانی از جهش‌های ایجاد و ویرایش مقاصد ذخیره S3-Compatible در سرویس بک‌اند (`GAP-12: S3-Compatible Target Mutations Not Supported in Backend Service`)
+* **وضعیت در سورس**: سرویس مقاصد ذخیره‌سازی (`internal/backup/service/storage_target_service.go`) در توابع `CreateStorageTarget` و `UpdateStorageTarget` فرآیند پارس و اعتبارسنجی کانفیگ باکت را منحصراً برای `StorageTargetTypeS3` (`s3`) انجام می‌دهد و نوع `s3_compatible` برای ساخت یا تغییر پارامترهای مکانی توسط سرویس پشتیبانی نمی‌شود.
+* **مشکل برای فرانت‌اند**: اقدام به ایجاد مقصد ذخیره از نوع `s3_compatible` یا تلاش برای ویرایش پارامترهای Endpoint آن در بک‌اند ناموفق خواهد بود.
+* **راهبرد فرانت‌اند**:
+  1. ویزارد ایجاد تارگت (`/storage/new`) منحصراً گزینه استاندارد AWS S3 را برای ثبت ارائه می‌دهد.
+  2. در صفحه جزئیات تارگت‌های از قبل موجود `s3_compatible` (`/storage/[id]`)، فیلدهای مکانی به صورت فقط‌خواندنی بوده و ویرایش منحصراً به نام نمایشی محدود می‌گردد.
+
 ---
 
 ## ۳. تفکیک قطعی دامنه‌های اجرایی (Scope Phasing Definition)
@@ -137,7 +144,7 @@
 │ • اجرای بکاپ دستی (Ad-hoc توسط ادمین، From-Plan توسط ممبر)             │
 │ • تاریخچه و وضعیت اجراها (فیلترهای استاندارد، خلاصه خطای امن، وریفای) │
 │ • آرتیفکت‌ها (لیست با artifact_name، حذف فیزیکی - دانلود موکول به GAP-11) │
-│ • مقاصد ذخیره‌سازی (Local Storage و باکت‌های AWS S3, MinIO, R2)         │
+│ • مقاصد ذخیره‌سازی (Local Storage و ثبت مقاصد استاندارد AWS S3)        │
 │ • مانیتورینگ مینیمال سلامت سیستم (/api/v1/health)                      │
 │ • ادمین پلتفرم (ایجاد سازمان جدید برای is_system_admin)                 │
 └────────────────────────────────────────────────────────────────────────┘
@@ -147,6 +154,7 @@
 │ Phase F2 Scope (Pending Backend Gap Resolution)                        │
 │ ---------------------------------------------------------------------- │
 │ • هندآف امن مرورگری برای دانلود آرتیفکت (منوط به پیاده‌سازی GAP-11)   │
+│ • ثبت و ویرایش مقاصد ذخیره‌سازی S3-Compatible (منوط به GAP-12)         │
 │ • گزارش و مانیتورینگ وقایع حسابرسی (منوط به پیاده‌سازی GAP-01)          │
 │ • مدیریت اعضا و کاربران سازمان (منوط به پیاده‌سازی GAP-02)              │
 │ • داشبورد بهینه‌شده با کوئری سرور (منوط به پیاده‌سازی GAP-03)           │

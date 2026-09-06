@@ -16,6 +16,7 @@ export interface ConnectorResponse {
   host_key_fingerprint?: string | null;
   credential_id?: string;
   credential_name?: string;
+  config?: ConnectorConfigRequest;
 }
 
 export interface ResourceResponse {

@@ -105,7 +105,7 @@ describe('Mutation Contract Conformance', () => {
       expect(res).toHaveProperty('name', 'Ubuntu 01');
     });
 
-    it('enforces empty body on POST /resources/{id}/test-connection', async () => {
+    it('enforces bodyless POST on /resources/{id}/test-connection', async () => {
       const postSpy = vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
         status: 'success',
         latency_ms: 45,
@@ -113,13 +113,24 @@ describe('Mutation Contract Conformance', () => {
         details: {},
       });
 
-      const res = await apiClient.post('/resources/res-1/test-connection', {});
+      const res = await apiClient.post('/resources/res-1/test-connection', undefined);
 
-      expect(postSpy).toHaveBeenCalledWith('/resources/res-1/test-connection', {});
+      expect(postSpy).toHaveBeenCalledWith('/resources/res-1/test-connection', undefined);
       expect(res).toHaveProperty('status', 'success');
       expect(res).toHaveProperty('latency_ms', 45);
     });
+
+    it('rejects with 400 if body is unexpectedly provided to test-connection', async () => {
+      vi.spyOn(apiClient, 'post').mockRejectedValueOnce(
+        new ApiError(400, 'INVALID_BODY', 'request body must be empty for test-connection')
+      );
+
+      await expect(
+        apiClient.post('/resources/res-1/test-connection', { unexpected: true })
+      ).rejects.toThrow('request body must be empty for test-connection');
+    });
   });
+
 
   describe('Storage Target Contracts', () => {
     it('serializes S3 storage target creation payload correctly', async () => {
@@ -216,7 +227,7 @@ describe('Mutation Contract Conformance', () => {
   });
 
   describe('Verification & Deletion Contracts', () => {
-    it('calls POST /backup-runs/{id}/verify and returns verification details', async () => {
+    it('calls POST /backup-runs/{id}/verify with undefined body and returns verification details', async () => {
       const postSpy = vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
         run_id: 'run-1',
         verification_status: 'verified',
@@ -229,11 +240,21 @@ describe('Mutation Contract Conformance', () => {
         },
       });
 
-      const res = await apiClient.post<VerifyBackupRunResponse>('/backup-runs/run-1/verify', {});
+      const res = await apiClient.post<VerifyBackupRunResponse>('/backup-runs/run-1/verify', undefined);
 
-      expect(postSpy).toHaveBeenCalledWith('/backup-runs/run-1/verify', {});
+      expect(postSpy).toHaveBeenCalledWith('/backup-runs/run-1/verify', undefined);
       expect(res).toHaveProperty('verification_status', 'verified');
       expect(res.details).toHaveProperty('checksum_matched', true);
+    });
+
+    it('rejects with 400 if body is unexpectedly provided to verify endpoint', async () => {
+      vi.spyOn(apiClient, 'post').mockRejectedValueOnce(
+        new ApiError(400, 'INVALID_BODY', 'request body must be empty for verify')
+      );
+
+      await expect(
+        apiClient.post('/backup-runs/run-1/verify', { payload: 'invalid' })
+      ).rejects.toThrow('request body must be empty for verify');
     });
 
     it('calls DELETE /backup-artifacts/{id} to permanently remove artifact', async () => {
@@ -245,3 +266,4 @@ describe('Mutation Contract Conformance', () => {
     });
   });
 });
+

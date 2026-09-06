@@ -19,13 +19,17 @@ export function useCreateBackupPlan() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async (data: CreateBackupPlanRequest) => {
-      return apiClient.post<CreateBackupPlanResponse>('/backup-plans', data);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.post<CreateBackupPlanResponse>('/backup-plans', data, { tenantOrgId });
     },
-    onSuccess: (res) => {
-      if (activeOrgId) {
+    onSuccess: (res, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).plans.all(),
+          queryKey: queryKeys.org(targetOrg).plans.all(),
         });
       }
       toast({
@@ -54,16 +58,20 @@ export function useUpdateBackupPlan() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async ({ id, data }: { id: string; data: UpdateBackupPlanRequest }) => {
-      return apiClient.put<BackupPlanResponse>(`/backup-plans/${id}`, data);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.put<BackupPlanResponse>(`/backup-plans/${id}`, data, { tenantOrgId });
     },
-    onSuccess: (res) => {
-      if (activeOrgId) {
+    onSuccess: (res, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).plans.all(),
+          queryKey: queryKeys.org(targetOrg).plans.all(),
         });
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).plans.detail(res.id),
+          queryKey: queryKeys.org(targetOrg).plans.detail(res.id),
         });
       }
       toast({
@@ -92,13 +100,17 @@ export function useArchiveBackupPlan() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async (id: string) => {
-      return apiClient.delete(`/backup-plans/${id}`);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.delete(`/backup-plans/${id}`, { tenantOrgId });
     },
-    onSuccess: () => {
-      if (activeOrgId) {
+    onSuccess: (_data, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).plans.all(),
+          queryKey: queryKeys.org(targetOrg).plans.all(),
         });
       }
       toast({

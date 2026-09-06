@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useAuth } from '@/lib/auth/auth-context';
+import { usePermissions } from '@/lib/auth/permissions';
 import { cn } from '@/lib/utils';
 import {
   LayoutDashboard,
@@ -75,12 +75,10 @@ const navItems: NavItem[] = [
 
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
-  const { userRole, isSystemAdmin } = useAuth();
-
-  const isAdmin = userRole === 'admin' || isSystemAdmin;
+  const { canViewCredentials } = usePermissions();
 
   const visibleItems = navItems.filter((item) => {
-    if (item.adminOnly && !isAdmin) {
+    if (item.adminOnly && !canViewCredentials) {
       return false;
     }
     return true;

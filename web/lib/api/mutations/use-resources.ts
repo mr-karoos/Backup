@@ -21,13 +21,17 @@ export function useCreateResource() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async (data: CreateResourceRequest) => {
-      return apiClient.post<ResourceCreateResponse>('/resources', data);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.post<ResourceCreateResponse>('/resources', data, { tenantOrgId });
     },
-    onSuccess: (res) => {
-      if (activeOrgId) {
+    onSuccess: (res, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).resources.all(),
+          queryKey: queryKeys.org(targetOrg).resources.all(),
         });
       }
       toast({
@@ -56,16 +60,20 @@ export function useUpdateResource() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async ({ id, data }: { id: string; data: UpdateResourceRequest }) => {
-      return apiClient.put<ResourceUpdateResponse>(`/resources/${id}`, data);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.put<ResourceUpdateResponse>(`/resources/${id}`, data, { tenantOrgId });
     },
-    onSuccess: (res) => {
-      if (activeOrgId) {
+    onSuccess: (res, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).resources.all(),
+          queryKey: queryKeys.org(targetOrg).resources.all(),
         });
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).resources.detail(res.id),
+          queryKey: queryKeys.org(targetOrg).resources.detail(res.id),
         });
       }
       toast({
@@ -94,13 +102,17 @@ export function useArchiveResource() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async (id: string) => {
-      return apiClient.delete(`/resources/${id}`);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.delete(`/resources/${id}`, { tenantOrgId });
     },
-    onSuccess: () => {
-      if (activeOrgId) {
+    onSuccess: (_data, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).resources.all(),
+          queryKey: queryKeys.org(targetOrg).resources.all(),
         });
       }
       toast({
@@ -124,11 +136,17 @@ export function useArchiveResource() {
 }
 
 export function useTestResourceConnection() {
+  const { activeOrgId } = useAuth();
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async (id: string) => {
-      return apiClient.post<ConnectionTestResponse>(`/resources/${id}/test-connection`, {});
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.post<ConnectionTestResponse>(`/resources/${id}/test-connection`, undefined, {
+        tenantOrgId,
+      });
     },
     onSuccess: (res) => {
       if (res.status === 'success') {
@@ -139,8 +157,8 @@ export function useTestResourceConnection() {
         });
       } else {
         toast({
-          title: 'Connection failed',
-          description: `Connection test returned status: ${res.status}. Latency: ${res.latency_ms}ms.`,
+          title: 'Connection test failed',
+          description: 'The resource could not be reached with the configured credentials.',
           variant: 'destructive',
         });
       }
@@ -160,11 +178,17 @@ export function useTestResourceConnection() {
 }
 
 export function useDiscoverDatabases() {
+  const { activeOrgId } = useAuth();
   const { toast } = useToast();
 
   return useMutation({
-    mutationFn: async (resourceId: string) => {
-      return apiClient.get<DiscoveredDatabaseResponse[]>(`/resources/${resourceId}/databases`);
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
+    mutationFn: async (id: string) => {
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.get<DiscoveredDatabaseResponse[]>(`/resources/${id}/databases`, {
+        tenantOrgId,
+      });
     },
     onSuccess: (databases) => {
       toast({

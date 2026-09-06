@@ -17,16 +17,20 @@ export function useCreateBackupJob() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async (data: CreateBackupJobRequest) => {
-      return apiClient.post<BackupJobResponse>('/backup-jobs', data);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.post<BackupJobResponse>('/backup-jobs', data, { tenantOrgId });
     },
-    onSuccess: () => {
-      if (activeOrgId) {
+    onSuccess: (_res, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).runs.all(),
+          queryKey: queryKeys.org(targetOrg).runs.all(),
         });
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).overview(),
+          queryKey: queryKeys.org(targetOrg).overview(),
         });
       }
       toast({

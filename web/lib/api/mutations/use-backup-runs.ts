@@ -14,19 +14,27 @@ export function useVerifyBackupRun() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async (runId: string) => {
-      return apiClient.post<VerifyBackupRunResponse>(`/backup-runs/${runId}/verify`, {});
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.post<VerifyBackupRunResponse>(
+        `/backup-runs/${runId}/verify`,
+        undefined,
+        { tenantOrgId }
+      );
     },
-    onSuccess: (res, runId) => {
-      if (activeOrgId) {
+    onSuccess: (res, runId, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).runs.all(),
+          queryKey: queryKeys.org(targetOrg).runs.all(),
         });
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).runs.detail(runId),
+          queryKey: queryKeys.org(targetOrg).runs.detail(runId),
         });
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).artifacts.all(),
+          queryKey: queryKeys.org(targetOrg).artifacts.all(),
         });
       }
       if (res.verification_status === 'verified') {

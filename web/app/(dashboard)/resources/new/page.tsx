@@ -4,6 +4,8 @@ import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
+import { useForm, Controller } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
 import { ArrowLeft, Server, ShieldAlert } from 'lucide-react';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
@@ -15,6 +17,10 @@ import { useCreateResource } from '@/lib/api/mutations';
 import { FormField } from '@/components/ui/form-field';
 import { Select } from '@/components/ui/select';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import {
+  resourceCreateSchema,
+  type ResourceCreateFormValues,
+} from '@/lib/forms/schemas';
 import type {
   ResourceType,
   CreateResourceRequest,
@@ -23,36 +29,47 @@ import type {
 
 export default function NewResourcePage() {
   const router = useRouter();
-  const { activeOrgId, userRole, isSystemAdmin } = useAuth();
-  const { canCreateResource } = usePermissions();
+  const { activeOrgId } = useAuth();
+  const { canCreateResource, canViewCredentials } = usePermissions();
   const createResource = useCreateResource();
 
-  const isAdmin = userRole === 'admin' || isSystemAdmin;
+  const {
+    register,
+    handleSubmit,
+    watch,
+    setValue,
+    control,
+    reset,
+    formState: { errors, isDirty, isSubmitting },
+  } = useForm<ResourceCreateFormValues>({
+    resolver: zodResolver(resourceCreateSchema),
+    defaultValues: {
+      name: '',
+      type: 'ubuntu_ssh',
+      host: '',
+      port: 22,
+      username: 'root',
+      auth_type: 'ssh_key',
+      credential_id: '',
+      host_key_fingerprint: '',
+      connection_timeout_seconds: 15,
+      use_https: true,
+    },
+  });
 
-  // Form State
-  const [name, setName] = React.useState('');
-  const [type, setType] = React.useState<ResourceType>('ubuntu_ssh');
-  const [host, setHost] = React.useState('');
-  const [port, setPort] = React.useState<number>(22);
-  const [username, setUsername] = React.useState('root');
-  const [authType, setAuthType] = React.useState<string>('ssh_key');
-  const [credentialId, setCredentialId] = React.useState('');
-  const [hostKeyFingerprint, setHostKeyFingerprint] = React.useState('');
-  const [connectionTimeout, setConnectionTimeout] = React.useState<number>(15);
-  const [useHttps, setUseHttps] = React.useState(true);
-  const [validationError, setValidationError] = React.useState<string | null>(null);
+  const selectedType = watch('type');
 
-  // Fetch available credentials if user has credential read access
+  // Fetch available credentials strictly when user has credential read access (active Org Admin)
   const { data: credentials } = useQuery<CredentialListItemResponse[]>({
     queryKey: activeOrgId ? queryKeys.org(activeOrgId).credentials.all() : ['disabled'],
     queryFn: () => apiClient.get<CredentialListItemResponse[]>('/credentials'),
-    enabled: !!activeOrgId && isAdmin,
+    enabled: Boolean(activeOrgId && canViewCredentials),
   });
 
   // Filter credentials based on resource type
   const compatibleCredentials = React.useMemo(() => {
     if (!credentials) return [];
-    if (type === 'ubuntu_ssh') {
+    if (selectedType === 'ubuntu_ssh') {
       return credentials.filter(
         (c) => c.type === 'ssh_private_key' || c.type === 'ssh_password'
       );
@@ -61,30 +78,27 @@ export default function NewResourcePage() {
         (c) => c.type === 'cpanel_api_token' || c.type === 'cpanel_password'
       );
     }
-  }, [credentials, type]);
+  }, [credentials, selectedType]);
 
   const handleTypeChange = (newType: ResourceType) => {
-    setType(newType);
+    setValue('type', newType, { shouldDirty: true });
     if (newType === 'ubuntu_ssh') {
-      setPort(22);
-      setAuthType('ssh_key');
-      setUsername('root');
+      setValue('port', 22);
+      setValue('auth_type', 'ssh_key');
+      setValue('username', 'root');
     } else {
-      setPort(2083);
-      setAuthType('cpanel_api_token');
-      setUsername('');
+      setValue('port', 2083);
+      setValue('auth_type', 'cpanel_api_token');
+      setValue('username', '');
     }
-    setCredentialId('');
+    setValue('credential_id', '', { shouldValidate: true });
   };
 
-  const isDirty = Boolean(name || host || credentialId);
-  useUnsavedChanges(isDirty);
+  const { bypassGuard, safeNavigate } = useUnsavedChanges(isDirty);
 
   useTenantFormGuard({
     onTenantChanged: () => {
-      setName('');
-      setHost('');
-      setCredentialId('');
+      reset();
       router.push('/resources');
     },
   });
@@ -114,47 +128,28 @@ export default function NewResourcePage() {
     );
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setValidationError(null);
-
-    if (!name.trim()) {
-      setValidationError('Resource name is required.');
-      return;
-    }
-    if (!host.trim()) {
-      setValidationError('Host/IP address is required.');
-      return;
-    }
-    if (!username.trim()) {
-      setValidationError('Username is required.');
-      return;
-    }
-    if (!credentialId) {
-      setValidationError('Please select a compatible credential.');
-      return;
-    }
-
+  const onSubmit = async (values: ResourceCreateFormValues) => {
     const payload: CreateResourceRequest = {
-      name: name.trim(),
-      type,
+      name: values.name.trim(),
+      type: values.type,
       connector: {
-        host: host.trim(),
-        port: Number(port),
-        auth_type: authType,
-        username: username.trim(),
-        credential_id: credentialId,
-        ...(hostKeyFingerprint.trim()
-          ? { host_key_fingerprint: hostKeyFingerprint.trim() }
+        host: values.host.trim(),
+        port: Number(values.port),
+        auth_type: values.auth_type,
+        username: values.username.trim(),
+        credential_id: values.credential_id,
+        ...(values.host_key_fingerprint?.trim()
+          ? { host_key_fingerprint: values.host_key_fingerprint.trim() }
           : {}),
         config: {
-          connection_timeout_seconds: Number(connectionTimeout),
-          ...(type === 'cpanel' ? { use_https: useHttps } : {}),
+          connection_timeout_seconds: Number(values.connection_timeout_seconds || 15),
+          ...(values.type === 'cpanel' ? { use_https: Boolean(values.use_https) } : {}),
         },
       },
     };
 
     try {
+      bypassGuard();
       await createResource.mutateAsync(payload);
       router.push('/resources');
     } catch {
@@ -165,13 +160,14 @@ export default function NewResourcePage() {
   return (
     <div className="max-w-2xl space-y-6">
       <div className="flex items-center gap-3">
-        <Link
-          href="/resources"
+        <button
+          type="button"
+          onClick={() => safeNavigate('/resources')}
           className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           aria-label="Back to resources"
         >
           <ArrowLeft className="h-5 w-5" />
-        </Link>
+        </button>
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">Register Resource</h1>
           <p className="text-sm text-muted-foreground">
@@ -188,56 +184,76 @@ export default function NewResourcePage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {validationError && (
-            <div className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-              {validationError}
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <FormField label="Resource Name" htmlFor="res-name" required>
+          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+            <FormField
+              label="Resource Name"
+              htmlFor="res-name"
+              required
+              error={errors.name?.message}
+            >
               <input
                 id="res-name"
                 type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+                {...register('name')}
                 placeholder="e.g. Primary App Server 01"
+                aria-invalid={Boolean(errors.name)}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </FormField>
 
-            <FormField label="Resource Type" htmlFor="res-type" required>
-              <Select
-                id="res-type"
-                value={type}
-                onChange={(e) => handleTypeChange(e.target.value as ResourceType)}
-                options={[
-                  { value: 'ubuntu_ssh', label: 'Ubuntu Linux Server (SSH)' },
-                  { value: 'cpanel', label: 'cPanel / WHM Hosting Server' },
-                ]}
+            <FormField
+              label="Resource Type"
+              htmlFor="res-type"
+              required
+              error={errors.type?.message}
+            >
+              <Controller
+                name="type"
+                control={control}
+                render={({ field }) => (
+                  <Select
+                    id="res-type"
+                    value={field.value}
+                    onChange={(e) => handleTypeChange(e.target.value as ResourceType)}
+                    options={[
+                      { value: 'ubuntu_ssh', label: 'Ubuntu Linux Server (SSH)' },
+                      { value: 'cpanel', label: 'cPanel / WHM Hosting Server' },
+                    ]}
+                  />
+                )}
               />
             </FormField>
 
             <div className="grid grid-cols-3 gap-3">
               <div className="col-span-2">
-                <FormField label="Host / IP Address" htmlFor="res-host" required>
+                <FormField
+                  label="Host / IP Address"
+                  htmlFor="res-host"
+                  required
+                  error={errors.host?.message}
+                >
                   <input
                     id="res-host"
                     type="text"
-                    value={host}
-                    onChange={(e) => setHost(e.target.value)}
+                    {...register('host')}
                     placeholder="192.168.1.100 or server.domain.com"
+                    aria-invalid={Boolean(errors.host)}
                     className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                 </FormField>
               </div>
               <div>
-                <FormField label="Port" htmlFor="res-port" required>
+                <FormField
+                  label="Port"
+                  htmlFor="res-port"
+                  required
+                  error={errors.port?.message}
+                >
                   <input
                     id="res-port"
                     type="number"
-                    value={port}
-                    onChange={(e) => setPort(Number(e.target.value))}
+                    {...register('port')}
+                    aria-invalid={Boolean(errors.port)}
                     className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                 </FormField>
@@ -245,33 +261,49 @@ export default function NewResourcePage() {
             </div>
 
             <div className="grid grid-cols-2 gap-3">
-              <FormField label="Username" htmlFor="res-user" required>
+              <FormField
+                label="Username"
+                htmlFor="res-user"
+                required
+                error={errors.username?.message}
+              >
                 <input
                   id="res-user"
                   type="text"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  {...register('username')}
                   placeholder="root or cpanel_user"
+                  aria-invalid={Boolean(errors.username)}
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                 />
               </FormField>
 
-              <FormField label="Auth Method" htmlFor="res-auth-type" required>
-                <Select
-                  id="res-auth-type"
-                  value={authType}
-                  onChange={(e) => setAuthType(e.target.value)}
-                  options={
-                    type === 'ubuntu_ssh'
-                      ? [
-                          { value: 'ssh_key', label: 'SSH Key' },
-                          { value: 'ssh_password', label: 'SSH Password' },
-                        ]
-                      : [
-                          { value: 'cpanel_api_token', label: 'cPanel API Token' },
-                          { value: 'cpanel_password', label: 'cPanel Password' },
-                        ]
-                  }
+              <FormField
+                label="Auth Method"
+                htmlFor="res-auth-type"
+                required
+                error={errors.auth_type?.message}
+              >
+                <Controller
+                  name="auth_type"
+                  control={control}
+                  render={({ field }) => (
+                    <Select
+                      id="res-auth-type"
+                      value={field.value}
+                      onChange={field.onChange}
+                      options={
+                        selectedType === 'ubuntu_ssh'
+                          ? [
+                              { value: 'ssh_key', label: 'SSH Key' },
+                              { value: 'ssh_password', label: 'SSH Password' },
+                            ]
+                          : [
+                              { value: 'cpanel_api_token', label: 'cPanel API Token' },
+                              { value: 'cpanel_password', label: 'cPanel Password' },
+                            ]
+                      }
+                    />
+                  )}
                 />
               </FormField>
             </div>
@@ -280,37 +312,46 @@ export default function NewResourcePage() {
               label="Authentication Credential"
               htmlFor="res-cred"
               required
+              error={errors.credential_id?.message}
               description={
-                compatibleCredentials.length === 0
+                !canViewCredentials
+                  ? 'Organization Administrator privileges are required to browse credential vault.'
+                  : compatibleCredentials.length === 0
                   ? 'No compatible credentials found. Please add a credential in the Vault first.'
                   : 'Select an encrypted credential from the Vault'
               }
             >
-              <Select
-                id="res-cred"
-                value={credentialId}
-                onChange={(e) => setCredentialId(e.target.value)}
-                options={[
-                  { value: '', label: '-- Select Credential --' },
-                  ...compatibleCredentials.map((c) => ({
-                    value: c.id,
-                    label: `${c.name} (${c.type.replace(/_/g, ' ')})`,
-                  })),
-                ]}
+              <Controller
+                name="credential_id"
+                control={control}
+                render={({ field }) => (
+                  <Select
+                    id="res-cred"
+                    value={field.value}
+                    onChange={field.onChange}
+                    options={[
+                      { value: '', label: '-- Select Credential --' },
+                      ...compatibleCredentials.map((c) => ({
+                        value: c.id,
+                        label: `${c.name} (${c.type.replace(/_/g, ' ')})`,
+                      })),
+                    ]}
+                  />
+                )}
               />
             </FormField>
 
-            {type === 'ubuntu_ssh' && (
+            {selectedType === 'ubuntu_ssh' && (
               <FormField
                 label="Host Key Fingerprint (Optional)"
                 htmlFor="res-fingerprint"
                 description="SHA-256 fingerprint for SSH host verification"
+                error={errors.host_key_fingerprint?.message}
               >
                 <input
                   id="res-fingerprint"
                   type="text"
-                  value={hostKeyFingerprint}
-                  onChange={(e) => setHostKeyFingerprint(e.target.value)}
+                  {...register('host_key_fingerprint')}
                   placeholder="SHA256:abc123xyz..."
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                 />
@@ -322,25 +363,24 @@ export default function NewResourcePage() {
                 label="Connection Timeout (seconds)"
                 htmlFor="res-timeout"
                 description="Default: 15s"
+                error={errors.connection_timeout_seconds?.message}
               >
                 <input
                   id="res-timeout"
                   type="number"
                   min={5}
                   max={60}
-                  value={connectionTimeout}
-                  onChange={(e) => setConnectionTimeout(Number(e.target.value))}
+                  {...register('connection_timeout_seconds')}
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                 />
               </FormField>
 
-              {type === 'cpanel' && (
+              {selectedType === 'cpanel' && (
                 <div className="flex flex-col justify-end pb-2">
                   <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
                     <input
                       type="checkbox"
-                      checked={useHttps}
-                      onChange={(e) => setUseHttps(e.target.checked)}
+                      {...register('use_https')}
                       className="rounded border-input text-primary focus:ring-ring"
                     />
                     <span>Use HTTPS (SSL/TLS)</span>
@@ -350,18 +390,19 @@ export default function NewResourcePage() {
             </div>
 
             <div className="flex justify-end gap-3 pt-4 border-t">
-              <Link
-                href="/resources"
+              <button
+                type="button"
+                onClick={() => safeNavigate('/resources')}
                 className="rounded-md border border-input bg-background px-4 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors"
               >
                 Cancel
-              </Link>
+              </button>
               <button
                 type="submit"
-                disabled={createResource.isPending}
+                disabled={isSubmitting || createResource.isPending}
                 className="inline-flex items-center justify-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus:outline-none disabled:opacity-50 transition-colors"
               >
-                {createResource.isPending ? 'Registering...' : 'Register Resource'}
+                {createResource.isPending || isSubmitting ? 'Registering...' : 'Register Resource'}
               </button>
             </div>
           </form>
@@ -370,3 +411,4 @@ export default function NewResourcePage() {
     </div>
   );
 }
+

@@ -4,6 +4,7 @@ import { tokenRefreshManager } from '@/lib/auth/token-refresh';
 export interface RequestOptions extends RequestInit {
   skipAuth?: boolean;
   skipOrgHeader?: boolean;
+  tenantOrgId?: string;
   _isRetry?: boolean;
 }
 
@@ -50,15 +51,15 @@ class ApiClient {
   }
 
   public async request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-    const { skipAuth = false, skipOrgHeader = false, _isRetry = false, ...fetchOptions } = options;
+    const { skipAuth = false, skipOrgHeader = false, tenantOrgId, _isRetry = false, ...fetchOptions } = options;
 
     const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
     const url = `/api/v1${cleanEndpoint}`;
 
     const headers = new Headers(fetchOptions.headers || {});
 
-    // Add Content-Type for mutation methods if body is present
-    if (fetchOptions.body && !headers.has('Content-Type')) {
+    // Add Content-Type for mutation methods only if body is present
+    if (fetchOptions.body !== undefined && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json');
     }
 
@@ -70,12 +71,12 @@ class ApiClient {
       }
     }
 
+    // Snapshot target organization ID for tenant-scoped endpoints
+    const targetOrgId = tenantOrgId ?? (this.isTenantScoped(cleanEndpoint) ? this.orgIdProvider() : null);
+
     // Inject X-Organization-ID for tenant-scoped endpoints
-    if (!skipOrgHeader && this.isTenantScoped(cleanEndpoint)) {
-      const orgId = this.orgIdProvider();
-      if (orgId) {
-        headers.set('X-Organization-ID', orgId);
-      }
+    if (!skipOrgHeader && this.isTenantScoped(cleanEndpoint) && targetOrgId) {
+      headers.set('X-Organization-ID', targetOrgId);
     }
 
     let response: Response;
@@ -120,9 +121,10 @@ class ApiClient {
           return newToken;
         });
 
-        // Replay the original request ONCE with new access token
+        // Replay the original request ONCE with new access token, preserving original tenantOrgId
         return this.request<T>(endpoint, {
           ...options,
+          tenantOrgId: targetOrgId || undefined,
           _isRetry: true,
         });
       } catch (refreshErr) {

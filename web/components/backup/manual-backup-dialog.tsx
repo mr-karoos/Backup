@@ -10,6 +10,7 @@ import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
 import { useCreateBackupJob } from '@/lib/api/mutations';
 import { usePermissions } from '@/lib/auth/permissions';
+import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
 import { FormField } from '@/components/ui/form-field';
 import { Select } from '@/components/ui/select';
 import type { BackupType, EngineType, StorageTargetResponse } from '@/types/domain';
@@ -28,6 +29,7 @@ export interface ManualBackupDialogProps {
   resource?: {
     id: string;
     name: string;
+    type?: string;
   };
 }
 
@@ -41,6 +43,13 @@ export function ManualBackupDialog({
   const { activeOrgId } = useAuth();
   const { canExecutePlanBackup, canExecuteAdHocBackup } = usePermissions();
   const createJob = useCreateBackupJob();
+
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      onOpenChange(false);
+    },
+  });
+
   const { data: storageTargets, isLoading: loadingStorage } = useQuery<StorageTargetResponse[]>({
     queryKey: activeOrgId ? queryKeys.org(activeOrgId).storageTargets.all() : ['disabled'],
     queryFn: () => apiClient.get<StorageTargetResponse[]>('/storage-targets'),
@@ -60,8 +69,21 @@ export function ManualBackupDialog({
   const [excludeInput, setExcludeInput] = React.useState<string>('');
   const [validationError, setValidationError] = React.useState<string | null>(null);
 
+  const handleOpenChange = (newOpen: boolean) => {
+    if (!newOpen) {
+      setValidationError(null);
+      setDatabasesInput('');
+      setPathsInput('/var/www/html');
+      setExcludeInput('');
+    }
+    onOpenChange(newOpen);
+  };
+
   const isPlanMode = Boolean(plan);
-  const canExecute = isPlanMode ? canExecutePlanBackup : canExecuteAdHocBackup;
+  const isEligibleResource = !resource || !resource.type || resource.type === 'ubuntu_ssh';
+  const canExecute = isPlanMode
+    ? canExecutePlanBackup
+    : canExecuteAdHocBackup && isEligibleResource;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -76,10 +98,11 @@ export function ManualBackupDialog({
       await createJob.mutateAsync({
         backup_plan_id: plan.id,
       });
-      onOpenChange(false);
+      handleOpenChange(false);
       router.push('/runs');
       return;
     }
+
 
     // Ad-hoc validation
     if (!resource) return;
@@ -124,12 +147,12 @@ export function ManualBackupDialog({
       storage_target_id: storageTargetId,
       target_spec: targetSpec,
     });
-    onOpenChange(false);
+    handleOpenChange(false);
     router.push('/runs');
   };
 
   return (
-    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+    <DialogPrimitive.Root open={open} onOpenChange={handleOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <DialogPrimitive.Content
@@ -188,11 +211,16 @@ export function ManualBackupDialog({
                   </span>
                 </div>
                 <p className="mt-2 text-xs text-zinc-400 border-t border-zinc-850 pt-2">
-                  This plan will execute with its pre-configured engine, selection, and retention policy.
+                  This plan will execute with its pre-configured content selection, destination, and retention settings.
                 </p>
               </div>
             ) : (
               <div className="space-y-4">
+                {resource && resource.type && resource.type !== 'ubuntu_ssh' && (
+                  <div className="rounded-md border border-amber-800/60 bg-amber-950/40 p-3 text-xs text-amber-300">
+                    Backup operations are not supported for this resource type yet. Only Ubuntu Linux servers (SSH) can run backups.
+                  </div>
+                )}
                 <FormField label="Backup Type" htmlFor="backup-type" required>
                   <Select
                     id="backup-type"
@@ -283,7 +311,7 @@ export function ManualBackupDialog({
             <div className="mt-6 flex justify-end gap-3 pt-2">
               <button
                 type="button"
-                onClick={() => onOpenChange(false)}
+                onClick={() => handleOpenChange(false)}
                 className="rounded-md border border-zinc-700 bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 hover:bg-zinc-700 focus:outline-none"
               >
                 Cancel

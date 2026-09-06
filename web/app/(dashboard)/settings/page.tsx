@@ -5,8 +5,15 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
 import { usePermissions } from '@/lib/auth/permissions';
+import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
 import { useUpdateOrganization } from '@/lib/api/mutations';
+import {
+  organizationEditSchema,
+  type OrganizationEditFormValues,
+} from '@/lib/forms/schemas';
 import { type OrganizationDetail } from '@/types/auth';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -30,7 +37,25 @@ export default function OrganizationSettingsPage() {
   const updateOrg = useUpdateOrganization();
 
   const [editDialogOpen, setEditDialogOpen] = React.useState(false);
-  const [orgName, setOrgName] = React.useState('');
+
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors, isSubmitting },
+  } = useForm<OrganizationEditFormValues>({
+    resolver: zodResolver(organizationEditSchema),
+    defaultValues: {
+      name: '',
+    },
+  });
+
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      setEditDialogOpen(false);
+      reset({ name: '' });
+    },
+  });
 
   const { data, isLoading, isError, error, refetch } = useQuery<OrganizationDetail>({
     queryKey: activeOrgId ? queryKeys.org(activeOrgId).settings() : ['disabled'],
@@ -40,23 +65,26 @@ export default function OrganizationSettingsPage() {
 
   const handleOpenEdit = () => {
     if (!data) return;
-    setOrgName(data.name);
+    reset({ name: data.name });
     setEditDialogOpen(true);
   };
 
-  const handleUpdate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!data || !orgName.trim()) return;
+  const onSubmit = async (values: OrganizationEditFormValues) => {
+    if (!data) return;
 
-    await updateOrg.mutateAsync({
-      id: data.id,
-      data: {
-        name: orgName.trim(),
-        metadata: data.metadata || {},
-      },
-    });
-    setEditDialogOpen(false);
-    refetch();
+    try {
+      await updateOrg.mutateAsync({
+        id: data.id,
+        data: {
+          name: values.name.trim(),
+          metadata: data.metadata || {},
+        },
+      });
+      setEditDialogOpen(false);
+      refetch();
+    } catch {
+      // toast shown
+    }
   };
 
   return (
@@ -192,13 +220,18 @@ export default function OrganizationSettingsPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <form onSubmit={handleUpdate} className="space-y-4 py-2">
-            <FormField label="Organization Name" htmlFor="org-name-input" required>
+          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 py-2">
+            <FormField
+              label="Organization Name"
+              htmlFor="org-name-input"
+              required
+              error={errors.name?.message}
+            >
               <input
                 id="org-name-input"
                 type="text"
-                value={orgName}
-                onChange={(e) => setOrgName(e.target.value)}
+                {...register('name')}
+                aria-invalid={Boolean(errors.name)}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
               />
             </FormField>
@@ -213,9 +246,9 @@ export default function OrganizationSettingsPage() {
               </Button>
               <Button
                 type="submit"
-                disabled={updateOrg.isPending || !orgName.trim()}
+                disabled={isSubmitting || updateOrg.isPending}
               >
-                {updateOrg.isPending ? 'Saving...' : 'Save Changes'}
+                {updateOrg.isPending || isSubmitting ? 'Saving...' : 'Save Changes'}
               </Button>
             </div>
           </form>

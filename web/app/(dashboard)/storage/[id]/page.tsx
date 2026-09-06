@@ -8,6 +8,7 @@ import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
 import { usePermissions } from '@/lib/auth/permissions';
+import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
 import { useUpdateStorageTarget, useDeleteStorageTarget } from '@/lib/api/mutations';
 import { type StorageTargetResponse, type UpdateStorageTargetRequest } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
@@ -47,6 +48,14 @@ export default function StorageTargetDetailPage() {
   const updateTarget = useUpdateStorageTarget();
   const deleteTarget = useDeleteStorageTarget();
 
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      setEditDialogOpen(false);
+      setDeleteDialogOpen(false);
+      router.push('/storage');
+    },
+  });
+
   const { data, isLoading, isError, error, refetch } = useQuery<StorageTargetResponse>({
     queryKey: activeOrgId && id ? queryKeys.org(activeOrgId).storageTargets.detail(id) : ['disabled'],
     queryFn: () => apiClient.get<StorageTargetResponse>(`/storage-targets/${id}`),
@@ -56,7 +65,7 @@ export default function StorageTargetDetailPage() {
   const handleOpenEdit = () => {
     if (!data) return;
     setEditName(data.name);
-    if (data.s3_config) {
+    if (data.s3_config && data.type === 's3') {
       setEditBucket(data.s3_config.bucket);
       setEditRegion(data.s3_config.region || '');
       setEditEndpoint(data.s3_config.endpoint || '');
@@ -73,7 +82,8 @@ export default function StorageTargetDetailPage() {
       name: editName.trim() || undefined,
     };
 
-    if (data.type === 's3' || data.type === 's3_compatible') {
+    // Only S3 targets support config updates in backend; s3_compatible is strictly name-only
+    if (data.type === 's3') {
       payload.s3_config = {
         bucket: editBucket.trim(),
         region: editRegion.trim(),
@@ -82,9 +92,13 @@ export default function StorageTargetDetailPage() {
       };
     }
 
-    await updateTarget.mutateAsync({ id, data: payload });
-    setEditDialogOpen(false);
-    refetch();
+    try {
+      await updateTarget.mutateAsync({ id, data: payload });
+      setEditDialogOpen(false);
+      refetch();
+    } catch {
+      // Handled by onError toast
+    }
   };
 
   const handleDelete = async () => {
@@ -295,7 +309,13 @@ export default function StorageTargetDetailPage() {
               />
             </FormField>
 
-            {isCloud && (
+            {data.type === 's3_compatible' && (
+              <div className="rounded-md border border-amber-800/40 bg-amber-950/20 p-3 text-xs text-amber-300">
+                Endpoint and bucket parameters for S3-compatible targets are immutable in this version. Only the display name can be updated.
+              </div>
+            )}
+
+            {data.type === 's3' && (
               <>
                 <FormField label="Bucket Name" htmlFor="edit-bucket" required>
                   <input
@@ -316,19 +336,6 @@ export default function StorageTargetDetailPage() {
                     className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                 </FormField>
-
-                {data.type === 's3_compatible' && (
-                  <FormField label="Endpoint URL" htmlFor="edit-endpoint">
-                    <input
-                      id="edit-endpoint"
-                      type="text"
-                      value={editEndpoint}
-                      onChange={(e) => setEditEndpoint(e.target.value)}
-                      placeholder="https://..."
-                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
-                    />
-                  </FormField>
-                )}
 
                 <div className="pt-2">
                   <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">

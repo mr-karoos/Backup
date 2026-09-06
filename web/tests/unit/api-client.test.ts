@@ -137,4 +137,102 @@ describe('Central ApiClient', () => {
     expect(onTokenUpdate).not.toHaveBeenCalled();
     expect(onAuthFailure).not.toHaveBeenCalled();
   });
+
+  it('sends bodyless POST request without Content-Type header when data is undefined', async () => {
+    let capturedInit: RequestInit | undefined;
+
+    global.fetch = vi.fn().mockImplementation((_url, init) => {
+      capturedInit = init;
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ data: { status: 'success' } }),
+      });
+    });
+
+    apiClient.configure({
+      getToken: () => 'test-jwt-token',
+      getOrgId: () => 'tenant-111',
+      onTokenUpdate: vi.fn(),
+      onAuthFailure: vi.fn(),
+    });
+
+    await apiClient.post('/resources/res-1/test-connection', undefined);
+
+    expect(capturedInit).toBeDefined();
+    const headers = new Headers(capturedInit?.headers);
+    expect(headers.get('Content-Type')).toBeNull();
+    expect(capturedInit?.body).toBeUndefined();
+    expect(headers.get('X-Organization-ID')).toBe('tenant-111');
+  });
+
+  it('preserves custom tenantOrgId across 401 token refresh replay', async () => {
+    let callCount = 0;
+    const capturedHeaders: Headers[] = [];
+    let currentToken = 'expired-token';
+
+    global.fetch = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+
+      if (url === '/api/v1/auth/refresh') {
+        currentToken = 'fresh-token';
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              data: {
+                tokens: {
+                  access_token: 'fresh-token',
+                  token_type: 'Bearer',
+                  expires_in: 900,
+                },
+              },
+            }),
+        });
+      }
+
+      if (url === '/api/v1/resources') {
+        callCount++;
+        capturedHeaders.push(headers);
+
+        if (headers.get('Authorization') === 'Bearer expired-token') {
+          return Promise.resolve({
+            ok: false,
+            status: 401,
+            json: () => Promise.resolve({ error: { code: 'UNAUTHORIZED', message: 'Token expired' } }),
+          });
+        }
+
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ data: [] }),
+        });
+      }
+
+      return Promise.reject(new Error(`Unexpected url: ${url}`));
+    });
+
+    apiClient.configure({
+      getToken: () => currentToken,
+      getOrgId: () => 'default-org-id',
+      onTokenUpdate: (t) => {
+        currentToken = t;
+      },
+      onAuthFailure: vi.fn(),
+    });
+
+    // Request specifying a custom tenantOrgId (e.g. from an explicit mutation context)
+    const customOrgId = 'custom-org-999';
+    await apiClient.get('/resources', { tenantOrgId: customOrgId });
+
+    expect(callCount).toBe(2);
+    // Both initial call and replayed call MUST have the custom tenantOrgId
+    expect(capturedHeaders[0]?.get('X-Organization-ID')).toBe(customOrgId);
+    expect(capturedHeaders[1]?.get('X-Organization-ID')).toBe(customOrgId);
+    expect(capturedHeaders[1]?.get('Authorization')).toBe('Bearer fresh-token');
+  });
 });
+
+

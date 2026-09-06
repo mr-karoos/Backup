@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth/auth-context';
 import { useToast } from '@/lib/toast/toast-context';
@@ -22,6 +22,10 @@ export function useTenantFormGuard(options: TenantFormGuardOptions = {}) {
   const router = useRouter();
   const { toast } = useToast();
   const [initialOrgId] = useState<string | null>(activeOrgId);
+  const optionsRef = useRef(options);
+  useEffect(() => {
+    optionsRef.current = options;
+  });
 
   useEffect(() => {
     // If activeOrgId changed away from initialOrgId at mount
@@ -32,18 +36,18 @@ export function useTenantFormGuard(options: TenantFormGuardOptions = {}) {
         variant: 'destructive',
       });
 
-      if (options.onTenantChange) {
-        options.onTenantChange();
+      if (optionsRef.current.onTenantChange) {
+        optionsRef.current.onTenantChange();
       }
-      if (options.onTenantChanged) {
-        options.onTenantChanged();
+      if (optionsRef.current.onTenantChanged) {
+        optionsRef.current.onTenantChanged();
       }
 
-      if (options.fallbackPath) {
-        router.push(options.fallbackPath);
+      if (optionsRef.current.fallbackPath) {
+        router.push(optionsRef.current.fallbackPath);
       }
     }
-  }, [activeOrgId, router, toast, initialOrgId, options]);
+  }, [activeOrgId, router, toast, initialOrgId]);
 
   return {
     isCurrentOrg: initialOrgId === activeOrgId,

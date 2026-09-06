@@ -171,7 +171,7 @@ export default function ResourceDetailPage() {
               </Button>
             )}
 
-            {canExecuteAdHocBackup && (
+            {canExecuteAdHocBackup && data.type === 'ubuntu_ssh' && (
               <Button
                 size="sm"
                 onClick={() => setBackupDialogOpen(true)}

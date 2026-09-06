@@ -36,9 +36,11 @@ import { EmptyState } from '@/components/ui/empty-state';
 import { formatDate } from '@/lib/format/formatters';
 import { KeyRound, Shield, Eye, Lock, Plus, Pencil, Trash2 } from 'lucide-react';
 
+import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
+
 export default function CredentialsPage() {
-  const { activeOrgId, userRole, isSystemAdmin } = useAuth();
-  const { canManageCredentials } = usePermissions();
+  const { activeOrgId } = useAuth();
+  const { canViewCredentials, canManageCredentials } = usePermissions();
   const [selectedCred, setSelectedCred] = useState<CredentialListItemResponse | null>(null);
   const [editingCred, setEditingCred] = useState<CredentialListItemResponse | null>(null);
   const [deletingCred, setDeletingCred] = useState<CredentialListItemResponse | null>(null);
@@ -51,20 +53,38 @@ export default function CredentialsPage() {
   const [editApiToken, setEditApiToken] = useState('');
   const [editAccessKeyId, setEditAccessKeyId] = useState('');
   const [editSecretAccessKey, setEditSecretAccessKey] = useState('');
+  const [editSessionToken, setEditSessionToken] = useState('');
 
   const deleteCred = useDeleteCredential();
   const updateCred = useUpdateCredential();
 
-  const isAdmin = userRole === 'admin' || isSystemAdmin;
+  const clearSecretState = () => {
+    setEditPassword('');
+    setEditPrivateKey('');
+    setEditPassphrase('');
+    setEditApiToken('');
+    setEditAccessKeyId('');
+    setEditSecretAccessKey('');
+    setEditSessionToken('');
+  };
+
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      clearSecretState();
+      setEditingCred(null);
+      setDeletingCred(null);
+      setSelectedCred(null);
+    },
+  });
 
   const { data, isLoading, isError, error, refetch } = useQuery<CredentialListItemResponse[]>({
     queryKey: activeOrgId ? queryKeys.org(activeOrgId).credentials.all() : ['disabled'],
     queryFn: () => apiClient.get<CredentialListItemResponse[]>('/credentials'),
-    enabled: !!activeOrgId && isAdmin,
+    enabled: !!activeOrgId && canViewCredentials,
   });
 
   // Access Control Guard
-  if (!isAdmin) {
+  if (!canViewCredentials) {
     return (
       <div className="space-y-6">
         <h1 className="text-2xl font-bold tracking-tight text-foreground">Credentials Vault</h1>
@@ -75,7 +95,7 @@ export default function CredentialsPage() {
             </div>
             <h3 className="text-base font-semibold text-foreground">Access Restricted</h3>
             <p className="text-sm text-muted-foreground max-w-md">
-              Only Organization Administrators and System Administrators are authorized to view credentials metadata.
+              Only Organization Administrators are authorized to view and manage credentials.
             </p>
           </div>
         </Card>
@@ -88,12 +108,12 @@ export default function CredentialsPage() {
   const handleOpenEdit = (cred: CredentialListItemResponse) => {
     setEditingCred(cred);
     setEditName(cred.name);
-    setEditPassword('');
-    setEditPrivateKey('');
-    setEditPassphrase('');
-    setEditApiToken('');
-    setEditAccessKeyId('');
-    setEditSecretAccessKey('');
+    clearSecretState();
+  };
+
+  const handleCloseEdit = () => {
+    clearSecretState();
+    setEditingCred(null);
   };
 
   const handleUpdate = async (e: React.FormEvent) => {
@@ -115,13 +135,21 @@ export default function CredentialsPage() {
       payload.secret = editApiToken;
     } else if (editingCred.type === 'cpanel_password' && editPassword) {
       payload.secret = editPassword;
-    } else if (editingCred.type === 's3_credentials' && editAccessKeyId && editSecretAccessKey) {
-      payload.access_key_id = editAccessKeyId.trim();
-      payload.secret_access_key = editSecretAccessKey.trim();
+    } else if (editingCred.type === 's3_credentials') {
+      if (editAccessKeyId && editSecretAccessKey) {
+        payload.access_key_id = editAccessKeyId.trim();
+        payload.secret_access_key = editSecretAccessKey.trim();
+      }
+      if (editSessionToken) {
+        payload.session_token = editSessionToken.trim();
+      }
     }
 
-    await updateCred.mutateAsync({ id: editingCred.id, data: payload });
+    const credId = editingCred.id;
+    // Wipe sensitive state in component memory BEFORE closing dialog
+    clearSecretState();
     setEditingCred(null);
+    await updateCred.mutateWithSecret({ id: credId, data: payload });
   };
 
   const handleDelete = async () => {
@@ -369,7 +397,7 @@ export default function CredentialsPage() {
       </Dialog>
 
       {/* Edit Credential Dialog */}
-      <Dialog open={!!editingCred} onOpenChange={(open) => !open && setEditingCred(null)}>
+      <Dialog open={!!editingCred} onOpenChange={(open) => !open && handleCloseEdit()}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -464,6 +492,14 @@ export default function CredentialsPage() {
                         placeholder="New Secret Key"
                       />
                     </FormField>
+                    <FormField label="New Session Token (Optional)" htmlFor="edit-session-token">
+                      <SecretInput
+                        id="edit-session-token"
+                        value={editSessionToken}
+                        onChange={(e) => setEditSessionToken(e.target.value)}
+                        placeholder="New session token (optional)"
+                      />
+                    </FormField>
                   </>
                 )}
               </div>
@@ -472,7 +508,7 @@ export default function CredentialsPage() {
                 <Button
                   type="button"
                   variant="outline"
-                  onClick={() => setEditingCred(null)}
+                  onClick={handleCloseEdit}
                 >
                   Cancel
                 </Button>

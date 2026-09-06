@@ -49,7 +49,13 @@ export function ConfirmDialog({
 
   return (
     <Dialog open={open} onOpenChange={(val) => !isLoading && onOpenChange(val)}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent
+        className="sm:max-w-md"
+        onOpenAutoFocus={(e) => {
+          e.preventDefault();
+          cancelRef.current?.focus();
+        }}
+      >
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription asChild>

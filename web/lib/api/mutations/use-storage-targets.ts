@@ -18,13 +18,17 @@ export function useCreateStorageTarget() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async (data: CreateStorageTargetRequest) => {
-      return apiClient.post<StorageTargetResponse>('/storage-targets', data);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.post<StorageTargetResponse>('/storage-targets', data, { tenantOrgId });
     },
-    onSuccess: (res) => {
-      if (activeOrgId) {
+    onSuccess: (res, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).storage.all(),
+          queryKey: queryKeys.org(targetOrg).storage.all(),
         });
       }
       toast({
@@ -53,16 +57,20 @@ export function useUpdateStorageTarget() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async ({ id, data }: { id: string; data: UpdateStorageTargetRequest }) => {
-      return apiClient.put<StorageTargetResponse>(`/storage-targets/${id}`, data);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.put<StorageTargetResponse>(`/storage-targets/${id}`, data, { tenantOrgId });
     },
-    onSuccess: (res) => {
-      if (activeOrgId) {
+    onSuccess: (res, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).storage.all(),
+          queryKey: queryKeys.org(targetOrg).storage.all(),
         });
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).storage.detail(res.id),
+          queryKey: queryKeys.org(targetOrg).storage.detail(res.id),
         });
       }
       toast({
@@ -91,13 +99,17 @@ export function useDeleteStorageTarget() {
   const { toast } = useToast();
 
   return useMutation({
+    onMutate: () => ({ tenantOrgId: activeOrgId }),
     mutationFn: async (id: string) => {
-      return apiClient.delete(`/storage-targets/${id}`);
+      const tenantOrgId = activeOrgId;
+      if (!tenantOrgId) throw new Error('No active organization selected.');
+      return apiClient.delete(`/storage-targets/${id}`, { tenantOrgId });
     },
-    onSuccess: () => {
-      if (activeOrgId) {
+    onSuccess: (_data, _vars, context) => {
+      const targetOrg = context?.tenantOrgId || activeOrgId;
+      if (targetOrg) {
         queryClient.invalidateQueries({
-          queryKey: queryKeys.org(activeOrgId).storage.all(),
+          queryKey: queryKeys.org(targetOrg).storage.all(),
         });
       }
       toast({

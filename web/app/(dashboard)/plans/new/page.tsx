@@ -4,6 +4,8 @@ import * as React from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
+import { useForm, Controller } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
 import {
   ArrowLeft,
   Calendar,
@@ -13,6 +15,7 @@ import {
   CheckCircle2,
   ChevronRight,
   ChevronLeft,
+  AlertTriangle,
 } from 'lucide-react';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
@@ -24,11 +27,13 @@ import { useCreateBackupPlan, useDiscoverDatabases } from '@/lib/api/mutations';
 import { FormField } from '@/components/ui/form-field';
 import { Select } from '@/components/ui/select';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import {
+  backupPlanSchema,
+  type BackupPlanFormValues,
+} from '@/lib/forms/schemas';
 import type {
   ResourceResponse,
   StorageTargetResponse,
-  BackupType,
-  EngineType,
   CreateBackupPlanRequest,
 } from '@/types/domain';
 
@@ -49,34 +54,9 @@ export default function NewBackupPlanPage() {
   const discoverDbs = useDiscoverDatabases();
 
   const [step, setStep] = React.useState<number>(0);
-
-  // Form State
-  const [name, setName] = React.useState('');
-  const [selectedResourceId, setSelectedResourceId] = React.useState('');
-  const [backupType, setBackupType] = React.useState<BackupType>('mysql_database');
-  const [engineType] = React.useState<EngineType>('direct_stream');
-
-  // MySQL Selection
-  const [dbMode, setDbMode] = React.useState<'all' | 'selected'>('all');
-  const [selectedDatabases, setSelectedDatabases] = React.useState<string[]>([]);
-  const [manualDbInput, setManualDbInput] = React.useState('');
-  const [discoveredDbs, setDiscoveredDbs] = React.useState<string[]>([]);
-
-  // Website Files Selection
-  const [paths, setPaths] = React.useState<string>('/var/www/html');
-  const [excludes, setExcludes] = React.useState<string>('*.log, cache/*, tmp/*');
-
-  // Schedule
   const [schedulePreset, setSchedulePreset] = React.useState<'daily' | '12h' | 'weekly' | 'custom'>('daily');
-  const [cronExpression, setCronExpression] = React.useState('0 2 * * *');
-  const [timezone, setTimezone] = React.useState('UTC');
-
-  // Storage & Retention
-  const [selectedStorageTargetId, setSelectedStorageTargetId] = React.useState('');
-  const [keepLastN, setKeepLastN] = React.useState<number>(7);
-  const [keepDays, setKeepDays] = React.useState<number>(30);
-
-  const [validationError, setValidationError] = React.useState<string | null>(null);
+  const [discoveredDbs, setDiscoveredDbs] = React.useState<string[]>([]);
+  const [stepValidationError, setStepValidationError] = React.useState<string | null>(null);
 
   // Fetch resources
   const { data: resources, isLoading: loadingResources } = useQuery<ResourceResponse[]>({
@@ -92,23 +72,87 @@ export default function NewBackupPlanPage() {
     enabled: !!activeOrgId,
   });
 
-  const defaultResourceId = resources?.find((r) => r.status === 'active')?.id || '';
-  const resourceId = selectedResourceId || defaultResourceId;
-  const setResourceId = setSelectedResourceId;
+  const {
+    register,
+    handleSubmit,
+    watch,
+    setValue,
+    trigger,
+    control,
+    reset,
+    formState: { errors, isDirty, isSubmitting },
+  } = useForm<BackupPlanFormValues>({
+    resolver: zodResolver(backupPlanSchema),
+    defaultValues: {
+      name: '',
+      resource_id: '',
+      backup_type: 'mysql_database',
+      storage_target_id: '',
+      is_enabled: true,
+      cron_expression: '0 2 * * *',
+      timezone: 'UTC',
+      keep_last_n: 7,
+      keep_days: 30,
+      db_mode: 'all',
+      selected_databases: [],
+      manual_databases: '',
+      paths: '/var/www/html',
+      exclude_patterns: '*.log, cache/*, tmp/*',
+    },
+  });
 
-  const defaultStorageTargetId =
-    storageTargets?.find((t) => t.is_default && t.status === 'active')?.id ||
-    storageTargets?.find((t) => t.status === 'active')?.id ||
-    '';
-  const storageTargetId = selectedStorageTargetId || defaultStorageTargetId;
-  const setStorageTargetId = setSelectedStorageTargetId;
+  const resourceId = watch('resource_id');
+  const backupType = watch('backup_type');
+  const dbMode = watch('db_mode');
+  const selectedDatabases = watch('selected_databases') || [];
+  const isEnabled = watch('is_enabled');
+  const cronExpression = watch('cron_expression') || '';
+  const timezone = watch('timezone');
+  const storageTargetId = watch('storage_target_id');
+  const keepLastN = watch('keep_last_n');
+  const keepDays = watch('keep_days');
+  const planName = watch('name');
+
+  // Set default resource once loaded
+  React.useEffect(() => {
+    if (resources && !resourceId) {
+      const defaultRes = resources.find((r) => r.status === 'active' && r.type === 'ubuntu_ssh');
+      if (defaultRes) {
+        setValue('resource_id', defaultRes.id);
+      }
+    }
+  }, [resources, resourceId, setValue]);
+
+  // Set default storage target once loaded
+  React.useEffect(() => {
+    if (storageTargets && !storageTargetId) {
+      const defaultTarget =
+        storageTargets.find((t) => t.is_default && t.status === 'active') ||
+        storageTargets.find((t) => t.status === 'active');
+      if (defaultTarget) {
+        setValue('storage_target_id', defaultTarget.id);
+      }
+    }
+  }, [storageTargets, storageTargetId, setValue]);
+
+  const { bypassGuard, safeNavigate } = useUnsavedChanges(isDirty);
+
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      reset();
+      router.push('/plans');
+    },
+  });
+
+  const selectedResource = resources?.find((r) => r.id === resourceId);
+  const selectedStorage = storageTargets?.find((t) => t.id === storageTargetId);
 
   // Schedule presets updater
   const handlePresetChange = (preset: 'daily' | '12h' | 'weekly' | 'custom') => {
     setSchedulePreset(preset);
-    if (preset === 'daily') setCronExpression('0 2 * * *');
-    else if (preset === '12h') setCronExpression('0 */12 * * *');
-    else if (preset === 'weekly') setCronExpression('0 2 * * 0');
+    if (preset === 'daily') setValue('cron_expression', '0 2 * * *', { shouldValidate: true });
+    else if (preset === '12h') setValue('cron_expression', '0 */12 * * *', { shouldValidate: true });
+    else if (preset === 'weekly') setValue('cron_expression', '0 2 * * 0', { shouldValidate: true });
   };
 
   const handleDiscover = async () => {
@@ -118,23 +162,12 @@ export default function NewBackupPlanPage() {
       const names = res.map((d) => d.name);
       setDiscoveredDbs(names);
       if (names.length > 0 && selectedDatabases.length === 0) {
-        setSelectedDatabases(names);
+        setValue('selected_databases', names, { shouldDirty: true, shouldValidate: true });
       }
     } catch {
-      // toast shown
+      // handled by mutation toast
     }
   };
-
-  const isDirty = Boolean(name || resourceId);
-  useUnsavedChanges(isDirty);
-
-  useTenantFormGuard({
-    onTenantChanged: () => {
-      setName('');
-      setResourceId('');
-      router.push('/plans');
-    },
-  });
 
   if (!canCreatePlan) {
     return (
@@ -161,95 +194,84 @@ export default function NewBackupPlanPage() {
     );
   }
 
-  const selectedResource = resources?.find((r) => r.id === resourceId);
-  const selectedStorage = storageTargets?.find((t) => t.id === storageTargetId);
-
-  const validateStep = (): boolean => {
-    setValidationError(null);
+  const validateCurrentStep = async (): Promise<boolean> => {
+    setStepValidationError(null);
     if (step === 0) {
-      if (!name.trim()) {
-        setValidationError('Plan name is required.');
+      const valid = await trigger(['name', 'resource_id']);
+      if (!valid) return false;
+      if (selectedResource && selectedResource.type !== 'ubuntu_ssh') {
+        setStepValidationError('Backup operations are not supported for this resource type yet.');
         return false;
       }
-      if (!resourceId) {
-        setValidationError('Please select a target resource.');
-        return false;
-      }
+      return true;
+    } else if (step === 1) {
+      return await trigger(['backup_type']);
     } else if (step === 2) {
       if (backupType === 'mysql_database') {
-        if (dbMode === 'selected' && selectedDatabases.length === 0) {
-          const manual = manualDbInput.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-          if (manual.length === 0) {
-            setValidationError('Please specify at least one database name.');
-            return false;
-          }
-        }
+        return await trigger(['db_mode', 'selected_databases', 'manual_databases']);
       } else {
-        const pList = paths.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-        if (pList.length === 0) {
-          setValidationError('Please specify at least one directory path.');
-          return false;
-        }
+        return await trigger(['paths', 'exclude_patterns']);
       }
     } else if (step === 3) {
-      const parts = cronExpression.trim().split(/\s+/);
-      if (parts.length !== 5) {
-        setValidationError('Please provide a valid 5-field cron expression (e.g. "0 2 * * *").');
-        return false;
-      }
+      return await trigger(['is_enabled', 'cron_expression', 'timezone']);
     } else if (step === 4) {
-      if (!storageTargetId) {
-        setValidationError('Please select a storage destination.');
-        return false;
-      }
+      return await trigger(['storage_target_id', 'keep_last_n', 'keep_days']);
     }
     return true;
   };
 
-  const handleNext = () => {
-    if (validateStep()) {
+  const handleNext = async () => {
+    const isValid = await validateCurrentStep();
+    if (isValid) {
       setStep((s) => Math.min(s + 1, STEPS.length - 1));
     }
   };
 
   const handleBack = () => {
-    setValidationError(null);
+    setStepValidationError(null);
     setStep((s) => Math.max(s - 1, 0));
   };
 
-  const handleSubmit = async () => {
-    if (!validateStep()) return;
-
+  const onSubmit = async (values: BackupPlanFormValues) => {
     const payload: CreateBackupPlanRequest = {
-      name: name.trim(),
-      resource_id: resourceId,
-      backup_type: backupType,
-      engine_type: engineType,
-      storage_target_id: storageTargetId || undefined,
+      name: values.name.trim(),
+      resource_id: values.resource_id,
+      backup_type: values.backup_type,
+      engine_type: 'direct_stream',
+      storage_target_id: values.storage_target_id || undefined,
       schedule: {
-        is_enabled: true,
-        cron_expression: cronExpression.trim(),
-        timezone: timezone || 'UTC',
+        is_enabled: values.is_enabled,
+        cron_expression: values.is_enabled ? values.cron_expression?.trim() : undefined,
+        timezone: values.timezone || 'UTC',
       },
       retention_policy: {
-        keep_last_n: Number(keepLastN) || undefined,
-        keep_days: Number(keepDays) || undefined,
+        keep_last_n: values.keep_last_n ? Number(values.keep_last_n) : undefined,
+        keep_days: values.keep_days ? Number(values.keep_days) : undefined,
       },
     };
 
-    if (backupType === 'mysql_database') {
+    if (values.backup_type === 'mysql_database') {
       let dbs: string[] = [];
-      if (dbMode === 'selected') {
-        const manual = manualDbInput.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-        dbs = Array.from(new Set([...selectedDatabases, ...manual]));
+      if (values.db_mode === 'selected') {
+        const manual = (values.manual_databases || '')
+          .split(/[,\n]/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        dbs = Array.from(new Set([...values.selected_databases, ...manual]));
       }
       payload.database_selection = {
-        mode: dbMode,
+        mode: values.db_mode,
         databases: dbs,
       };
     } else {
-      const pathList = paths.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
-      const excludeList = excludes.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
+      const pathList = (values.paths || '')
+        .split(/[,\n]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const excludeList = (values.exclude_patterns || '')
+        .split(/[,\n]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
       payload.file_selection = {
         paths: pathList,
         exclude_patterns: excludeList,
@@ -257,6 +279,7 @@ export default function NewBackupPlanPage() {
     }
 
     try {
+      bypassGuard();
       await createPlan.mutateAsync(payload);
       router.push('/plans');
     } catch {
@@ -268,13 +291,14 @@ export default function NewBackupPlanPage() {
     <div className="max-w-3xl space-y-6">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <Link
-          href="/plans"
+        <button
+          type="button"
+          onClick={() => safeNavigate('/plans')}
           className="rounded-md p-1 text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
           aria-label="Back to plans"
         >
           <ArrowLeft className="h-5 w-5" />
-        </Link>
+        </button>
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">Create Backup Plan</h1>
           <p className="text-sm text-muted-foreground">
@@ -312,9 +336,10 @@ export default function NewBackupPlanPage() {
         ))}
       </div>
 
-      {validationError && (
-        <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-          {validationError}
+      {stepValidationError && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          <span>{stepValidationError}</span>
         </div>
       )}
 
@@ -330,13 +355,18 @@ export default function NewBackupPlanPage() {
           {/* Step 0: Plan Name & Target Resource */}
           {step === 0 && (
             <div className="space-y-4">
-              <FormField label="Plan Name" htmlFor="plan-name" required>
+              <FormField
+                label="Plan Name"
+                htmlFor="plan-name"
+                required
+                error={errors.name?.message}
+              >
                 <input
                   id="plan-name"
                   type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
+                  {...register('name')}
                   placeholder="e.g. Daily Production Database Backup"
+                  aria-invalid={Boolean(errors.name)}
                   className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                 />
               </FormField>
@@ -345,24 +375,41 @@ export default function NewBackupPlanPage() {
                 label="Target Resource"
                 htmlFor="plan-resource"
                 required
-                description="Select an active server to execute this backup plan on"
+                error={errors.resource_id?.message}
+                description="Select an active Ubuntu Linux server to execute this backup plan on. Note: cPanel resources are not currently supported."
               >
-                <Select
-                  id="plan-resource"
-                  value={resourceId}
-                  onChange={(e) => setResourceId(e.target.value)}
-                  disabled={loadingResources}
-                  options={[
-                    { value: '', label: '-- Select Resource --' },
-                    ...(resources
-                      ?.filter((r) => r.status === 'active')
-                      .map((r) => ({
-                        value: r.id,
-                        label: `${r.name} (${r.type})`,
-                      })) || []),
-                  ]}
+                <Controller
+                  name="resource_id"
+                  control={control}
+                  render={({ field }) => (
+                    <Select
+                      id="plan-resource"
+                      value={field.value}
+                      onChange={field.onChange}
+                      disabled={loadingResources}
+                      options={[
+                        { value: '', label: '-- Select Resource --' },
+                        ...(resources
+                          ?.filter((r) => r.status === 'active')
+                          .map((r) => ({
+                            value: r.id,
+                            label:
+                              r.type === 'ubuntu_ssh'
+                                ? `${r.name} (Ubuntu Linux)`
+                                : `${r.name} (cPanel — Unsupported)`,
+                            disabled: r.type !== 'ubuntu_ssh',
+                          })) || []),
+                      ]}
+                    />
+                  )}
                 />
               </FormField>
+
+              {selectedResource && selectedResource.type !== 'ubuntu_ssh' && (
+                <div className="rounded-md border border-amber-800/40 bg-amber-950/20 p-3 text-xs text-amber-300">
+                  Backup operations are not supported for this resource type yet. Please select an Ubuntu Linux resource.
+                </div>
+              )}
             </div>
           )}
 
@@ -370,11 +417,11 @@ export default function NewBackupPlanPage() {
           {step === 1 && (
             <div className="space-y-4">
               <p className="text-sm text-muted-foreground">
-                Select the backup category to create. Direct streaming engine will be utilized.
+                Select what type of data this plan should protect.
               </p>
               <div className="grid grid-cols-2 gap-4">
                 <div
-                  onClick={() => setBackupType('mysql_database')}
+                  onClick={() => setValue('backup_type', 'mysql_database', { shouldValidate: true })}
                   className={`cursor-pointer rounded-lg border p-4 transition-all ${
                     backupType === 'mysql_database'
                       ? 'border-primary bg-primary/10 shadow-sm'
@@ -386,12 +433,12 @@ export default function NewBackupPlanPage() {
                     <span className="font-semibold text-foreground">MySQL Database</span>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Consistent mysqldump execution with gzip compression streamed directly to destination storage.
+                    Creates consistent, automated backups of your MySQL databases directly to your configured storage destination.
                   </p>
                 </div>
 
                 <div
-                  onClick={() => setBackupType('website_files')}
+                  onClick={() => setValue('backup_type', 'website_files', { shouldValidate: true })}
                   className={`cursor-pointer rounded-lg border p-4 transition-all ${
                     backupType === 'website_files'
                       ? 'border-primary bg-primary/10 shadow-sm'
@@ -403,7 +450,7 @@ export default function NewBackupPlanPage() {
                     <span className="font-semibold text-foreground">Website Files</span>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Directory tarball archive of web roots, configuration files, and assets with exclusion pattern support.
+                    Creates archives of web roots, application directories, and asset files with customizable exclusion patterns.
                   </p>
                 </div>
               </div>
@@ -422,7 +469,7 @@ export default function NewBackupPlanPage() {
                           type="radio"
                           name="db-mode"
                           checked={dbMode === 'all'}
-                          onChange={() => setDbMode('all')}
+                          onChange={() => setValue('db_mode', 'all', { shouldValidate: true })}
                           className="text-primary focus:ring-ring"
                         />
                         <span>Back up all databases</span>
@@ -432,7 +479,7 @@ export default function NewBackupPlanPage() {
                           type="radio"
                           name="db-mode"
                           checked={dbMode === 'selected'}
-                          onChange={() => setDbMode('selected')}
+                          onChange={() => setValue('db_mode', 'selected', { shouldValidate: true })}
                           className="text-primary focus:ring-ring"
                         />
                         <span>Select specific databases</span>
@@ -454,7 +501,7 @@ export default function NewBackupPlanPage() {
                             className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
                           >
                             <Database className="h-3.5 w-3.5" />
-                            {discoverDbs.isPending ? 'Scanning...' : 'Scan from Host'}
+                            {discoverDbs.isPending ? 'Discovering...' : 'Discover databases on server'}
                           </button>
                         )}
                       </div>
@@ -465,26 +512,30 @@ export default function NewBackupPlanPage() {
                             Select discovered databases:
                           </p>
                           <div className="grid grid-cols-2 gap-2">
-                            {discoveredDbs.map((name) => (
+                            {discoveredDbs.map((dbName) => (
                               <label
-                                key={name}
+                                key={dbName}
                                 className="flex items-center gap-2 text-xs font-mono text-foreground cursor-pointer"
                               >
                                 <input
                                   type="checkbox"
-                                  checked={selectedDatabases.includes(name)}
+                                  checked={selectedDatabases.includes(dbName)}
                                   onChange={(e) => {
                                     if (e.target.checked) {
-                                      setSelectedDatabases([...selectedDatabases, name]);
+                                      setValue('selected_databases', [...selectedDatabases, dbName], {
+                                        shouldValidate: true,
+                                      });
                                     } else {
-                                      setSelectedDatabases(
-                                        selectedDatabases.filter((n) => n !== name)
+                                      setValue(
+                                        'selected_databases',
+                                        selectedDatabases.filter((n) => n !== dbName),
+                                        { shouldValidate: true }
                                       );
                                     }
                                   }}
                                   className="rounded border-input text-primary focus:ring-ring"
                                 />
-                                <span>{name}</span>
+                                <span>{dbName}</span>
                               </label>
                             ))}
                           </div>
@@ -495,12 +546,12 @@ export default function NewBackupPlanPage() {
                         label="Additional or Manual Database Names"
                         htmlFor="manual-dbs"
                         description="Comma or newline separated database names"
+                        error={errors.selected_databases?.message}
                       >
                         <textarea
                           id="manual-dbs"
                           rows={3}
-                          value={manualDbInput}
-                          onChange={(e) => setManualDbInput(e.target.value)}
+                          {...register('manual_databases')}
                           placeholder="db_app, db_auth"
                           className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                         />
@@ -511,16 +562,16 @@ export default function NewBackupPlanPage() {
               ) : (
                 <>
                   <FormField
-                    label="Directory Paths"
+                    label="Directory Paths to Back Up"
                     htmlFor="file-paths"
                     required
+                    error={errors.paths?.message}
                     description="Comma or newline separated absolute paths (POSIX format)"
                   >
                     <textarea
                       id="file-paths"
                       rows={3}
-                      value={paths}
-                      onChange={(e) => setPaths(e.target.value)}
+                      {...register('paths')}
                       placeholder="/var/www/html&#10;/etc/nginx"
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                     />
@@ -534,8 +585,7 @@ export default function NewBackupPlanPage() {
                     <input
                       id="exclude-patterns"
                       type="text"
-                      value={excludes}
-                      onChange={(e) => setExcludes(e.target.value)}
+                      {...register('exclude_patterns')}
                       placeholder="*.log, cache/*, tmp/*"
                       className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                     />
@@ -548,60 +598,95 @@ export default function NewBackupPlanPage() {
           {/* Step 3: Schedule & Timezone */}
           {step === 3 && (
             <div className="space-y-4">
-              <FormField label="Schedule Presets" htmlFor="schedule-preset">
-                <div className="grid grid-cols-4 gap-2 pt-1">
-                  {[
-                    { id: 'daily', label: 'Daily (02:00)' },
-                    { id: '12h', label: 'Every 12h' },
-                    { id: 'weekly', label: 'Weekly (Sun)' },
-                    { id: 'custom', label: 'Custom Cron' },
-                  ].map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      onClick={() => handlePresetChange(p.id as any)}
-                      className={`rounded-md border py-2 px-3 text-xs font-medium transition-colors ${
-                        schedulePreset === p.id
-                          ? 'border-primary bg-primary/10 text-primary'
-                          : 'border-input hover:bg-muted text-muted-foreground'
-                      }`}
-                    >
-                      {p.label}
-                    </button>
-                  ))}
+              <div className="flex items-center justify-between pb-2 border-b">
+                <div>
+                  <label htmlFor="toggle-schedule" className="text-sm font-semibold text-foreground cursor-pointer">
+                    Enable Automated Schedule
+                  </label>
+                  <p className="text-xs text-muted-foreground">
+                    When enabled, backups run automatically based on the schedule configured below.
+                  </p>
                 </div>
-              </FormField>
-
-              <FormField
-                label="Cron Expression (5 fields)"
-                htmlFor="cron-exp"
-                required
-                description="Minute Hour Day-of-Month Month Day-of-Week"
-              >
                 <input
-                  id="cron-exp"
-                  type="text"
-                  value={cronExpression}
-                  onChange={(e) => setCronExpression(e.target.value)}
-                  placeholder="0 2 * * *"
-                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                  id="toggle-schedule"
+                  type="checkbox"
+                  {...register('is_enabled')}
+                  className="h-4 w-4 rounded border-input text-primary focus:ring-ring cursor-pointer"
                 />
-              </FormField>
+              </div>
 
-              <FormField label="Timezone" htmlFor="schedule-tz" required>
-                <Select
-                  id="schedule-tz"
-                  value={timezone}
-                  onChange={(e) => setTimezone(e.target.value)}
-                  options={[
-                    { value: 'UTC', label: 'UTC (Coordinated Universal Time)' },
-                    { value: 'America/New_York', label: 'America/New_York (EST/EDT)' },
-                    { value: 'America/Los_Angeles', label: 'America/Los_Angeles (PST/PDT)' },
-                    { value: 'Europe/London', label: 'Europe/London (GMT/BST)' },
-                    { value: 'Europe/Berlin', label: 'Europe/Berlin (CET/CEST)' },
-                    { value: 'Asia/Tehran', label: 'Asia/Tehran (+03:30)' },
-                    { value: 'Asia/Tokyo', label: 'Asia/Tokyo (JST)' },
-                  ]}
+              {isEnabled ? (
+                <>
+                  <FormField label="Schedule Presets" htmlFor="schedule-preset">
+                    <div className="grid grid-cols-4 gap-2 pt-1">
+                      {[
+                        { id: 'daily', label: 'Daily (02:00)' },
+                        { id: '12h', label: 'Every 12h' },
+                        { id: 'weekly', label: 'Weekly (Sun)' },
+                        { id: 'custom', label: 'Custom Cron' },
+                      ].map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => handlePresetChange(p.id as any)}
+                          className={`rounded-md border py-2 px-3 text-xs font-medium transition-colors ${
+                            schedulePreset === p.id
+                              ? 'border-primary bg-primary/10 text-primary'
+                              : 'border-input hover:bg-muted text-muted-foreground'
+                          }`}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  </FormField>
+
+                  <FormField
+                    label="Cron Expression (5 fields)"
+                    htmlFor="cron-exp"
+                    required
+                    error={errors.cron_expression?.message}
+                    description="Minute Hour Day-of-Month Month Day-of-Week"
+                  >
+                    <input
+                      id="cron-exp"
+                      type="text"
+                      {...register('cron_expression')}
+                      placeholder="0 2 * * *"
+                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                    />
+                  </FormField>
+                </>
+              ) : (
+                <div className="rounded-md border border-muted bg-muted/20 p-3 text-xs text-muted-foreground">
+                  Scheduled execution is paused. Backups can still be triggered on-demand via the dashboard or API.
+                </div>
+              )}
+
+              <FormField label="Timezone" htmlFor="schedule-tz" required error={errors.timezone?.message}>
+                <Controller
+                  name="timezone"
+                  control={control}
+                  render={({ field }) => (
+                    <Select
+                      id="schedule-tz"
+                      value={field.value}
+                      onChange={field.onChange}
+                      options={[
+                        { value: 'UTC', label: 'UTC (Coordinated Universal Time)' },
+                        { value: 'America/New_York', label: 'America/New_York (EST/EDT)' },
+                        { value: 'America/Chicago', label: 'America/Chicago (CST/CDT)' },
+                        { value: 'America/Denver', label: 'America/Denver (MST/MDT)' },
+                        { value: 'America/Los_Angeles', label: 'America/Los_Angeles (PST/PDT)' },
+                        { value: 'Europe/London', label: 'Europe/London (GMT/BST)' },
+                        { value: 'Europe/Berlin', label: 'Europe/Berlin (CET/CEST)' },
+                        { value: 'Europe/Paris', label: 'Europe/Paris (CET/CEST)' },
+                        { value: 'Asia/Dubai', label: 'Asia/Dubai (+04:00)' },
+                        { value: 'Asia/Tehran', label: 'Asia/Tehran (+03:30)' },
+                        { value: 'Asia/Tokyo', label: 'Asia/Tokyo (JST)' },
+                      ]}
+                    />
+                  )}
                 />
               </FormField>
             </div>
@@ -614,22 +699,29 @@ export default function NewBackupPlanPage() {
                 label="Storage Target"
                 htmlFor="storage-target-plan"
                 required
+                error={errors.storage_target_id?.message}
                 description="Destination for backup archives"
               >
-                <Select
-                  id="storage-target-plan"
-                  value={storageTargetId}
-                  onChange={(e) => setStorageTargetId(e.target.value)}
-                  disabled={loadingStorage}
-                  options={[
-                    { value: '', label: '-- Select Storage Target --' },
-                    ...(storageTargets
-                      ?.filter((t) => t.status === 'active')
-                      .map((t) => ({
-                        value: t.id,
-                        label: `${t.name} (${t.type})${t.is_default ? ' [Default]' : ''}`,
-                      })) || []),
-                  ]}
+                <Controller
+                  name="storage_target_id"
+                  control={control}
+                  render={({ field }) => (
+                    <Select
+                      id="storage-target-plan"
+                      value={field.value}
+                      onChange={field.onChange}
+                      disabled={loadingStorage}
+                      options={[
+                        { value: '', label: '-- Select Storage Target --' },
+                        ...(storageTargets
+                          ?.filter((t) => t.status === 'active')
+                          .map((t) => ({
+                            value: t.id,
+                            label: `${t.name} (${t.type})${t.is_default ? ' [Default]' : ''}`,
+                          })) || []),
+                      ]}
+                    />
+                  )}
                 />
               </FormField>
 
@@ -637,14 +729,14 @@ export default function NewBackupPlanPage() {
                 <FormField
                   label="Keep Last N Backups"
                   htmlFor="retention-count"
-                  description="Number of successful runs to retain (0 = unlimited)"
+                  description="Number of successful runs to retain (leave empty for unlimited)"
+                  error={errors.keep_last_n?.message}
                 >
                   <input
                     id="retention-count"
                     type="number"
                     min={0}
-                    value={keepLastN}
-                    onChange={(e) => setKeepLastN(Number(e.target.value))}
+                    {...register('keep_last_n')}
                     className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                 </FormField>
@@ -652,14 +744,14 @@ export default function NewBackupPlanPage() {
                 <FormField
                   label="Keep for N Days"
                   htmlFor="retention-days"
-                  description="Maximum age in days before pruning (0 = unlimited)"
+                  description="Maximum age in days before pruning (leave empty for unlimited)"
+                  error={errors.keep_days?.message}
                 >
                   <input
                     id="retention-days"
                     type="number"
                     min={0}
-                    value={keepDays}
-                    onChange={(e) => setKeepDays(Number(e.target.value))}
+                    {...register('keep_days')}
                     className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
                   />
                 </FormField>
@@ -673,7 +765,7 @@ export default function NewBackupPlanPage() {
               <div className="rounded-lg border p-4 bg-muted/20 space-y-2">
                 <div className="flex justify-between border-b pb-2">
                   <span className="text-muted-foreground">Plan Name:</span>
-                  <span className="font-semibold text-foreground">{name}</span>
+                  <span className="font-semibold text-foreground">{planName}</span>
                 </div>
                 <div className="flex justify-between border-b pb-2">
                   <span className="text-muted-foreground">Target Resource:</span>
@@ -685,7 +777,9 @@ export default function NewBackupPlanPage() {
                 </div>
                 <div className="flex justify-between border-b pb-2">
                   <span className="text-muted-foreground">Schedule:</span>
-                  <span className="font-mono text-foreground">{cronExpression} ({timezone})</span>
+                  <span className="font-mono text-foreground">
+                    {isEnabled ? `${cronExpression} (${timezone})` : 'Disabled (Manual execution only)'}
+                  </span>
                 </div>
                 <div className="flex justify-between border-b pb-2">
                   <span className="text-muted-foreground">Storage Destination:</span>
@@ -694,7 +788,7 @@ export default function NewBackupPlanPage() {
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Retention Policy:</span>
                   <span className="text-foreground">
-                    Keep {keepLastN || 'all'} runs / {keepDays ? `${keepDays} days` : 'forever'}
+                    Keep {keepLastN ? `${keepLastN} runs` : 'all runs'} / {keepDays ? `${keepDays} days` : 'indefinite'}
                   </span>
                 </div>
               </div>
@@ -712,12 +806,13 @@ export default function NewBackupPlanPage() {
                 <ChevronLeft className="h-4 w-4" /> Back
               </button>
             ) : (
-              <Link
-                href="/plans"
+              <button
+                type="button"
+                onClick={() => safeNavigate('/plans')}
                 className="rounded-md border border-input bg-background px-4 py-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground transition-colors"
               >
                 Cancel
-              </Link>
+              </button>
             )}
 
             {step < STEPS.length - 1 ? (
@@ -731,12 +826,12 @@ export default function NewBackupPlanPage() {
             ) : (
               <button
                 type="button"
-                onClick={handleSubmit}
-                disabled={createPlan.isPending}
+                onClick={handleSubmit(onSubmit)}
+                disabled={isSubmitting || createPlan.isPending}
                 className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-5 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50 transition-colors"
               >
                 <CheckCircle2 className="h-4 w-4" />
-                {createPlan.isPending ? 'Creating...' : 'Create Backup Plan'}
+                {createPlan.isPending || isSubmitting ? 'Creating...' : 'Create Backup Plan'}
               </button>
             )}
           </div>
@@ -745,3 +840,4 @@ export default function NewBackupPlanPage() {
     </div>
   );
 }
+

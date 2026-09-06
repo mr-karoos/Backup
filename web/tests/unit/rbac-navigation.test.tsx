@@ -43,13 +43,21 @@ describe('RBAC Navigation Visibility', () => {
     expect(screen.queryByText('Restic')).toBeNull();
   });
 
-  it('exposes Credentials link when caller is an Admin', () => {
+  it('exposes Credentials link when caller is an Organization Admin', () => {
     vi.spyOn(AuthContextModule, 'useAuth').mockReturnValue({
       status: 'authenticated',
       user: { id: 'u1', email: 'admin@domain.com', full_name: 'Admin', is_system_admin: false },
       memberships: [],
       activeOrgId: 'org-1',
-      activeMembership: null,
+      activeMembership: {
+        organization_id: 'org-1',
+        organization_name: 'Org 1',
+        organization_slug: 'org-1',
+        is_default_internal: true,
+        role: 'admin',
+        status: 'active',
+        permissions: ['credential:read', 'credential:write'],
+      },
       isSystemAdmin: false,
       userRole: 'admin',
       login: vi.fn(),
@@ -67,4 +75,34 @@ describe('RBAC Navigation Visibility', () => {
     expect(screen.queryByText('Audit')).toBeNull();
     expect(screen.queryByText('Restore')).toBeNull();
   });
+
+  it('hides Credentials link when caller is a System Admin without Org Admin membership', () => {
+    vi.spyOn(AuthContextModule, 'useAuth').mockReturnValue({
+      status: 'authenticated',
+      user: { id: 'u2', email: 'sysadmin@domain.com', full_name: 'Sys Admin', is_system_admin: true },
+      memberships: [],
+      activeOrgId: 'org-1',
+      activeMembership: {
+        organization_id: 'org-1',
+        organization_name: 'Org 1',
+        organization_slug: 'org-1',
+        is_default_internal: true,
+        role: 'member',
+        status: 'active',
+        permissions: ['resource:read'],
+      },
+      isSystemAdmin: true,
+
+      userRole: 'member',
+      login: vi.fn(),
+      logout: vi.fn(),
+      switchOrganization: vi.fn(),
+    });
+
+    render(<SidebarNav />);
+
+    // System admin without org admin role must NOT see Credentials in tenant context
+    expect(screen.queryByText('Credentials')).toBeNull();
+  });
 });
+
