@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import Link from 'next/link';
 import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '@/lib/auth/auth-context';
@@ -9,6 +9,9 @@ import { queryKeys } from '@/lib/query/query-client';
 import { type BackupRunResponse } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 import {
   Table,
   TableHeader,
@@ -27,15 +30,69 @@ import {
   getStatusBadgeVariant,
   truncateId,
 } from '@/lib/format/formatters';
-import { History, ChevronRight, AlertCircle } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { History, ChevronRight, AlertCircle, X } from 'lucide-react';
+
+const STATUS_OPTIONS: { value: string; label: string }[] = [
+  { value: 'all', label: 'All Statuses' },
+  { value: 'pending', label: 'Pending' },
+  { value: 'running', label: 'Running' },
+  { value: 'success', label: 'Success' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'cancelled', label: 'Cancelled' },
+];
 
 export default function BackupRunsPage() {
   const { activeOrgId } = useAuth();
-  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [status, setStatus] = useState<string>('all');
+  const [fromDate, setFromDate] = useState<string>('');
+  const [toDate, setToDate] = useState<string>('');
+
+  // Validate date range boundaries: from_date must be earlier than or equal to to_date
+  const dateError = useMemo(() => {
+    if (fromDate && toDate && fromDate > toDate) {
+      return 'From date cannot be after To date.';
+    }
+    return null;
+  }, [fromDate, toDate]);
+
+  const hasActiveFilters = status !== 'all' || Boolean(fromDate) || Boolean(toDate);
+
+  // Compute exact server-affecting query parameters and cache keys
+  const activeFilters = useMemo(() => {
+    const filters: Record<string, string> = {};
+    if (status !== 'all') {
+      filters.status = status;
+    }
+    if (!dateError) {
+      if (fromDate) {
+        filters.from_date = `${fromDate}T00:00:00Z`;
+      }
+      if (toDate) {
+        filters.to_date = `${toDate}T23:59:59Z`;
+      }
+    }
+    return filters;
+  }, [status, fromDate, toDate, dateError]);
+
+  const queryPath = useMemo(() => {
+    const params = new URLSearchParams();
+    if (activeFilters.status) {
+      params.set('status', activeFilters.status);
+    }
+    if (activeFilters.from_date) {
+      params.set('from_date', activeFilters.from_date);
+    }
+    if (activeFilters.to_date) {
+      params.set('to_date', activeFilters.to_date);
+    }
+    const qs = params.toString();
+    return qs ? `/backup-runs?${qs}` : '/backup-runs';
+  }, [activeFilters]);
 
   const { data, isLoading, isError, error, refetch } = useQuery<BackupRunResponse[]>({
-    queryKey: activeOrgId ? queryKeys.org(activeOrgId).runs.all() : ['disabled'],
-    queryFn: () => apiClient.get<BackupRunResponse[]>('/backup-runs'),
+    queryKey: activeOrgId ? queryKeys.org(activeOrgId).runs.all(activeFilters) : ['disabled'],
+    queryFn: () => apiClient.get<BackupRunResponse[]>(queryPath),
     enabled: !!activeOrgId,
     // Conservative polling if active jobs exist
     refetchInterval: (query) => {
@@ -46,37 +103,104 @@ export default function BackupRunsPage() {
   });
 
   const runs = data || [];
-  const filtered = runs.filter((r) => {
-    if (statusFilter === 'all') return true;
-    return r.status === statusFilter;
-  });
+
+  const handleClearFilters = () => {
+    setStatus('all');
+    setFromDate('');
+    setToDate('');
+  };
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground">Backup Run History</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Chronological audit of backup executions and completion outcomes
-          </p>
+      {/* Header & Filter Controls */}
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">Backup Run History</h1>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Chronological audit of backup executions and completion outcomes
+            </p>
+          </div>
         </div>
 
-        {/* Filter Pills */}
-        <div className="flex flex-wrap gap-1.5 bg-muted p-1 rounded-lg text-xs self-start">
-          {['all', 'running', 'success', 'failed'].map((filterVal) => (
-            <button
-              key={filterVal}
-              onClick={() => setStatusFilter(filterVal)}
-              className={`px-3 py-1.5 rounded-md font-medium capitalize transition-colors ${
-                statusFilter === filterVal
-                  ? 'bg-background text-foreground shadow-xs'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {filterVal}
-            </button>
-          ))}
+        {/* Operational Filter Bar */}
+        <div className="rounded-lg border bg-card p-3 shadow-xs">
+          <div className="flex flex-col sm:flex-row sm:items-end gap-3">
+            {/* Status Filter */}
+            <div className="flex flex-col gap-1 w-full sm:w-44">
+              <label htmlFor="status-filter" className="text-xs font-medium text-muted-foreground">
+                Status
+              </label>
+              <Select
+                id="status-filter"
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                options={STATUS_OPTIONS}
+                aria-label="Filter runs by status"
+                className="h-9 text-xs"
+              />
+            </div>
+
+            {/* From Date */}
+            <div className="flex flex-col gap-1 w-full sm:w-40">
+              <label htmlFor="from-date-filter" className="text-xs font-medium text-muted-foreground">
+                From Date
+              </label>
+              <Input
+                id="from-date-filter"
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                aria-label="Filter runs from date"
+                className={cn(
+                  'h-9 text-xs',
+                  dateError && 'border-destructive focus-visible:ring-destructive'
+                )}
+              />
+            </div>
+
+            {/* To Date */}
+            <div className="flex flex-col gap-1 w-full sm:w-40">
+              <label htmlFor="to-date-filter" className="text-xs font-medium text-muted-foreground">
+                To Date
+              </label>
+              <Input
+                id="to-date-filter"
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                aria-label="Filter runs to date"
+                className={cn(
+                  'h-9 text-xs',
+                  dateError && 'border-destructive focus-visible:ring-destructive'
+                )}
+              />
+            </div>
+
+            {/* Clear Filters Button */}
+            {hasActiveFilters && (
+              <div className="flex items-center">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleClearFilters}
+                  className="h-9 text-xs gap-1.5 text-muted-foreground hover:text-foreground"
+                  aria-label="Clear all active filters"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Clear Filters
+                </Button>
+              </div>
+            )}
+          </div>
+
+          {/* Validation Feedback */}
+          {dateError && (
+            <div className="mt-2 text-xs text-destructive flex items-center gap-1.5" role="alert">
+              <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+              <span>{dateError}</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -102,15 +226,34 @@ export default function BackupRunsPage() {
             </div>
           ) : runs.length === 0 ? (
             <div className="p-6">
-              <EmptyState
-                icon={History}
-                title="No backup runs have been recorded"
-                description="Execution records will appear here as backup jobs are scheduled or executed."
-              />
-            </div>
-          ) : filtered.length === 0 ? (
-            <div className="p-6 text-center text-sm text-muted-foreground">
-              No runs match the selected filter.
+              {hasActiveFilters ? (
+                <div className="text-center py-8 space-y-3">
+                  <History className="h-8 w-8 mx-auto text-muted-foreground opacity-50" />
+                  <div className="space-y-1">
+                    <h3 className="text-sm font-semibold text-foreground">
+                      No runs match the selected filters
+                    </h3>
+                    <p className="text-xs text-muted-foreground max-w-sm mx-auto">
+                      Try adjusting or clearing your filters to view other execution records.
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleClearFilters}
+                    className="text-xs"
+                    aria-label="Clear filters and show all runs"
+                  >
+                    Clear Filters
+                  </Button>
+                </div>
+              ) : (
+                <EmptyState
+                  icon={History}
+                  title="No backup runs have been recorded"
+                  description="Execution records will appear here as backup jobs are scheduled or executed."
+                />
+              )}
             </div>
           ) : (
             <>
@@ -130,7 +273,7 @@ export default function BackupRunsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filtered.map((run) => {
+                    {runs.map((run) => {
                       const { label, variant } = getStatusBadgeVariant(run.status);
                       return (
                         <TableRow key={run.id}>
@@ -180,7 +323,7 @@ export default function BackupRunsPage() {
 
               {/* Mobile Stacked Cards */}
               <div className="md:hidden divide-y">
-                {filtered.map((run) => {
+                {runs.map((run) => {
                   const { label, variant } = getStatusBadgeVariant(run.status);
                   return (
                     <Link
