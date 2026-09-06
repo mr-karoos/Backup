@@ -155,10 +155,37 @@ export const storageCreateSchema = z.object({
 
 export type StorageCreateFormValues = z.infer<typeof storageCreateSchema>;
 
-export const storageEditSchema = z.object({
-  name: z.string().trim().min(1, 'Target name is required').max(255),
-  credential_id: z.string().optional(),
-});
+export const storageEditSchema = z
+  .object({
+    name: z.string().trim().min(1, 'Target name is required').max(255),
+    type: z.enum(['s3', 's3_compatible', 'local']).optional(),
+    bucket: z.string().trim().optional(),
+    region: z.string().trim().optional(),
+    endpoint: z.string().trim().optional(),
+    force_path_style: z.boolean().default(false),
+    credential_id: z.string().optional(),
+  })
+  .superRefine((val, ctx) => {
+    const isS3 =
+      val.type === 's3' ||
+      (val.type === undefined && (val.bucket !== undefined || val.region !== undefined));
+    if (isS3) {
+      if (!val.bucket || !val.bucket.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Bucket name is required',
+          path: ['bucket'],
+        });
+      }
+      if (!val.region || !val.region.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'Region is required',
+          path: ['region'],
+        });
+      }
+    }
+  });
 
 export type StorageEditFormValues = z.infer<typeof storageEditSchema>;
 

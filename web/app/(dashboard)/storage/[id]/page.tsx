@@ -4,12 +4,19 @@ import * as React from 'react';
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
 import { useAuth } from '@/lib/auth/auth-context';
 import { apiClient } from '@/lib/api/api-client';
 import { queryKeys } from '@/lib/query/query-client';
 import { usePermissions } from '@/lib/auth/permissions';
 import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
+import { useUnsavedChanges } from '@/lib/hooks/use-unsaved-changes';
 import { useUpdateStorageTarget, useDeleteStorageTarget } from '@/lib/api/mutations';
+import {
+  storageEditSchema,
+  type StorageEditFormValues,
+} from '@/lib/forms/schemas';
 import { type StorageTargetResponse, type UpdateStorageTargetRequest } from '@/types/domain';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -28,6 +35,229 @@ import {
 import { formatDate, getStatusBadgeVariant, formatStorageTargetType } from '@/lib/format/formatters';
 import { ArrowLeft, HardDrive, Cloud, Server, ShieldCheck, Check, Pencil, Trash2 } from 'lucide-react';
 
+export interface EditStorageTargetDialogProps {
+  target: StorageTargetResponse | null;
+  open: boolean;
+  onClose: () => void;
+}
+
+export function EditStorageTargetDialog({
+  target,
+  open,
+  onClose,
+}: EditStorageTargetDialogProps) {
+  const updateTarget = useUpdateStorageTarget();
+
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors, isDirty, isSubmitting },
+  } = useForm<StorageEditFormValues>({
+    resolver: zodResolver(storageEditSchema),
+    defaultValues: {
+      name: '',
+      type: undefined,
+      bucket: '',
+      region: '',
+      endpoint: '',
+      force_path_style: false,
+    },
+  });
+
+  const { bypassGuard } = useUnsavedChanges(open && isDirty);
+
+  React.useEffect(() => {
+    if (open && target) {
+      reset({
+        name: target.name,
+        type: target.type,
+        bucket: target.s3_config?.bucket || '',
+        region: target.s3_config?.region || '',
+        endpoint: target.s3_config?.endpoint || '',
+        force_path_style: target.s3_config?.force_path_style ?? false,
+      });
+    }
+  }, [open, target, reset]);
+
+  const clearFormAndReset = React.useCallback(() => {
+    reset({
+      name: '',
+      type: undefined,
+      bucket: '',
+      region: '',
+      endpoint: '',
+      force_path_style: false,
+    });
+  }, [reset]);
+
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      clearFormAndReset();
+      onClose();
+    },
+  });
+
+  const handleClose = React.useCallback(() => {
+    if (isDirty) {
+      const confirmed =
+        typeof window !== 'undefined'
+          ? window.confirm('You have unsaved changes. Are you sure you want to discard them?')
+          : true;
+      if (!confirmed) return;
+    }
+    clearFormAndReset();
+    onClose();
+  }, [isDirty, clearFormAndReset, onClose]);
+
+  const onSubmit = async (values: StorageEditFormValues) => {
+    if (!target) return;
+
+    const payload: UpdateStorageTargetRequest = {
+      name: values.name.trim() || undefined,
+    };
+
+    if (target.type === 's3') {
+      payload.s3_config = {
+        bucket: values.bucket?.trim() || '',
+        region: values.region?.trim() || '',
+        endpoint: values.endpoint?.trim() || '',
+        force_path_style: Boolean(values.force_path_style),
+      };
+    }
+
+    try {
+      await updateTarget.mutateAsync({ id: target.id, data: payload });
+      bypassGuard();
+      clearFormAndReset();
+      onClose();
+    } catch {
+      // Handled by onError toast; form remains dirty and open for retry
+    }
+  };
+
+  if (!target) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Pencil className="h-5 w-5 text-primary" />
+            Edit Storage Target
+          </DialogTitle>
+          <DialogDescription>
+            Update configuration parameters for {target.name}.
+          </DialogDescription>
+        </DialogHeader>
+
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 py-2" noValidate>
+          <FormField
+            label="Target Name"
+            htmlFor="edit-target-name"
+            required
+            error={errors.name?.message}
+          >
+            <input
+              id="edit-target-name"
+              type="text"
+              {...register('name')}
+              aria-invalid={Boolean(errors.name)}
+              aria-describedby={errors.name ? 'edit-target-name-error' : undefined}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </FormField>
+
+          {target.type === 's3_compatible' && (
+            <div className="rounded-md border border-amber-800/40 bg-amber-950/20 p-3 text-xs text-amber-300">
+              Endpoint and bucket parameters for S3-compatible targets are immutable in this version. Only the display name can be updated.
+            </div>
+          )}
+
+          {target.type === 's3' && (
+            <>
+              <FormField
+                label="Bucket Name"
+                htmlFor="edit-bucket"
+                required
+                error={errors.bucket?.message}
+              >
+                <input
+                  id="edit-bucket"
+                  type="text"
+                  {...register('bucket')}
+                  aria-invalid={Boolean(errors.bucket)}
+                  aria-describedby={errors.bucket ? 'edit-bucket-error' : undefined}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </FormField>
+
+              <FormField
+                label="Region"
+                htmlFor="edit-region"
+                required
+                error={errors.region?.message}
+              >
+                <input
+                  id="edit-region"
+                  type="text"
+                  {...register('region')}
+                  aria-invalid={Boolean(errors.region)}
+                  aria-describedby={errors.region ? 'edit-region-error' : undefined}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </FormField>
+
+              <FormField
+                label="Endpoint (Optional)"
+                htmlFor="edit-endpoint"
+                error={errors.endpoint?.message}
+              >
+                <input
+                  id="edit-endpoint"
+                  type="text"
+                  {...register('endpoint')}
+                  aria-invalid={Boolean(errors.endpoint)}
+                  placeholder="https://s3.amazonaws.com"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </FormField>
+
+              <div className="pt-2">
+                <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                  <input
+                    type="checkbox"
+                    {...register('force_path_style')}
+                    className="rounded border-input text-primary focus:ring-ring"
+                  />
+                  <span>Force Path Style</span>
+                </label>
+              </div>
+            </>
+          )}
+
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleClose}
+              disabled={isSubmitting || updateTarget.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={isSubmitting || updateTarget.isPending}
+            >
+              {updateTarget.isPending || isSubmitting ? 'Saving...' : 'Save Changes'}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export default function StorageTargetDetailPage() {
   const params = useParams();
   const id = params?.id as string;
@@ -38,14 +268,6 @@ export default function StorageTargetDetailPage() {
   const [editDialogOpen, setEditDialogOpen] = React.useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
 
-  // Edit form state
-  const [editName, setEditName] = React.useState('');
-  const [editBucket, setEditBucket] = React.useState('');
-  const [editRegion, setEditRegion] = React.useState('');
-  const [editEndpoint, setEditEndpoint] = React.useState('');
-  const [editForcePathStyle, setEditForcePathStyle] = React.useState(false);
-
-  const updateTarget = useUpdateStorageTarget();
   const deleteTarget = useDeleteStorageTarget();
 
   useTenantFormGuard({
@@ -61,45 +283,6 @@ export default function StorageTargetDetailPage() {
     queryFn: () => apiClient.get<StorageTargetResponse>(`/storage-targets/${id}`),
     enabled: !!activeOrgId && !!id,
   });
-
-  const handleOpenEdit = () => {
-    if (!data) return;
-    setEditName(data.name);
-    if (data.s3_config && data.type === 's3') {
-      setEditBucket(data.s3_config.bucket);
-      setEditRegion(data.s3_config.region || '');
-      setEditEndpoint(data.s3_config.endpoint || '');
-      setEditForcePathStyle(data.s3_config.force_path_style ?? false);
-    }
-    setEditDialogOpen(true);
-  };
-
-  const handleUpdate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!data) return;
-
-    const payload: UpdateStorageTargetRequest = {
-      name: editName.trim() || undefined,
-    };
-
-    // Only S3 targets support config updates in backend; s3_compatible is strictly name-only
-    if (data.type === 's3') {
-      payload.s3_config = {
-        bucket: editBucket.trim(),
-        region: editRegion.trim(),
-        endpoint: editEndpoint.trim(),
-        force_path_style: editForcePathStyle,
-      };
-    }
-
-    try {
-      await updateTarget.mutateAsync({ id, data: payload });
-      setEditDialogOpen(false);
-      refetch();
-    } catch {
-      // Handled by onError toast
-    }
-  };
 
   const handleDelete = async () => {
     await deleteTarget.mutateAsync(id);
@@ -176,7 +359,7 @@ export default function StorageTargetDetailPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={handleOpenEdit}
+                  onClick={() => setEditDialogOpen(true)}
                   className="gap-1.5"
                 >
                   <Pencil className="h-4 w-4" />
@@ -286,89 +469,11 @@ export default function StorageTargetDetailPage() {
       </div>
 
       {/* Edit Storage Target Modal */}
-      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Pencil className="h-5 w-5 text-primary" />
-              Edit Storage Target
-            </DialogTitle>
-            <DialogDescription>
-              Update configuration parameters for {data.name}.
-            </DialogDescription>
-          </DialogHeader>
-
-          <form onSubmit={handleUpdate} className="space-y-4 py-2">
-            <FormField label="Target Name" htmlFor="edit-target-name" required>
-              <input
-                id="edit-target-name"
-                type="text"
-                value={editName}
-                onChange={(e) => setEditName(e.target.value)}
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
-              />
-            </FormField>
-
-            {data.type === 's3_compatible' && (
-              <div className="rounded-md border border-amber-800/40 bg-amber-950/20 p-3 text-xs text-amber-300">
-                Endpoint and bucket parameters for S3-compatible targets are immutable in this version. Only the display name can be updated.
-              </div>
-            )}
-
-            {data.type === 's3' && (
-              <>
-                <FormField label="Bucket Name" htmlFor="edit-bucket" required>
-                  <input
-                    id="edit-bucket"
-                    type="text"
-                    value={editBucket}
-                    onChange={(e) => setEditBucket(e.target.value)}
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                </FormField>
-
-                <FormField label="Region" htmlFor="edit-region" required>
-                  <input
-                    id="edit-region"
-                    type="text"
-                    value={editRegion}
-                    onChange={(e) => setEditRegion(e.target.value)}
-                    className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
-                  />
-                </FormField>
-
-                <div className="pt-2">
-                  <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editForcePathStyle}
-                      onChange={(e) => setEditForcePathStyle(e.target.checked)}
-                      className="rounded border-input text-primary focus:ring-ring"
-                    />
-                    <span>Force Path Style</span>
-                  </label>
-                </div>
-              </>
-            )}
-
-            <div className="flex justify-end gap-3 pt-4 border-t">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setEditDialogOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                disabled={updateTarget.isPending}
-              >
-                {updateTarget.isPending ? 'Saving...' : 'Save Changes'}
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
+      <EditStorageTargetDialog
+        target={data}
+        open={editDialogOpen}
+        onClose={() => setEditDialogOpen(false)}
+      />
 
       {/* Delete Confirmation Dialog */}
       <ConfirmDialog

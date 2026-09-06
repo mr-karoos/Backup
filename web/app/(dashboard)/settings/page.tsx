@@ -9,6 +9,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { usePermissions } from '@/lib/auth/permissions';
 import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
+import { useUnsavedChanges } from '@/lib/hooks/use-unsaved-changes';
 import { useUpdateOrganization } from '@/lib/api/mutations';
 import {
   organizationEditSchema,
@@ -42,7 +43,7 @@ export default function OrganizationSettingsPage() {
     register,
     handleSubmit,
     reset,
-    formState: { errors, isSubmitting },
+    formState: { errors, isDirty, isSubmitting },
   } = useForm<OrganizationEditFormValues>({
     resolver: zodResolver(organizationEditSchema),
     defaultValues: {
@@ -50,17 +51,31 @@ export default function OrganizationSettingsPage() {
     },
   });
 
-  useTenantFormGuard({
-    onTenantChanged: () => {
-      setEditDialogOpen(false);
-      reset({ name: '' });
-    },
-  });
+  const { bypassGuard } = useUnsavedChanges(editDialogOpen && isDirty);
 
   const { data, isLoading, isError, error, refetch } = useQuery<OrganizationDetail>({
     queryKey: activeOrgId ? queryKeys.org(activeOrgId).settings() : ['disabled'],
     queryFn: () => apiClient.get<OrganizationDetail>(`/organizations/${activeOrgId}`),
     enabled: !!activeOrgId,
+  });
+
+  const handleCloseEdit = React.useCallback(() => {
+    if (isDirty) {
+      const confirmed =
+        typeof window !== 'undefined'
+          ? window.confirm('You have unsaved changes. Are you sure you want to discard them?')
+          : true;
+      if (!confirmed) return;
+    }
+    reset({ name: data?.name || '' });
+    setEditDialogOpen(false);
+  }, [isDirty, reset, data?.name]);
+
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      reset({ name: '' });
+      setEditDialogOpen(false);
+    },
   });
 
   const handleOpenEdit = () => {
@@ -73,17 +88,18 @@ export default function OrganizationSettingsPage() {
     if (!data) return;
 
     try {
-      await updateOrg.mutateAsync({
+      const res = await updateOrg.mutateAsync({
         id: data.id,
         data: {
           name: values.name.trim(),
           metadata: data.metadata || {},
         },
       });
+      bypassGuard();
+      reset({ name: res.name });
       setEditDialogOpen(false);
-      refetch();
     } catch {
-      // toast shown
+      // toast shown; form remains dirty and dialog remains open
     }
   };
 
@@ -208,7 +224,7 @@ export default function OrganizationSettingsPage() {
       )}
 
       {/* Edit Organization Dialog */}
-      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+      <Dialog open={editDialogOpen} onOpenChange={(open) => { if (!open) handleCloseEdit(); }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -240,7 +256,7 @@ export default function OrganizationSettingsPage() {
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setEditDialogOpen(false)}
+                onClick={handleCloseEdit}
               >
                 Cancel
               </Button>

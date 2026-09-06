@@ -66,11 +66,12 @@ export function useUpdateStorageTarget() {
     onSuccess: (res, _vars, context) => {
       const targetOrg = context?.tenantOrgId || activeOrgId;
       if (targetOrg) {
+        queryClient.setQueryData(
+          queryKeys.org(targetOrg).storage.detail(res.id),
+          res
+        );
         queryClient.invalidateQueries({
           queryKey: queryKeys.org(targetOrg).storage.all(),
-        });
-        queryClient.invalidateQueries({
-          queryKey: queryKeys.org(targetOrg).storage.detail(res.id),
         });
       }
       toast({

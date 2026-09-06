@@ -27,9 +27,10 @@ export function useUpdateOrganization() {
       });
       const targetOrg = context?.tenantOrgId || activeOrgId;
       if (targetOrg) {
-        queryClient.invalidateQueries({
-          queryKey: queryKeys.org(targetOrg).settings(),
-        });
+        queryClient.setQueryData(
+          queryKeys.org(targetOrg).settings(),
+          res
+        );
       }
       toast({
         title: 'Organization updated',
