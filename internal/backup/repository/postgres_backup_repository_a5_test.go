@@ -143,6 +143,8 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		t.Fatalf("failed creating artifact: %v", err)
 	}
 
+	var forgetJobID, pruneJobID uuid.UUID
+
 	t.Run("EnqueueMaintenanceJob and Deduplication", func(t *testing.T) {
 		// Enqueue Forget
 		forgetJob, err := repo.EnqueueMaintenanceJob(ctx, domain.EnqueueMaintenanceJobParams{
@@ -158,6 +160,7 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		if forgetJob.Status != domain.MaintenanceJobPending {
 			t.Fatalf("expected pending status, got %s", forgetJob.Status)
 		}
+		forgetJobID = forgetJob.ID
 
 		// Enqueue duplicate active Forget -> deduplication should return existing job
 		dupForget, err := repo.EnqueueMaintenanceJob(ctx, domain.EnqueueMaintenanceJobParams{
@@ -186,6 +189,7 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		if pruneJob.OperationType != domain.MaintenanceOpResticPrune {
 			t.Fatalf("expected restic_prune, got %s", pruneJob.OperationType)
 		}
+		pruneJobID = pruneJob.ID
 
 		// Enqueue duplicate active Prune -> deduplication should return existing job
 		dupPrune, err := repo.EnqueueMaintenanceJob(ctx, domain.EnqueueMaintenanceJobParams{
@@ -199,23 +203,6 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		if dupPrune.ID != pruneJob.ID {
 			t.Fatalf("expected deduplication to return prune job %s, got %s", pruneJob.ID, dupPrune.ID)
 		}
-
-		// Enqueue Deep Check
-		subIdx := 1
-		subTot := 4
-		checkJob, err := repo.EnqueueMaintenanceJob(ctx, domain.EnqueueMaintenanceJobParams{
-			OrganizationID: orgID,
-			RepositoryID:   repoID,
-			OperationType:  domain.MaintenanceOpResticDeepCheck,
-			SubsetIndex:    &subIdx,
-			SubsetTotal:    &subTot,
-		})
-		if err != nil {
-			t.Fatalf("unexpected error enqueuing deep check: %v", err)
-		}
-		if *checkJob.SubsetIndex != 1 || *checkJob.SubsetTotal != 4 {
-			t.Fatalf("expected 1/4, got %d/%d", *checkJob.SubsetIndex, *checkJob.SubsetTotal)
-		}
 	})
 
 	t.Run("ClaimNextMaintenanceJob and Heartbeat", func(t *testing.T) {
@@ -226,6 +213,9 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		}
 		if claimedJob == nil || run == nil {
 			t.Fatalf("expected a job and run to be claimed")
+		}
+		if claimedJob.ID != forgetJobID {
+			t.Fatalf("expected claimed job %s, got %s", forgetJobID, claimedJob.ID)
 		}
 		if claimedJob.Status != domain.MaintenanceJobRunning {
 			t.Fatalf("expected claimed job status running, got %s", claimedJob.Status)
@@ -263,8 +253,14 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		if err != nil || claimedJob == nil {
 			t.Fatalf("expected prune job to be claimed, got err: %v", err)
 		}
+		if claimedJob.ID != pruneJobID {
+			t.Fatalf("expected claimed job %s, got %s", pruneJobID, claimedJob.ID)
+		}
+		if run.AttemptNumber != 1 {
+			t.Fatalf("expected attempt number 1, got %d", run.AttemptNumber)
+		}
 
-		// Fail with retryable = true -> job status should revert to pending
+		// Fail with retryable = true -> job status should revert to pending with backoff
 		if err := repo.FailMaintenanceJob(ctx, orgID, claimedJob.ID, run.ID, "temporary failure", true); err != nil {
 			t.Fatalf("failed failing maintenance job: %v", err)
 		}
@@ -276,14 +272,40 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 		if recheckedJob.Status != domain.MaintenanceJobPending {
 			t.Fatalf("expected status pending for retryable failure, got %s", recheckedJob.Status)
 		}
+		if recheckedJob.AttemptCount != 1 {
+			t.Fatalf("expected attempt count 1, got %d", recheckedJob.AttemptCount)
+		}
+		if recheckedJob.NextAttemptAt.IsZero() || !recheckedJob.NextAttemptAt.After(time.Now()) {
+			t.Fatalf("expected next_attempt_at to be set into the future, got %v", recheckedJob.NextAttemptAt)
+		}
 
-		// Claim it again -> should give attempt number 2
+		// Verify that ClaimNextMaintenanceJob does not prematurely claim during backoff delay
+		prematureJob, prematureRun, err := repo.ClaimNextMaintenanceJob(ctx, 2*time.Minute)
+		if err != nil {
+			t.Fatalf("unexpected error claiming during backoff: %v", err)
+		}
+		if prematureJob != nil || prematureRun != nil {
+			t.Fatalf("expected no job to be claimable during backoff, got job: %v", prematureJob)
+		}
+
+		// Fast-forward backoff expiration via database update without sleeping 60s
+		if _, err := conn.Exec(ctx, "UPDATE repository_maintenance_jobs SET next_attempt_at = NOW() - INTERVAL '1 second' WHERE id = $1;", claimedJob.ID); err != nil {
+			t.Fatalf("failed fast-forwarding next_attempt_at: %v", err)
+		}
+
+		// Claim it again -> should now claim prune job with attempt number 2
 		reclaimedJob, run2, err := repo.ClaimNextMaintenanceJob(ctx, 2*time.Minute)
 		if err != nil || reclaimedJob == nil {
 			t.Fatalf("expected re-claimed job, got err: %v", err)
 		}
+		if reclaimedJob.ID != claimedJob.ID {
+			t.Fatalf("expected reclaimed job ID %s, got %s", claimedJob.ID, reclaimedJob.ID)
+		}
 		if run2.AttemptNumber != 2 {
 			t.Fatalf("expected attempt number 2, got %d", run2.AttemptNumber)
+		}
+		if reclaimedJob.AttemptCount != 2 {
+			t.Fatalf("expected attempt count 2, got %d", reclaimedJob.AttemptCount)
 		}
 
 		// Fail with retryable = false -> job status should be failed
@@ -301,10 +323,48 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 	})
 
 	t.Run("GetLastSuccessfulDeepCheckSubset", func(t *testing.T) {
+		// Enqueue Deep Check (subset 1/4)
+		subIdx := 1
+		subTot := 4
+		enqueuedCheck, err := repo.EnqueueMaintenanceJob(ctx, domain.EnqueueMaintenanceJobParams{
+			OrganizationID: orgID,
+			RepositoryID:   repoID,
+			OperationType:  domain.MaintenanceOpResticDeepCheck,
+			SubsetIndex:    &subIdx,
+			SubsetTotal:    &subTot,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error enqueuing deep check: %v", err)
+		}
+		if *enqueuedCheck.SubsetIndex != 1 || *enqueuedCheck.SubsetTotal != 4 {
+			t.Fatalf("expected 1/4, got %d/%d", *enqueuedCheck.SubsetIndex, *enqueuedCheck.SubsetTotal)
+		}
+
+		// Deduplication check for deep check
+		dupCheck, err := repo.EnqueueMaintenanceJob(ctx, domain.EnqueueMaintenanceJobParams{
+			OrganizationID: orgID,
+			RepositoryID:   repoID,
+			OperationType:  domain.MaintenanceOpResticDeepCheck,
+			SubsetIndex:    &subIdx,
+			SubsetTotal:    &subTot,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error on duplicate deep check: %v", err)
+		}
+		if dupCheck.ID != enqueuedCheck.ID {
+			t.Fatalf("expected deep check deduplication to return job %s, got %s", enqueuedCheck.ID, dupCheck.ID)
+		}
+
 		// Claim deep check job
 		checkJob, run, err := repo.ClaimNextMaintenanceJob(ctx, 2*time.Minute)
 		if err != nil || checkJob == nil {
 			t.Fatalf("expected deep check job to be claimed, got err: %v", err)
+		}
+		if checkJob.ID != enqueuedCheck.ID {
+			t.Fatalf("expected claimed job %s, got %s", enqueuedCheck.ID, checkJob.ID)
+		}
+		if run.AttemptNumber != 1 {
+			t.Fatalf("expected attempt number 1, got %d", run.AttemptNumber)
 		}
 
 		// Complete deep check as success
