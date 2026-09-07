@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -619,6 +620,229 @@ func TestHandler_MaintenanceJobs_DetailSecurityAndSanitization(t *testing.T) {
 	if !strings.HasSuffix(summary, "... [truncated]") {
 		t.Fatalf("expected error_summary to have truncation suffix, got %q", summary)
 	}
+}
+
+func TestToMaintenanceRunSummaryDTO_CompleteContractAndFieldPrivacy(t *testing.T) {
+	runID := uuid.New()
+	jobID := uuid.New()
+	orgID := uuid.New()
+	now := time.Now().UTC()
+	startedAt := now.Add(-10 * time.Second)
+	endedAt := now
+	heartbeatAt := now.Add(-2 * time.Second)
+	createdAt := now.Add(-12 * time.Second)
+	updatedAt := now
+	errMsg := "failed execution"
+
+	run := &domain.MaintenanceRun{
+		ID:             runID,
+		OrganizationID: orgID,
+		JobID:          jobID,
+		AttemptNumber:  1,
+		Status:         domain.MaintenanceRunFailed,
+		StartedAt:      startedAt,
+		EndedAt:        &endedAt,
+		HeartbeatAt:    heartbeatAt,
+		ErrorMessage:   &errMsg,
+		LogsSummary:    []byte(`{"raw":"sensitive logs"}`),
+		CreatedAt:      createdAt,
+		UpdatedAt:      updatedAt,
+	}
+
+	dto := ToMaintenanceRunSummaryDTO(run)
+
+	// Verify all contract fields are present and correctly populated
+	if dto.ID != runID {
+		t.Fatalf("expected ID %s, got %s", runID, dto.ID)
+	}
+	if dto.JobID != jobID {
+		t.Fatalf("expected JobID %s, got %s", jobID, dto.JobID)
+	}
+	if dto.AttemptNumber != 1 {
+		t.Fatalf("expected AttemptNumber 1, got %d", dto.AttemptNumber)
+	}
+	if dto.Status != string(domain.MaintenanceRunFailed) {
+		t.Fatalf("expected Status %s, got %s", domain.MaintenanceRunFailed, dto.Status)
+	}
+	if !dto.StartedAt.Equal(startedAt) {
+		t.Fatalf("expected StartedAt %v, got %v", startedAt, dto.StartedAt)
+	}
+	if dto.EndedAt == nil || !dto.EndedAt.Equal(endedAt) {
+		t.Fatalf("expected EndedAt %v, got %v", endedAt, dto.EndedAt)
+	}
+	if !dto.HeartbeatAt.Equal(heartbeatAt) {
+		t.Fatalf("expected HeartbeatAt %v, got %v", heartbeatAt, dto.HeartbeatAt)
+	}
+	if !dto.CreatedAt.Equal(createdAt) {
+		t.Fatalf("expected CreatedAt %v, got %v", createdAt, dto.CreatedAt)
+	}
+	if !dto.UpdatedAt.Equal(updatedAt) {
+		t.Fatalf("expected UpdatedAt %v, got %v", updatedAt, dto.UpdatedAt)
+	}
+	if dto.ErrorSummary == nil || *dto.ErrorSummary != errMsg {
+		t.Fatalf("expected ErrorSummary %q, got %v", errMsg, dto.ErrorSummary)
+	}
+	if dto.DurationMS == nil || *dto.DurationMS != 10000 {
+		t.Fatalf("expected DurationMS 10000, got %v", dto.DurationMS)
+	}
+
+	// JSON serialization test: verify allowed fields present, forbidden fields absent
+	jsonBytes, err := json.Marshal(dto)
+	if err != nil {
+		t.Fatalf("failed marshaling dto: %v", err)
+	}
+	jsonMap := make(map[string]any)
+	if err := json.Unmarshal(jsonBytes, &jsonMap); err != nil {
+		t.Fatalf("failed unmarshaling json: %v", err)
+	}
+
+	expectedJSONKeys := []string{
+		"id", "job_id", "attempt_number", "status",
+		"started_at", "ended_at", "heartbeat_at",
+		"created_at", "updated_at", "error_summary", "duration_ms",
+	}
+	for _, k := range expectedJSONKeys {
+		if _, ok := jsonMap[k]; !ok {
+			t.Errorf("missing expected JSON key in MaintenanceRunSummaryDTO: %s", k)
+		}
+	}
+
+	forbiddenJSONKeys := []string{
+		"organization_id", "lease_until", "logs_summary", "metadata",
+	}
+	for _, k := range forbiddenJSONKeys {
+		if _, ok := jsonMap[k]; ok {
+			t.Errorf("forbidden JSON key present in MaintenanceRunSummaryDTO: %s", k)
+		}
+	}
+}
+
+func TestHandler_MaintenanceJobs_ErrorMapping(t *testing.T) {
+	orgID := uuid.New()
+	jobID := uuid.New()
+	tenantCtx := &orgHttpapi.TenantContext{
+		OrganizationID: orgID,
+		Role:           orgDomain.RoleMember,
+	}
+
+	t.Run("ListMaintenanceJobs error status mapping", func(t *testing.T) {
+		tests := []struct {
+			name           string
+			serviceErr     error
+			expectedStatus int
+			expectedCode   string
+		}{
+			{
+				name:           "ErrUnauthorizedRole -> 403 FORBIDDEN",
+				serviceErr:     domain.ErrUnauthorizedRole,
+				expectedStatus: http.StatusForbidden,
+				expectedCode:   "FORBIDDEN",
+			},
+			{
+				name:           "ErrBackupServiceUnavailable -> 503 SERVICE_UNAVAILABLE",
+				serviceErr:     domain.ErrBackupServiceUnavailable,
+				expectedStatus: http.StatusServiceUnavailable,
+				expectedCode:   "SERVICE_UNAVAILABLE",
+			},
+			{
+				name:           "unexpected error -> 500 INTERNAL_SERVER_ERROR",
+				serviceErr:     errors.New("fatal database crash"),
+				expectedStatus: http.StatusInternalServerError,
+				expectedCode:   "INTERNAL_SERVER_ERROR",
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				mockReader := &mockMaintenanceJobReader{
+					listJobsFunc: func(ctx context.Context, role orgDomain.Role, oID uuid.UUID, filter domain.MaintenanceJobFilter) (*domain.MaintenanceJobListResult, error) {
+						return nil, tc.serviceErr
+					},
+				}
+				h := NewHandler(nil, nil, nil, nil, nil, nil)
+				h.SetMaintenanceService(mockReader)
+
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance-jobs", nil)
+				req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+				w := httptest.NewRecorder()
+
+				h.ListMaintenanceJobs(w, req)
+				if w.Code != tc.expectedStatus {
+					t.Fatalf("expected status %d, got %d. Body: %s", tc.expectedStatus, w.Code, w.Body.String())
+				}
+				if !strings.Contains(w.Body.String(), tc.expectedCode) {
+					t.Fatalf("expected error code %q in body, got: %s", tc.expectedCode, w.Body.String())
+				}
+				// Verify internal error details are NOT leaked
+				if strings.Contains(w.Body.String(), "fatal database crash") {
+					t.Fatalf("SECURITY LEAK: raw error message leaked to client: %s", w.Body.String())
+				}
+			})
+		}
+	})
+
+	t.Run("GetMaintenanceJob error status mapping", func(t *testing.T) {
+		tests := []struct {
+			name           string
+			serviceErr     error
+			expectedStatus int
+			expectedCode   string
+		}{
+			{
+				name:           "ErrUnauthorizedRole -> 403 FORBIDDEN",
+				serviceErr:     domain.ErrUnauthorizedRole,
+				expectedStatus: http.StatusForbidden,
+				expectedCode:   "FORBIDDEN",
+			},
+			{
+				name:           "ErrJobNotFound -> 404 NOT_FOUND",
+				serviceErr:     domain.ErrJobNotFound,
+				expectedStatus: http.StatusNotFound,
+				expectedCode:   "NOT_FOUND",
+			},
+			{
+				name:           "ErrBackupServiceUnavailable -> 503 SERVICE_UNAVAILABLE",
+				serviceErr:     domain.ErrBackupServiceUnavailable,
+				expectedStatus: http.StatusServiceUnavailable,
+				expectedCode:   "SERVICE_UNAVAILABLE",
+			},
+			{
+				name:           "unexpected error -> 500 INTERNAL_SERVER_ERROR",
+				serviceErr:     errors.New("fatal database crash"),
+				expectedStatus: http.StatusInternalServerError,
+				expectedCode:   "INTERNAL_SERVER_ERROR",
+			},
+		}
+
+		for _, tc := range tests {
+			t.Run(tc.name, func(t *testing.T) {
+				mockReader := &mockMaintenanceJobReader{
+					getJobFunc: func(ctx context.Context, role orgDomain.Role, oID, jID uuid.UUID) (*domain.MaintenanceJobDetail, error) {
+						return nil, tc.serviceErr
+					},
+				}
+				h := NewHandler(nil, nil, nil, nil, nil, nil)
+				h.SetMaintenanceService(mockReader)
+
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/maintenance-jobs/"+jobID.String(), nil)
+				req.SetPathValue("id", jobID.String())
+				req = req.WithContext(orgHttpapi.WithTenantContext(req.Context(), tenantCtx))
+				w := httptest.NewRecorder()
+
+				h.GetMaintenanceJob(w, req)
+				if w.Code != tc.expectedStatus {
+					t.Fatalf("expected status %d, got %d. Body: %s", tc.expectedStatus, w.Code, w.Body.String())
+				}
+				if !strings.Contains(w.Body.String(), tc.expectedCode) {
+					t.Fatalf("expected error code %q in body, got: %s", tc.expectedCode, w.Body.String())
+				}
+				// Verify internal error details are NOT leaked
+				if strings.Contains(w.Body.String(), "fatal database crash") {
+					t.Fatalf("SECURITY LEAK: raw error message leaked to client: %s", w.Body.String())
+				}
+			})
+		}
+	})
 }
 
 type routeTestQuerier struct{}

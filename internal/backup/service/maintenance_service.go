@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"backup-platform/internal/backup/domain"
 	"backup-platform/internal/backup/repository"
+	"backup-platform/internal/organization/authz"
 	orgDomain "backup-platform/internal/organization/domain"
 	"backup-platform/pkg/uuid"
 )
@@ -62,6 +64,11 @@ func (s *MaintenanceService) ListMaintenanceJobs(
 	orgID uuid.UUID,
 	filter domain.MaintenanceJobFilter,
 ) (*domain.MaintenanceJobListResult, error) {
+	// Defense-in-depth: enforce service-level RBAC
+	if !authz.HasPermission(role, authz.PermissionMaintenanceRead) {
+		return nil, domain.ErrUnauthorizedRole
+	}
+
 	if orgID == uuid.Nil {
 		return nil, domain.ErrInvalidRunFilter
 	}
@@ -70,7 +77,23 @@ func (s *MaintenanceService) ListMaintenanceJobs(
 	if filter.RepositoryID != nil && *filter.RepositoryID != uuid.Nil {
 		if s.repoRepo != nil {
 			repo, err := s.repoRepo.GetRepositoryByID(ctx, orgID, *filter.RepositoryID)
-			if err != nil || repo == nil {
+			if err != nil {
+				if errors.Is(err, domain.ErrRepositoryNotFound) {
+					// Anti-enumeration: return empty list if repository not found or belongs to another tenant
+					return &domain.MaintenanceJobListResult{
+						Jobs:       []*domain.MaintenanceJob{},
+						NextCursor: nil,
+						HasMore:    false,
+					}, nil
+				}
+				s.logger.Error("repository lookup failed for maintenance filter",
+					slog.String("org_id", orgID.String()),
+					slog.String("repository_id", filter.RepositoryID.String()),
+					slog.String("error", err.Error()),
+				)
+				return nil, fmt.Errorf("%w: repository lookup failed", domain.ErrBackupServiceUnavailable)
+			}
+			if repo == nil {
 				// Anti-enumeration: return empty list if repository not found or belongs to another tenant
 				return &domain.MaintenanceJobListResult{
 					Jobs:       []*domain.MaintenanceJob{},
@@ -87,7 +110,7 @@ func (s *MaintenanceService) ListMaintenanceJobs(
 			slog.String("org_id", orgID.String()),
 			slog.String("error", err.Error()),
 		)
-		return nil, fmt.Errorf("failed listing maintenance jobs: %w", err)
+		return nil, fmt.Errorf("%w: failed listing maintenance jobs", domain.ErrBackupServiceUnavailable)
 	}
 
 	var nextCursor *string
@@ -110,13 +133,26 @@ func (s *MaintenanceService) GetMaintenanceJobDetail(
 	role orgDomain.Role,
 	orgID, jobID uuid.UUID,
 ) (*domain.MaintenanceJobDetail, error) {
+	// Defense-in-depth: enforce service-level RBAC
+	if !authz.HasPermission(role, authz.PermissionMaintenanceRead) {
+		return nil, domain.ErrUnauthorizedRole
+	}
+
 	if orgID == uuid.Nil || jobID == uuid.Nil {
 		return nil, domain.ErrJobNotFound
 	}
 
 	job, err := s.maintRepo.GetMaintenanceJobByID(ctx, orgID, jobID)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, domain.ErrJobNotFound) {
+			return nil, domain.ErrJobNotFound
+		}
+		s.logger.Error("failed getting maintenance job by id",
+			slog.String("org_id", orgID.String()),
+			slog.String("job_id", jobID.String()),
+			slog.String("error", err.Error()),
+		)
+		return nil, fmt.Errorf("%w: failed retrieving maintenance job", domain.ErrBackupServiceUnavailable)
 	}
 
 	runs, err := s.maintRepo.ListMaintenanceRuns(ctx, orgID, jobID)
@@ -126,7 +162,7 @@ func (s *MaintenanceService) GetMaintenanceJobDetail(
 			slog.String("job_id", jobID.String()),
 			slog.String("error", err.Error()),
 		)
-		return nil, fmt.Errorf("failed retrieving maintenance runs: %w", err)
+		return nil, fmt.Errorf("%w: failed retrieving maintenance runs", domain.ErrBackupServiceUnavailable)
 	}
 
 	return &domain.MaintenanceJobDetail{

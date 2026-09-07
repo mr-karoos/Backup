@@ -100,6 +100,14 @@ func (h *Handler) ListMaintenanceJobs(w http.ResponseWriter, r *http.Request) {
 	// 3. Execute Service Query
 	result, err := h.maintenanceService.ListMaintenanceJobs(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, filter)
 	if err != nil {
+		if errors.Is(err, domain.ErrUnauthorizedRole) {
+			httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "unauthorized role", nil)
+			return
+		}
+		if errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "service temporarily unavailable", nil)
+			return
+		}
 		reqLogger.Error("failed listing maintenance jobs", "error", err.Error())
 		httpapi.WriteError(w, r, http.StatusInternalServerError, "INTERNAL_SERVER_ERROR", "internal server error", nil)
 		return
@@ -170,8 +178,16 @@ func (h *Handler) GetMaintenanceJob(w http.ResponseWriter, r *http.Request) {
 	// 3. Query Service
 	detail, err := h.maintenanceService.GetMaintenanceJobDetail(r.Context(), tenantCtx.Role, tenantCtx.OrganizationID, jobID)
 	if err != nil {
+		if errors.Is(err, domain.ErrUnauthorizedRole) {
+			httpapi.WriteError(w, r, http.StatusForbidden, "FORBIDDEN", "unauthorized role", nil)
+			return
+		}
 		if errors.Is(err, domain.ErrJobNotFound) {
 			httpapi.WriteError(w, r, http.StatusNotFound, "NOT_FOUND", "maintenance job not found", nil)
+			return
+		}
+		if errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			httpapi.WriteError(w, r, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "service temporarily unavailable", nil)
 			return
 		}
 		reqLogger.Error("failed retrieving maintenance job detail", "error", err.Error())

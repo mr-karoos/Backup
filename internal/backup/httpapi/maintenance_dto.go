@@ -31,13 +31,16 @@ type MaintenanceJobDTO struct {
 // MaintenanceRunSummaryDTO represents the safe, redacted summary of an execution attempt for a maintenance job.
 type MaintenanceRunSummaryDTO struct {
 	ID            uuid.UUID  `json:"id"`
+	JobID         uuid.UUID  `json:"job_id"`
 	AttemptNumber int        `json:"attempt_number"`
 	Status        string     `json:"status"`
 	StartedAt     time.Time  `json:"started_at"`
 	EndedAt       *time.Time `json:"ended_at,omitempty"`
+	HeartbeatAt   time.Time  `json:"heartbeat_at"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 	DurationMS    *int64     `json:"duration_ms,omitempty"`
 	ErrorSummary  *string    `json:"error_summary,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
 }
 
 // MaintenanceJobDetailDTO provides a detailed view of a maintenance job along with its execution runs.
@@ -93,7 +96,8 @@ func ToMaintenanceJobDTO(job *domain.MaintenanceJob) MaintenanceJobDTO {
 	return dto
 }
 
-// ToMaintenanceRunSummaryDTO transforms a domain MaintenanceRun into a safe public summary DTO, redacting secrets and logs.
+// ToMaintenanceRunSummaryDTO transforms a domain MaintenanceRun into a safe public summary DTO,
+// excluding internal execution logs (logs_summary) and metadata, and length-bounding error summaries.
 func ToMaintenanceRunSummaryDTO(run *domain.MaintenanceRun) MaintenanceRunSummaryDTO {
 	if run == nil {
 		return MaintenanceRunSummaryDTO{}
@@ -101,11 +105,14 @@ func ToMaintenanceRunSummaryDTO(run *domain.MaintenanceRun) MaintenanceRunSummar
 
 	dto := MaintenanceRunSummaryDTO{
 		ID:            run.ID,
+		JobID:         run.JobID,
 		AttemptNumber: run.AttemptNumber,
 		Status:        string(run.Status),
 		StartedAt:     run.StartedAt,
 		EndedAt:       run.EndedAt,
+		HeartbeatAt:   run.HeartbeatAt,
 		CreatedAt:     run.CreatedAt,
+		UpdatedAt:     run.UpdatedAt,
 	}
 
 	if run.EndedAt != nil {
@@ -124,7 +131,10 @@ func ToMaintenanceRunSummaryDTO(run *domain.MaintenanceRun) MaintenanceRunSummar
 	return dto
 }
 
-// sanitizeErrorSummary ensures error messages do not leak internal stack traces, passwords or paths and are bounded to 1024 bytes UTF-8.
+// sanitizeErrorSummary trims whitespace and bounds the error message to 1024 bytes with UTF-8
+// rune boundary preservation, appending a truncation suffix if needed.
+// Note: It does not perform regex/heuristic redaction of secrets; internal details remain safe
+// because logs_summary and metadata are completely excluded from public DTOs.
 func sanitizeErrorSummary(msg string) string {
 	clean := strings.TrimSpace(msg)
 	const maxSummaryLen = 1024

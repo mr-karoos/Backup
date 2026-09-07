@@ -1147,7 +1147,9 @@ Host: api.backup-platform.local
 3. **کنترل دسترسی مبتنی بر نقش (RBAC)**: مجوز نوع‌دار `maintenance:read` برای هر سه نقش `admin`، `member` و `viewer` فعال است.
 4. **پنهان‌سازی داده‌های حساس**: متادیتای داخلی (`metadata`)، خلاصه لاگ‌های خام (`logs_summary`)، خروجی‌های stdout/stderr، شناسه داخلی `organization_id` و سکرت‌های مخزن در DTOهای عمومی ارائه نمی‌شوند.
 5. **هدرهای ضدکش (Anti-Caching Headers)**: هدرهای `Cache-Control: no-store` و `Pragma: no-cache` بر روی تمام پاسخ‌ها اعمال می‌شوند.
-6. **ایزولاسیون و حفاظت Anti-Enumeration**: هرگونه تلاش برای دسترسی به جاب‌های سایر سازمان‌ها یا منابع ناموجود با خطای `404 Not Found` پاسخ داده می‌شود.
+6. **ایزولاسیون و حفاظت ضد شمارش (Anti-Enumeration)**:
+   * در اندپوینت جزئیات (`GET /api/v1/maintenance-jobs/{id}`): هرگونه تلاش برای دسترسی به جاب‌های ناموجود یا متعلق به سایر سازمان‌ها با خطای `404 Not Found` پاسخ داده می‌شود.
+   * در اندپوینت فهرست (`GET /api/v1/maintenance-jobs?repository_id=...`): فیلتر بر اساس مخزن ناموجود یا متعلق به سازمان دیگر با وضعیت `200 OK`، لیست خالی (`data: []`)، `has_more: false` و `next_cursor: null` پاسخ داده می‌شود تا از افشای وجود مخزن جلوگیری به عمل آید.
 
 ---
 
@@ -1158,7 +1160,7 @@ Host: api.backup-platform.local
 * **پارامترهای مجاز Query (سخت‌گیرانه — هر پارامتر نامعتبر منجر به ۴۰۰ می‌شود)**:
   * `limit` (اختیاری، عدد صحیح بین ۱ تا ۱۰۰، پیش‌فرض ۵۰).
   * `cursor` (اختیاری، رشته رمزگذاری‌شده Base64 حاوی `created_at,id`).
-  * `repository_id` (اختیاری، شناسه UUID معتبر مخزن متعلق به سازمان جاری).
+  * `repository_id` (اختیاری، شناسه UUID معتبر مخزن متعلق به سازمان جاری؛ در صورت ناموجود بودن یا تعلق به سازمان دیگر، جهت Anti-Enumeration پاسخ `200 OK` با لیست خالی بازگردانده می‌شود).
   * `status` (اختیاری، یکی از مقادیر: `pending`, `running`, `completed`, `failed`, `cancelled`).
   * `operation_type` (اختیاری، یکی از مقادیر: `restic_forget`, `restic_prune`, `restic_deep_check`).
 
@@ -1193,6 +1195,7 @@ Host: api.backup-platform.local
 
 * **هدف**: دریافت مشخصات کامل جاب نگهداری همراه با سوابق تلاش‌های اجرایی (`runs`) و خلاصه امن خطا (`error_summary`).
 * **دسترسی مورد نیاز**: `maintenance:read`.
+* **حفاظت ضد شمارش (Anti-Enumeration)**: در صورت ناموجود بودن شناسه جاب یا تعلق به سازمانی دیگر، خطای `404 Not Found` بازگردانده می‌شود.
 
 #### ساختار پاسخ موفق (`200 OK`):
 ```json
@@ -1212,13 +1215,16 @@ Host: api.backup-platform.local
     "runs": [
       {
         "id": "8c31274a-a035-4309-8472-35db317929d2",
+        "job_id": "550e8400-e29b-41d4-a716-446655440000",
         "attempt_number": 1,
         "status": "completed",
         "started_at": "2026-09-07T12:00:01Z",
         "ended_at": "2026-09-07T12:10:00Z",
+        "heartbeat_at": "2026-09-07T12:09:59Z",
+        "created_at": "2026-09-07T12:00:01Z",
+        "updated_at": "2026-09-07T12:10:00Z",
         "duration_ms": 599000,
-        "error_summary": null,
-        "created_at": "2026-09-07T12:00:01Z"
+        "error_summary": null
       }
     ]
   },

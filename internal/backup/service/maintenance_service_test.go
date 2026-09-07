@@ -171,7 +171,7 @@ func TestMaintenanceService_ListMaintenanceJobs(t *testing.T) {
 	t.Run("anti-enumeration: non-existent repository returns empty result instead of error", func(t *testing.T) {
 		backupMock := &mockRepositoryFinder{
 			getRepoByIDFunc: func(ctx context.Context, oID, rID uuid.UUID) (*domain.BackupRepository, error) {
-				return nil, errors.New("not found")
+				return nil, domain.ErrRepositoryNotFound
 			},
 		}
 		maintMock := &mockMaintenanceRepoForService{}
@@ -186,6 +186,86 @@ func TestMaintenanceService_ListMaintenanceJobs(t *testing.T) {
 		}
 		if len(res.Jobs) != 0 || res.HasMore || res.NextCursor != nil {
 			t.Fatalf("expected empty result, got %v", res)
+		}
+	})
+
+	t.Run("anti-enumeration: nil repository pointer returns empty result", func(t *testing.T) {
+		backupMock := &mockRepositoryFinder{
+			getRepoByIDFunc: func(ctx context.Context, oID, rID uuid.UUID) (*domain.BackupRepository, error) {
+				return nil, nil
+			},
+		}
+		maintMock := &mockMaintenanceRepoForService{}
+
+		svc := NewMaintenanceService(maintMock, backupMock, nil)
+		nonExistentRepoID := uuid.New()
+		res, err := svc.ListMaintenanceJobs(ctx, orgDomain.RoleMember, orgID, domain.MaintenanceJobFilter{
+			RepositoryID: &nonExistentRepoID,
+		})
+		if err != nil {
+			t.Fatalf("expected nil error for anti-enumeration, got %v", err)
+		}
+		if len(res.Jobs) != 0 || res.HasMore || res.NextCursor != nil {
+			t.Fatalf("expected empty result, got %v", res)
+		}
+	})
+
+	t.Run("repository lookup database failure returns ErrBackupServiceUnavailable", func(t *testing.T) {
+		backupMock := &mockRepositoryFinder{
+			getRepoByIDFunc: func(ctx context.Context, oID, rID uuid.UUID) (*domain.BackupRepository, error) {
+				return nil, errors.New("db connection lost")
+			},
+		}
+		maintMock := &mockMaintenanceRepoForService{}
+
+		svc := NewMaintenanceService(maintMock, backupMock, nil)
+		targetRepoID := uuid.New()
+		res, err := svc.ListMaintenanceJobs(ctx, orgDomain.RoleAdmin, orgID, domain.MaintenanceJobFilter{
+			RepositoryID: &targetRepoID,
+		})
+		if err == nil {
+			t.Fatalf("expected error on repository lookup DB failure, got nil")
+		}
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable, got %v", err)
+		}
+		if res != nil {
+			t.Fatalf("expected nil result on error, got %v", res)
+		}
+	})
+
+	t.Run("paginated list database failure returns ErrBackupServiceUnavailable", func(t *testing.T) {
+		maintMock := &mockMaintenanceRepoForService{
+			listPaginatedFunc: func(ctx context.Context, oID uuid.UUID, filter domain.MaintenanceJobFilter) ([]*domain.MaintenanceJob, bool, error) {
+				return nil, false, errors.New("query execution failed")
+			},
+		}
+
+		svc := NewMaintenanceService(maintMock, nil, nil)
+		res, err := svc.ListMaintenanceJobs(ctx, orgDomain.RoleMember, orgID, domain.MaintenanceJobFilter{})
+		if err == nil {
+			t.Fatalf("expected error on DB failure, got nil")
+		}
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable, got %v", err)
+		}
+		if res != nil {
+			t.Fatalf("expected nil result on error, got %v", res)
+		}
+	})
+
+	t.Run("service-level RBAC: unpermitted role rejected with ErrUnauthorizedRole", func(t *testing.T) {
+		svc := NewMaintenanceService(&mockMaintenanceRepoForService{}, nil, nil)
+		unauthorizedRoles := []orgDomain.Role{
+			orgDomain.Role("guest"),
+			orgDomain.Role("anonymous"),
+			orgDomain.Role(""),
+		}
+		for _, role := range unauthorizedRoles {
+			res, err := svc.ListMaintenanceJobs(ctx, role, orgID, domain.MaintenanceJobFilter{})
+			if !errors.Is(err, domain.ErrUnauthorizedRole) {
+				t.Fatalf("expected ErrUnauthorizedRole for role %q, got err=%v, res=%v", role, err, res)
+			}
 		}
 	})
 
@@ -255,6 +335,69 @@ func TestMaintenanceService_GetMaintenanceJobDetail(t *testing.T) {
 		_, err := svc.GetMaintenanceJobDetail(ctx, orgDomain.RoleMember, orgID, jobID)
 		if !errors.Is(err, domain.ErrJobNotFound) {
 			t.Fatalf("expected ErrJobNotFound, got %v", err)
+		}
+	})
+
+	t.Run("unexpected job lookup database error returns ErrBackupServiceUnavailable", func(t *testing.T) {
+		maintMock := &mockMaintenanceRepoForService{
+			getJobByIDFunc: func(ctx context.Context, oID, jID uuid.UUID) (*domain.MaintenanceJob, error) {
+				return nil, errors.New("connection reset by peer")
+			},
+		}
+
+		svc := NewMaintenanceService(maintMock, nil, nil)
+		detail, err := svc.GetMaintenanceJobDetail(ctx, orgDomain.RoleViewer, orgID, jobID)
+		if err == nil {
+			t.Fatalf("expected error on DB failure, got nil")
+		}
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable, got %v", err)
+		}
+		if detail != nil {
+			t.Fatalf("expected nil detail on error, got %v", detail)
+		}
+	})
+
+	t.Run("runs lookup database error returns ErrBackupServiceUnavailable", func(t *testing.T) {
+		maintMock := &mockMaintenanceRepoForService{
+			getJobByIDFunc: func(ctx context.Context, oID, jID uuid.UUID) (*domain.MaintenanceJob, error) {
+				return &domain.MaintenanceJob{
+					ID:             jID,
+					OrganizationID: oID,
+					OperationType:  domain.MaintenanceOpResticPrune,
+					Status:         domain.MaintenanceJobCompleted,
+				}, nil
+			},
+			listRunsFunc: func(ctx context.Context, oID, jID uuid.UUID) ([]*domain.MaintenanceRun, error) {
+				return nil, errors.New("read runs failed")
+			},
+		}
+
+		svc := NewMaintenanceService(maintMock, nil, nil)
+		detail, err := svc.GetMaintenanceJobDetail(ctx, orgDomain.RoleAdmin, orgID, jobID)
+		if err == nil {
+			t.Fatalf("expected error on runs DB failure, got nil")
+		}
+		if !errors.Is(err, domain.ErrBackupServiceUnavailable) {
+			t.Fatalf("expected ErrBackupServiceUnavailable, got %v", err)
+		}
+		if detail != nil {
+			t.Fatalf("expected nil detail on error, got %v", detail)
+		}
+	})
+
+	t.Run("service-level RBAC: unpermitted role rejected with ErrUnauthorizedRole", func(t *testing.T) {
+		svc := NewMaintenanceService(&mockMaintenanceRepoForService{}, nil, nil)
+		unauthorizedRoles := []orgDomain.Role{
+			orgDomain.Role("guest"),
+			orgDomain.Role("anonymous"),
+			orgDomain.Role(""),
+		}
+		for _, role := range unauthorizedRoles {
+			detail, err := svc.GetMaintenanceJobDetail(ctx, role, orgID, jobID)
+			if !errors.Is(err, domain.ErrUnauthorizedRole) {
+				t.Fatalf("expected ErrUnauthorizedRole for role %q, got err=%v, detail=%v", role, err, detail)
+			}
 		}
 	})
 }
