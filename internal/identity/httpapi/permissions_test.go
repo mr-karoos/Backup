@@ -23,6 +23,7 @@ func TestPermissionsForRole(t *testing.T) {
 			"audit_log:read",
 			"storage_target:read",
 			"storage_target:write",
+			"maintenance:read",
 		}
 		if len(perms) != len(expected) {
 			t.Fatalf("expected %d admin perms, got %d", len(expected), len(perms))
@@ -43,6 +44,7 @@ func TestPermissionsForRole(t *testing.T) {
 			"backup_run:verify",
 			"backup_artifact:download",
 			"storage_target:read",
+			"maintenance:read",
 		}
 		if len(perms) != len(expected) {
 			t.Fatalf("expected %d member perms, got %d", len(expected), len(perms))
@@ -75,6 +77,7 @@ func TestPermissionsForRole(t *testing.T) {
 			"resource:read",
 			"backup_plan:read",
 			"storage_target:read",
+			"maintenance:read",
 		}
 		if len(perms) != len(expected) {
 			t.Fatalf("expected %d viewer perms, got %d", len(expected), len(perms))

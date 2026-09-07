@@ -1135,5 +1135,94 @@ Host: api.backup-platform.local
 }
 ```
 
+---
 
+## ۱۷. بخش پانزدهم: رابط‌های برنامه‌نویسی خواندنی نگهداری مخزن (Repository Maintenance Read-Only API — Step A.5.1)
 
+این بخش مسیرهای خواندنی، امن، مبتنی بر Keyset Pagination و تفکیک‌شده بر اساس کانتکست سازمان را برای مشاهده وضعیت، سوابق و جزئیات وظایف نگهداری دوره‌ای مخازن پشتیبان‌گیری (`repository_maintenance_jobs` و `repository_maintenance_runs`) در اختیار رابط کاربری (Frontend F2D) قرار می‌دهد.
+
+### ضوابط و اصول حاکم بر مسیرهای نگهداری:
+1. **صرفاً خواندنی (Strictly Read-Only)**: این نسخه فاقد هرگونه اندپوینت ایجاد دستی، اجرای Prune/Forget، Retry، Cancel یا Unlock دستی مخزن است.
+2. **عدم آنلاک خودکار (`NO AUTOMATIC RESTIC UNLOCK`)**: انطباق با تصمیم ADR-035.
+3. **کنترل دسترسی مبتنی بر نقش (RBAC)**: مجوز نوع‌دار `maintenance:read` برای هر سه نقش `admin`، `member` و `viewer` فعال است.
+4. **پنهان‌سازی داده‌های حساس**: متادیتای داخلی (`metadata`)، خلاصه لاگ‌های خام (`logs_summary`)، خروجی‌های stdout/stderr، شناسه داخلی `organization_id` و سکرت‌های مخزن در DTOهای عمومی ارائه نمی‌شوند.
+5. **هدرهای ضدکش (Anti-Caching Headers)**: هدرهای `Cache-Control: no-store` و `Pragma: no-cache` بر روی تمام پاسخ‌ها اعمال می‌شوند.
+6. **ایزولاسیون و حفاظت Anti-Enumeration**: هرگونه تلاش برای دسترسی به جاب‌های سایر سازمان‌ها یا منابع ناموجود با خطای `404 Not Found` پاسخ داده می‌شود.
+
+---
+
+### ۱. دریافت فهرست جاب‌های نگهداری مخزن (`GET /api/v1/maintenance-jobs`)
+
+* **هدف**: دریافت فهرست صفحه‌بندی‌شده وظایف نگهداری مخزن به روش Keyset Pagination مرتب‌شده بر اساس `(created_at DESC, id DESC)`.
+* **دسترسی مورد نیاز**: `maintenance:read` (نقش‌های `admin`، `member`، `viewer`).
+* **پارامترهای مجاز Query (سخت‌گیرانه — هر پارامتر نامعتبر منجر به ۴۰۰ می‌شود)**:
+  * `limit` (اختیاری، عدد صحیح بین ۱ تا ۱۰۰، پیش‌فرض ۵۰).
+  * `cursor` (اختیاری، رشته رمزگذاری‌شده Base64 حاوی `created_at,id`).
+  * `repository_id` (اختیاری، شناسه UUID معتبر مخزن متعلق به سازمان جاری).
+  * `status` (اختیاری، یکی از مقادیر: `pending`, `running`, `completed`, `failed`, `cancelled`).
+  * `operation_type` (اختیاری، یکی از مقادیر: `restic_forget`, `restic_prune`, `restic_deep_check`).
+
+#### ساختار پاسخ موفق (`200 OK`):
+```json
+{
+  "data": [
+    {
+      "id": "550e8400-e29b-41d4-a716-446655440000",
+      "repository_id": "7b1029c3-324e-473d-9d41-45f8e5d2639a",
+      "operation_type": "restic_prune",
+      "status": "completed",
+      "attempt_count": 1,
+      "max_attempts": 3,
+      "completed_at": "2026-09-07T12:05:00Z",
+      "created_at": "2026-09-07T12:00:00Z",
+      "updated_at": "2026-09-07T12:05:00Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "MjAyNi0wOS0wN1QxMjowMDowMFosNTUwZTg0MDAtZTJmYi00MWQ0LWE3MTYtNDQ2NjU1NDQwMDAw",
+    "has_more": true
+  },
+  "message": "maintenance jobs retrieved successfully",
+  "request_id": "req-9f2c8d1a-4e3b-4112-9c31-7e8a9d123456"
+}
+```
+
+---
+
+### ۲. دریافت جزئیات یک جاب نگهداری (`GET /api/v1/maintenance-jobs/{id}`)
+
+* **هدف**: دریافت مشخصات کامل جاب نگهداری همراه با سوابق تلاش‌های اجرایی (`runs`) و خلاصه امن خطا (`error_summary`).
+* **دسترسی مورد نیاز**: `maintenance:read`.
+
+#### ساختار پاسخ موفق (`200 OK`):
+```json
+{
+  "data": {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "repository_id": "7b1029c3-324e-473d-9d41-45f8e5d2639a",
+    "operation_type": "restic_deep_check",
+    "status": "completed",
+    "subset_index": 2,
+    "subset_total": 4,
+    "attempt_count": 1,
+    "max_attempts": 3,
+    "completed_at": "2026-09-07T12:10:00Z",
+    "created_at": "2026-09-07T12:00:00Z",
+    "updated_at": "2026-09-07T12:10:00Z",
+    "runs": [
+      {
+        "id": "8c31274a-a035-4309-8472-35db317929d2",
+        "attempt_number": 1,
+        "status": "completed",
+        "started_at": "2026-09-07T12:00:01Z",
+        "ended_at": "2026-09-07T12:10:00Z",
+        "duration_ms": 599000,
+        "error_summary": null,
+        "created_at": "2026-09-07T12:00:01Z"
+      }
+    ]
+  },
+  "message": "maintenance job retrieved successfully",
+  "request_id": "req-9f2c8d1a-4e3b-4112-9c31-7e8a9d123457"
+}
+```

@@ -80,6 +80,7 @@ type Handler struct {
 	artifactService      BackupArtifactManager
 	verifyService        BackupVerifier
 	storageTargetService StorageTargetManager
+	maintenanceService   service.MaintenanceJobReader
 	logger               *slog.Logger
 }
 
@@ -108,6 +109,11 @@ func NewHandler(
 // SetStorageTargetService injects the storage target service into the handler.
 func (h *Handler) SetStorageTargetService(svc StorageTargetManager) {
 	h.storageTargetService = svc
+}
+
+// SetMaintenanceService injects the maintenance read service into the handler.
+func (h *Handler) SetMaintenanceService(svc service.MaintenanceJobReader) {
+	h.maintenanceService = svc
 }
 
 // CreateBackupJob handles POST /api/v1/backup-jobs.

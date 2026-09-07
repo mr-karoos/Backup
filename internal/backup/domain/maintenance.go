@@ -1,8 +1,10 @@
 package domain
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"backup-platform/pkg/uuid"
@@ -178,4 +180,68 @@ func (p EnqueueMaintenanceJobParams) MetadataJSON() []byte {
 		return []byte("{}")
 	}
 	return b
+}
+
+// MaintenanceJobFilter defines filter criteria and cursor parameters for listing maintenance jobs.
+type MaintenanceJobFilter struct {
+	RepositoryID    *uuid.UUID
+	Status          *MaintenanceJobStatus
+	OperationType   *MaintenanceOperationType
+	Limit           int
+	CursorCreatedAt *time.Time
+	CursorID        *uuid.UUID
+}
+
+// MaintenanceJobListResult wraps a paginated slice of maintenance jobs with pagination metadata.
+type MaintenanceJobListResult struct {
+	Jobs       []*MaintenanceJob
+	NextCursor *string
+	HasMore    bool
+}
+
+// MaintenanceJobDetail represents a maintenance job along with its execution run history.
+type MaintenanceJobDetail struct {
+	Job  *MaintenanceJob
+	Runs []*MaintenanceRun
+}
+
+// EncodeMaintenanceCursor serializes created_at and id into a URL-safe base64 opaque cursor string.
+func EncodeMaintenanceCursor(t time.Time, id uuid.UUID) string {
+	raw := fmt.Sprintf("%s,%s", t.UTC().Format(time.RFC3339Nano), id.String())
+	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// DecodeMaintenanceCursor parses a URL-safe base64 opaque cursor string into created_at and id.
+func DecodeMaintenanceCursor(cursor string) (time.Time, uuid.UUID, error) {
+	if cursor == "" {
+		return time.Time{}, uuid.Nil, fmt.Errorf("cursor is empty")
+	}
+
+	decoded, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		decoded, err = base64.URLEncoding.DecodeString(cursor)
+		if err != nil {
+			decoded, err = base64.StdEncoding.DecodeString(cursor)
+			if err != nil {
+				return time.Time{}, uuid.Nil, fmt.Errorf("malformed base64 cursor: %w", err)
+			}
+		}
+	}
+
+	parts := strings.Split(string(decoded), ",")
+	if len(parts) != 2 {
+		return time.Time{}, uuid.Nil, fmt.Errorf("invalid cursor components")
+	}
+
+	t, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("invalid cursor timestamp: %w", err)
+	}
+
+	id, err := uuid.Parse(parts[1])
+	if err != nil || id == uuid.Nil {
+		return time.Time{}, uuid.Nil, fmt.Errorf("invalid cursor UUID: %w", err)
+	}
+
+	return t, id, nil
 }

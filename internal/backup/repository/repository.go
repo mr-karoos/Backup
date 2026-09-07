@@ -88,6 +88,7 @@ type MaintenanceRepository interface {
 	GetMaintenanceJobByID(ctx context.Context, orgID, jobID uuid.UUID) (*domain.MaintenanceJob, error)
 	GetMaintenanceRunByID(ctx context.Context, orgID, runID uuid.UUID) (*domain.MaintenanceRun, error)
 	ListMaintenanceJobs(ctx context.Context, orgID, repoID uuid.UUID, limit int) ([]*domain.MaintenanceJob, error)
+	ListMaintenanceJobsPaginated(ctx context.Context, orgID uuid.UUID, filter domain.MaintenanceJobFilter) ([]*domain.MaintenanceJob, bool, error)
 	ListMaintenanceRuns(ctx context.Context, orgID, jobID uuid.UUID) ([]*domain.MaintenanceRun, error)
 	ListActiveRepositories(ctx context.Context, limit int, afterCreatedAt *time.Time, afterID *uuid.UUID) ([]*domain.BackupRepository, error)
 }

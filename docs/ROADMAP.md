@@ -339,6 +339,15 @@ BackupArtifact + Update Run (success) + Update Job (completed)
   * [x] پیاده‌سازی اعتبارسنجی سطح ۲ (Deep Check) با زیرمجموعه‌های چرخشی قطعی ($1/N$ با محدوده $1 \le N \le 100$) و زمان‌بند مبتنی بر Keyset Pagination.
   * [x] اعمال سیاست قطعی عدم آنلاک خودکار (`NO AUTOMATIC RESTIC UNLOCK`) و تثبیت هاست‌نیم کانتینر با `hostname: backup-platform-node-1`.
 
+* **گام A.5.1 — وب‌سرویس خواندنی نگهداری مخزن برای فرانت‌اند F2D (`Step A.5.1 — Read-Only Maintenance API for Frontend F2D`)**:
+  * [x] تعریف دسترسی نوع‌دار `maintenance:read` در لایه RBAC برای نقش‌های `admin`، `member` و `viewer` (بدون ایجاد دسترسی‌های ویرایشی یا عملیات دستی).
+  * [x] پیاده‌سازی مسیر خواندنی `GET /api/v1/maintenance-jobs` همراه با Keyset Pagination قطعی بر پایه `(created_at DESC, id DESC)` و اعتبارسنجی سخت‌گیرانه فیلترها (`repository_id`، `status`، `operation_type`، `limit`، `cursor`).
+  * [x] پیاده‌سازی مسیر خواندنی جزئیات `GET /api/v1/maintenance-jobs/{id}` همراه با تاریخچه تلاش‌های اجرایی (`runs`) و خلاصه‌سازی امن خطای اجرا.
+  * [x] ایزولاسیون کامل سازمانی، ممانعت قطعی از نشت متقاطع داده‌ها و محافظت Anti-enumeration با پاسخ‌های استاندارد ۴۰۴.
+  * [x] اعمال هدرهای ضدکش `Cache-Control: no-store` و `Pragma: no-cache` و پنهان‌سازی فیلدهای داخلی (`metadata`، `logs_summary`، `organization_id` و سکرت‌ها).
+  * [x] انطباق با ضوابط ADR-035 (تداوم سیاست قطعی عدم آنلاک خودکار مخازن و عدم ارائه هرگونه اندپوینت دستی موتاسیون).
+
+
 
 ### Future Phase B — پشتیبانی از منابع داده تکمیلی (Additional Data Sources)
 * پشتیبانی از پایگاه داده `SQLite` به روش ایمن (Online Safe Backup).

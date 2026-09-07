@@ -319,6 +319,8 @@ func run() error {
 
 	backupHandler := backupHttpapi.NewHandler(backupJobService, backupPlanService, historyService, artifactService, verificationService, log)
 	backupHandler.SetStorageTargetService(storageTargetService)
+	maintenanceService := backupService.NewMaintenanceService(backupRepository, backupRepository, log)
+	backupHandler.SetMaintenanceService(maintenanceService)
 
 	// 15. Run Startup Recovery for Interrupted Backup Runs (Fail-fast)
 	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -488,6 +490,10 @@ func run() error {
 	mux.Handle("GET /api/v1/backup-artifacts/{id}", authMiddleware(orgContextMiddleware(http.HandlerFunc(backupHandler.GetBackupArtifact))))
 	mux.Handle("GET /api/v1/backup-artifacts/{id}/download", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionBackupArtifactDownload, log)(http.HandlerFunc(backupHandler.DownloadBackupArtifact)))))
 	mux.Handle("DELETE /api/v1/backup-artifacts/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionBackupArtifactDelete, log)(http.HandlerFunc(backupHandler.DeleteBackupArtifact)))))
+
+	// Tenant-scoped repository maintenance routes (Future Phase A Step A.5.1)
+	mux.Handle("GET /api/v1/maintenance-jobs", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionMaintenanceRead, log)(http.HandlerFunc(backupHandler.ListMaintenanceJobs)))))
+	mux.Handle("GET /api/v1/maintenance-jobs/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionMaintenanceRead, log)(http.HandlerFunc(backupHandler.GetMaintenanceJob)))))
 
 	// Chain middlewares: RequestID -> Logging -> Route Handler
 	handler := httpserver.RequestIDMiddleware(httpserver.LoggingMiddleware(log)(mux))

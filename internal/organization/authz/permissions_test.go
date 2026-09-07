@@ -7,10 +7,10 @@ import (
 )
 
 func TestPermissionsForRole(t *testing.T) {
-	t.Run("admin role receives all 12 canonical permissions", func(t *testing.T) {
+	t.Run("admin role receives all 13 canonical permissions", func(t *testing.T) {
 		perms := PermissionsForRole(orgDomain.RoleAdmin)
-		if len(perms) != 12 {
-			t.Fatalf("expected 12 permissions for admin, got %d", len(perms))
+		if len(perms) != 13 {
+			t.Fatalf("expected 13 permissions for admin, got %d", len(perms))
 		}
 
 		expected := map[Permission]bool{
@@ -26,6 +26,7 @@ func TestPermissionsForRole(t *testing.T) {
 			PermissionAuditLogRead:           true,
 			PermissionStorageTargetRead:      true,
 			PermissionStorageTargetWrite:     true,
+			PermissionMaintenanceRead:        true,
 		}
 
 		for _, p := range perms {
@@ -35,10 +36,10 @@ func TestPermissionsForRole(t *testing.T) {
 		}
 	})
 
-	t.Run("member role permissions restricted to 6 canonical permissions", func(t *testing.T) {
+	t.Run("member role permissions restricted to 7 canonical permissions", func(t *testing.T) {
 		perms := PermissionsForRole(orgDomain.RoleMember)
-		if len(perms) != 6 {
-			t.Fatalf("expected 6 permissions for member, got %d", len(perms))
+		if len(perms) != 7 {
+			t.Fatalf("expected 7 permissions for member, got %d", len(perms))
 		}
 
 		// Member must NOT have write/delete permissions
@@ -55,20 +56,22 @@ func TestPermissionsForRole(t *testing.T) {
 			!HasPermission(orgDomain.RoleMember, PermissionBackupJobExecute) ||
 			!HasPermission(orgDomain.RoleMember, PermissionBackupRunVerify) ||
 			!HasPermission(orgDomain.RoleMember, PermissionBackupArtifactDownload) ||
-			!HasPermission(orgDomain.RoleMember, PermissionStorageTargetRead) {
+			!HasPermission(orgDomain.RoleMember, PermissionStorageTargetRead) ||
+			!HasPermission(orgDomain.RoleMember, PermissionMaintenanceRead) {
 			t.Errorf("member role missing expected canonical permissions")
 		}
 	})
 
 	t.Run("viewer role permissions restricted to read-only", func(t *testing.T) {
 		perms := PermissionsForRole(orgDomain.RoleViewer)
-		if len(perms) != 3 {
-			t.Fatalf("expected 3 permissions for viewer, got %d", len(perms))
+		if len(perms) != 4 {
+			t.Fatalf("expected 4 permissions for viewer, got %d", len(perms))
 		}
 
 		if !HasPermission(orgDomain.RoleViewer, PermissionResourceRead) ||
 			!HasPermission(orgDomain.RoleViewer, PermissionBackupPlanRead) ||
-			!HasPermission(orgDomain.RoleViewer, PermissionStorageTargetRead) {
+			!HasPermission(orgDomain.RoleViewer, PermissionStorageTargetRead) ||
+			!HasPermission(orgDomain.RoleViewer, PermissionMaintenanceRead) {
 			t.Errorf("viewer role missing expected read permissions")
 		}
 
@@ -107,8 +110,8 @@ func TestPermissionsForRole(t *testing.T) {
 
 	t.Run("PermissionStringsForRole returns valid string slice matching typed permissions", func(t *testing.T) {
 		adminStrs := PermissionStringsForRole(orgDomain.RoleAdmin)
-		if len(adminStrs) != 12 {
-			t.Errorf("expected 12 strings for admin, got: %d", len(adminStrs))
+		if len(adminStrs) != 13 {
+			t.Errorf("expected 13 strings for admin, got: %d", len(adminStrs))
 		}
 		if adminStrs[0] != "resource:read" {
 			t.Errorf("expected string representation match")

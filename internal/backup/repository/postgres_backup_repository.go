@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -3056,6 +3057,94 @@ func (r *PostgresBackupRepository) ListMaintenanceJobs(ctx context.Context, orgI
 		jobs = append(jobs, j)
 	}
 	return jobs, nil
+}
+
+// ListMaintenanceJobsPaginated retrieves a paginated list of maintenance jobs for an organization with keyset pagination.
+func (r *PostgresBackupRepository) ListMaintenanceJobsPaginated(
+	ctx context.Context,
+	orgID uuid.UUID,
+	filter domain.MaintenanceJobFilter,
+) ([]*domain.MaintenanceJob, bool, error) {
+	if orgID == uuid.Nil {
+		return nil, false, fmt.Errorf("orgID is required")
+	}
+
+	limit := filter.Limit
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+
+	q := r.txManager.Querier()
+
+	var (
+		queryBuilder strings.Builder
+		args         []interface{}
+		argIdx       = 1
+	)
+
+	queryBuilder.WriteString(`
+		SELECT id, organization_id, repository_id, operation_type, status,
+		       artifact_id, snapshot_id, subset_index, subset_total,
+		       attempt_count, max_attempts, next_attempt_at, phase, completed_at,
+		       metadata, created_at, updated_at
+		FROM repository_maintenance_jobs
+		WHERE organization_id = $` + strconv.Itoa(argIdx) + `
+	`)
+	args = append(args, orgID)
+	argIdx++
+
+	if filter.RepositoryID != nil && *filter.RepositoryID != uuid.Nil {
+		queryBuilder.WriteString(` AND repository_id = $` + strconv.Itoa(argIdx))
+		args = append(args, *filter.RepositoryID)
+		argIdx++
+	}
+
+	if filter.Status != nil && *filter.Status != "" {
+		queryBuilder.WriteString(` AND status = $` + strconv.Itoa(argIdx))
+		args = append(args, string(*filter.Status))
+		argIdx++
+	}
+
+	if filter.OperationType != nil && *filter.OperationType != "" {
+		queryBuilder.WriteString(` AND operation_type = $` + strconv.Itoa(argIdx))
+		args = append(args, string(*filter.OperationType))
+		argIdx++
+	}
+
+	if filter.CursorCreatedAt != nil && filter.CursorID != nil && *filter.CursorID != uuid.Nil {
+		queryBuilder.WriteString(fmt.Sprintf(` AND (created_at < $%d OR (created_at = $%d AND id < $%d))`, argIdx, argIdx, argIdx+1))
+		args = append(args, *filter.CursorCreatedAt, *filter.CursorID)
+		argIdx += 2
+	}
+
+	queryBuilder.WriteString(fmt.Sprintf(` ORDER BY created_at DESC, id DESC LIMIT $%d;`, argIdx))
+	args = append(args, limit+1)
+
+	rows, err := q.Query(ctx, queryBuilder.String(), args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("failed querying paginated maintenance jobs: %w", err)
+	}
+	defer rows.Close()
+
+	var jobs []*domain.MaintenanceJob
+	for rows.Next() {
+		j, err := scanMaintenanceJob(rows)
+		if err != nil {
+			return nil, false, fmt.Errorf("failed scanning paginated maintenance job: %w", err)
+		}
+		jobs = append(jobs, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("failed iterating maintenance jobs: %w", err)
+	}
+
+	hasMore := false
+	if len(jobs) > limit {
+		hasMore = true
+		jobs = jobs[:limit]
+	}
+
+	return jobs, hasMore, nil
 }
 
 // ListMaintenanceRuns lists all runs for a given maintenance job.

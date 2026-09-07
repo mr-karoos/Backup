@@ -20,6 +20,7 @@ const (
 	PermissionAuditLogRead           Permission = "audit_log:read"
 	PermissionStorageTargetRead      Permission = "storage_target:read"
 	PermissionStorageTargetWrite     Permission = "storage_target:write"
+	PermissionMaintenanceRead        Permission = "maintenance:read"
 )
 
 var adminPermissions = []Permission{
@@ -35,6 +36,7 @@ var adminPermissions = []Permission{
 	PermissionAuditLogRead,
 	PermissionStorageTargetRead,
 	PermissionStorageTargetWrite,
+	PermissionMaintenanceRead,
 }
 
 var memberPermissions = []Permission{
@@ -44,12 +46,14 @@ var memberPermissions = []Permission{
 	PermissionBackupRunVerify,
 	PermissionBackupArtifactDownload,
 	PermissionStorageTargetRead,
+	PermissionMaintenanceRead,
 }
 
 var viewerPermissions = []Permission{
 	PermissionResourceRead,
 	PermissionBackupPlanRead,
 	PermissionStorageTargetRead,
+	PermissionMaintenanceRead,
 }
 
 // PermissionsForRole returns the canonical V1 typed permission set for a given organization role.

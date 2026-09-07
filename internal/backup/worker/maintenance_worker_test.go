@@ -212,6 +212,10 @@ func (m *mockMaintenanceWorkerRepo) ListMaintenanceJobs(ctx context.Context, org
 	return nil, nil
 }
 
+func (m *mockMaintenanceWorkerRepo) ListMaintenanceJobsPaginated(ctx context.Context, orgID uuid.UUID, filter domain.MaintenanceJobFilter) ([]*domain.MaintenanceJob, bool, error) {
+	return nil, false, nil
+}
+
 func (m *mockMaintenanceWorkerRepo) ListMaintenanceRuns(ctx context.Context, orgID, jobID uuid.UUID) ([]*domain.MaintenanceRun, error) {
 	return nil, nil
 }
