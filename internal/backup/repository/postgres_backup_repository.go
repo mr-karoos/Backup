@@ -10,6 +10,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -3140,16 +3141,24 @@ func (r *PostgresBackupRepository) ListActiveRepositories(
 	return repos, nil
 }
 
+const (
+	maxMaintenanceErrorLen    = 1024
+	maintenanceTruncateSuffix = "... [truncated]"
+)
+
 func sanitizeMaintenanceErrorMessage(errMsg string) string {
-	if errMsg == "" {
-		return ""
-	}
-	const maxLen = 1024
 	s := strings.TrimSpace(errMsg)
-	if len(s) > maxLen {
-		s = s[:maxLen] + "... [truncated]"
+	if len(s) <= maxMaintenanceErrorLen {
+		return s
 	}
-	return s
+
+	budget := maxMaintenanceErrorLen - len(maintenanceTruncateSuffix)
+	cut := budget
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+
+	return s[:cut] + maintenanceTruncateSuffix
 }
 
 func workerCalculateRetryDelay(jobID uuid.UUID, attemptNumber int) time.Duration {

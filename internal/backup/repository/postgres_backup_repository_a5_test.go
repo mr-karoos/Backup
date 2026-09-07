@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
@@ -308,9 +309,18 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 			t.Fatalf("expected attempt count 2, got %d", reclaimedJob.AttemptCount)
 		}
 
-		// Fail with retryable = false -> job status should be failed
-		if err := repo.FailMaintenanceJob(ctx, orgID, reclaimedJob.ID, run2.ID, "permanent fatal failure", false); err != nil {
+		// Fail with retryable = false -> job status should be failed (and error_message truncated to <= 1024 bytes)
+		longErrMsg := strings.Repeat("A", 5000)
+		if err := repo.FailMaintenanceJob(ctx, orgID, reclaimedJob.ID, run2.ID, longErrMsg, false); err != nil {
 			t.Fatalf("failed failing maintenance job permanently: %v", err)
+		}
+
+		var storedErrMsg *string
+		if err := conn.QueryRow(ctx, "SELECT error_message FROM repository_maintenance_runs WHERE id = $1;", run2.ID).Scan(&storedErrMsg); err != nil {
+			t.Fatalf("failed querying run error_message: %v", err)
+		}
+		if storedErrMsg == nil || len(*storedErrMsg) > 1024 || !strings.HasSuffix(*storedErrMsg, "... [truncated]") {
+			t.Fatalf("expected stored error_message to be truncated <= 1024 bytes, got %v", storedErrMsg)
 		}
 
 		failedJob, err := repo.GetMaintenanceJobByID(ctx, orgID, reclaimedJob.ID)
@@ -414,5 +424,149 @@ func TestPostgresBackupRepository_StepA5_Integration(t *testing.T) {
 			t.Fatalf("failed re-migrating to version 10: %v", err)
 		}
 		t.Log("Successfully re-migrated to version 10")
+	})
+}
+
+func TestSanitizeMaintenanceErrorMessage(t *testing.T) {
+	t.Run("empty input", func(t *testing.T) {
+		if got := sanitizeMaintenanceErrorMessage(""); got != "" {
+			t.Fatalf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("whitespace trimming", func(t *testing.T) {
+		if got := sanitizeMaintenanceErrorMessage("   error with whitespace   \n\t"); got != "error with whitespace" {
+			t.Fatalf("expected trimmed error, got %q", got)
+		}
+		if got := sanitizeMaintenanceErrorMessage("   \n\t  "); got != "" {
+			t.Fatalf("expected empty string for whitespace-only, got %q", got)
+		}
+	})
+
+	t.Run("short message unchanged", func(t *testing.T) {
+		msg := "connection refused by target host"
+		if got := sanitizeMaintenanceErrorMessage(msg); got != msg {
+			t.Fatalf("expected %q, got %q", msg, got)
+		}
+	})
+
+	t.Run("marker only added on truncation", func(t *testing.T) {
+		short := "short failure without truncation"
+		gotShort := sanitizeMaintenanceErrorMessage(short)
+		if strings.Contains(gotShort, "[truncated]") {
+			t.Fatalf("marker should not be added to short message, got %q", gotShort)
+		}
+
+		long := strings.Repeat("B", 1025)
+		gotLong := sanitizeMaintenanceErrorMessage(long)
+		if !strings.HasSuffix(gotLong, "... [truncated]") {
+			t.Fatalf("marker must be added to truncated message, got %q", gotLong)
+		}
+	})
+
+	t.Run("exactly 1024 ASCII bytes", func(t *testing.T) {
+		msg := strings.Repeat("x", 1024)
+		got := sanitizeMaintenanceErrorMessage(msg)
+		if len(got) != 1024 {
+			t.Fatalf("expected len 1024, got %d", len(got))
+		}
+		if got != msg {
+			t.Fatalf("expected exact match without truncation")
+		}
+		if strings.Contains(got, "[truncated]") {
+			t.Fatalf("marker should not be added when len is exactly 1024")
+		}
+	})
+
+	t.Run("1025 ASCII bytes", func(t *testing.T) {
+		msg := strings.Repeat("y", 1025)
+		got := sanitizeMaintenanceErrorMessage(msg)
+		if len(got) > 1024 {
+			t.Fatalf("expected len <= 1024, got %d", len(got))
+		}
+		if len(got) != 1024 {
+			t.Fatalf("expected exact len 1024 for ASCII truncation, got %d", len(got))
+		}
+		if !strings.HasSuffix(got, "... [truncated]") {
+			t.Fatalf("expected truncation suffix, got %q", got)
+		}
+	})
+
+	t.Run("5000 ASCII bytes", func(t *testing.T) {
+		msg := strings.Repeat("z", 5000)
+		got := sanitizeMaintenanceErrorMessage(msg)
+		if len(got) > 1024 {
+			t.Fatalf("expected len <= 1024, got %d", len(got))
+		}
+		if len(got) != 1024 {
+			t.Fatalf("expected exact len 1024 for ASCII truncation, got %d", len(got))
+		}
+		if !strings.HasSuffix(got, "... [truncated]") {
+			t.Fatalf("expected truncation suffix, got %q", got)
+		}
+	})
+
+	t.Run("valid multi-byte UTF-8 near boundary", func(t *testing.T) {
+		// Budget is 1024 - 15 = 1009 bytes.
+		// 1. Two-byte runes (e.g. 'é' = 2 bytes)
+		twoByteMsg := strings.Repeat("é", 600) // 1200 bytes
+		gotTwo := sanitizeMaintenanceErrorMessage(twoByteMsg)
+		if len(gotTwo) > 1024 {
+			t.Fatalf("expected len <= 1024, got %d", len(gotTwo))
+		}
+		if !utf8.ValidString(gotTwo) {
+			t.Fatalf("expected valid UTF-8, got invalid string")
+		}
+		if !strings.HasSuffix(gotTwo, "... [truncated]") {
+			t.Fatalf("expected truncation suffix, got %q", gotTwo)
+		}
+
+		// 2. Three-byte runes (e.g. '世' = 3 bytes)
+		threeByteMsg := strings.Repeat("世", 400) // 1200 bytes
+		gotThree := sanitizeMaintenanceErrorMessage(threeByteMsg)
+		if len(gotThree) > 1024 {
+			t.Fatalf("expected len <= 1024, got %d", len(gotThree))
+		}
+		if !utf8.ValidString(gotThree) {
+			t.Fatalf("expected valid UTF-8, got invalid string")
+		}
+		if !strings.HasSuffix(gotThree, "... [truncated]") {
+			t.Fatalf("expected truncation suffix, got %q", gotThree)
+		}
+
+		// 3. Four-byte runes (e.g. '🚀' = 4 bytes)
+		fourByteMsg := strings.Repeat("🚀", 300) // 1200 bytes
+		gotFour := sanitizeMaintenanceErrorMessage(fourByteMsg)
+		if len(gotFour) > 1024 {
+			t.Fatalf("expected len <= 1024, got %d", len(gotFour))
+		}
+		if !utf8.ValidString(gotFour) {
+			t.Fatalf("expected valid UTF-8, got invalid string")
+		}
+		if !strings.HasSuffix(gotFour, "... [truncated]") {
+			t.Fatalf("expected truncation suffix, got %q", gotFour)
+		}
+
+		// 4. Multi-byte rune straddling the budget boundary
+		// Budget is 1009. Place 1008 ASCII bytes + 1 three-byte rune '世' (bytes 1008, 1009, 1010) + suffix
+		straddleMsg := strings.Repeat("a", 1008) + "世" + strings.Repeat("b", 100)
+		gotStraddle := sanitizeMaintenanceErrorMessage(straddleMsg)
+		if len(gotStraddle) > 1024 {
+			t.Fatalf("expected len <= 1024, got %d", len(gotStraddle))
+		}
+		if !utf8.ValidString(gotStraddle) {
+			t.Fatalf("expected valid UTF-8, got invalid string")
+		}
+		if !strings.HasSuffix(gotStraddle, "... [truncated]") {
+			t.Fatalf("expected truncation suffix, got %q", gotStraddle)
+		}
+		// The 3-byte rune started at 1008 and could not fit in 1009 bytes, so prefix must be exactly 1008 'a's
+		expectedPrefix := strings.Repeat("a", 1008)
+		if !strings.HasPrefix(gotStraddle, expectedPrefix) {
+			t.Fatalf("expected prefix of 1008 'a's")
+		}
+		if len(gotStraddle) != 1008+15 {
+			t.Fatalf("expected len %d, got %d", 1008+15, len(gotStraddle))
+		}
 	})
 }
