@@ -273,11 +273,12 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 		return nil, fmt.Errorf("failed creating restic stdin pipe: %w", err)
 	}
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	stdoutReader, stdoutWriter, err := os.Pipe()
 	if err != nil {
 		_ = stdinPipe.Close()
 		return nil, fmt.Errorf("failed creating restic stdout pipe: %w", err)
 	}
+	cmd.Stdout = stdoutWriter
 
 	stderrBuf := newBoundedBuffer(restic.MaxOutputBytes)
 	cmd.Stderr = stderrBuf
@@ -285,9 +286,25 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 	// 5. Start Restic process
 	if err := cmd.Start(); err != nil {
 		_ = stdinPipe.Close()
-		_ = stdoutPipe.Close()
+		_ = stdoutWriter.Close()
+		_ = stdoutReader.Close()
 		return nil, fmt.Errorf("failed starting restic process: %w", err)
 	}
+	// The parent must close its descriptor for the write end of the pipe
+	// immediately after process launch so that the reader observes EOF
+	// when the child exits.
+	_ = stdoutWriter.Close()
+
+	// Safe closer for stdoutReader to prevent double close and unblock reads on abort
+	var stdoutReaderOnce sync.Once
+	safeCloseStdoutReader := func() error {
+		var closeErr error
+		stdoutReaderOnce.Do(func() {
+			closeErr = stdoutReader.Close()
+		})
+		return closeErr
+	}
+	defer safeCloseStdoutReader()
 
 	// Channel for concurrent streaming stdout JSON parser
 	type stdoutResult struct {
@@ -296,7 +313,8 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 	}
 	stdoutDoneChan := make(chan stdoutResult, 1)
 	go func() {
-		s, sErr := StreamParseResticBackupStdout(stdoutPipe)
+		defer safeCloseStdoutReader()
+		s, sErr := StreamParseResticBackupStdout(stdoutReader)
 		stdoutDoneChan <- stdoutResult{summary: s, err: sErr}
 	}()
 
@@ -405,7 +423,8 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 				prodCancel()
 				// 4. Close parent pipe only AFTER live child can no longer observe graceful EOF
 				_ = safeCloseStdin()
-				// 5. Drain stdout scanner if still active
+				// 5. Close stdout reader and drain stdout scanner if still active
+				_ = safeCloseStdoutReader()
 				if stdoutDoneChan != nil {
 					<-stdoutDoneChan
 				}
@@ -423,6 +442,7 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 				if cmd.Process != nil {
 					_ = cmd.Process.Kill()
 				}
+				_ = safeCloseStdoutReader()
 				<-childDoneChan
 				if stdoutDoneChan != nil {
 					<-stdoutDoneChan
@@ -497,6 +517,7 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 					if cmd.Process != nil {
 						_ = cmd.Process.Kill()
 					}
+					_ = safeCloseStdoutReader()
 					if childDoneChan != nil {
 						<-childDoneChan
 					}
@@ -521,6 +542,7 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 				}
 			}
 			// 4. Drain stdout scanner if not already done
+			_ = safeCloseStdoutReader()
 			if stdoutDoneChan != nil {
 				<-stdoutDoneChan
 			}
@@ -538,6 +560,7 @@ func (s *GatedEOFSupervisor) ExecuteBackup(ctx context.Context, req StdinBackupR
 				_ = cmd.Process.Kill()
 			}
 			_ = safeCloseStdin()
+			_ = safeCloseStdoutReader()
 			<-childDoneChan
 			if !prodDone {
 				select {

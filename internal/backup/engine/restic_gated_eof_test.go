@@ -1084,3 +1084,53 @@ func TestGatedEOFSupervisor_ParserDeadlockRegressions(t *testing.T) {
 		}
 	})
 }
+
+func TestGatedEOFSupervisor_LargeValidStdoutDrainRegression(t *testing.T) {
+	mockBin := buildMockResticBinary(t)
+	supervisor := NewGatedEOFSupervisor(mockBin, slog.Default())
+
+	validTarget := &mockTarget{
+		url:     "local:/tmp/test-repo",
+		env:     nil,
+		locator: "test-locator",
+	}
+	validPassword := []byte("top-secret-restic-password-123")
+
+	t.Setenv("MOCK_RESTIC_MODE", "large_valid_stream")
+
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		req := StdinBackupRequest{
+			Target:           validTarget,
+			Password:         validPassword,
+			OrgID:            uuid.New(),
+			ResourceID:       uuid.New(),
+			RunID:            uuid.New(),
+			ArtifactID:       uuid.New(),
+			BackupType:       domain.BackupTypeMySQLDatabase,
+			TargetName:       "production_db",
+			InternalFilename: "production_db.sql",
+			StreamProducer: func(ctx context.Context, stdin io.Writer) error {
+				_, err := stdin.Write([]byte("streaming database chunk data\n"))
+				return err
+			},
+		}
+
+		res, err := supervisor.ExecuteBackup(ctx, req)
+		cancel()
+
+		if err != nil {
+			t.Fatalf("iteration %d/%d failed: expected successful stdout drain on >64 KiB stream, got err: %v", i+1, iterations, err)
+		}
+		if res == nil {
+			t.Fatalf("iteration %d/%d failed: expected non-nil result", i+1, iterations)
+		}
+		if !domain.IsValidCanonicalResticSnapshotID(res.SnapshotID) {
+			t.Fatalf("iteration %d/%d failed: expected valid canonical 64-hex snapshot ID, got: %q", i+1, iterations, res.SnapshotID)
+		}
+		if res.LogicalSizeBytes <= 0 {
+			t.Fatalf("iteration %d/%d failed: expected positive logical size bytes, got: %d", i+1, iterations, res.LogicalSizeBytes)
+		}
+	}
+}
