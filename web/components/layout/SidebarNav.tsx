@@ -14,6 +14,7 @@ import {
   KeyRound,
   Settings,
   Activity,
+  Wrench,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -54,6 +55,11 @@ const navItems: NavItem[] = [
     title: 'Storage Targets',
     href: '/storage',
     icon: HardDrive,
+  },
+  {
+    title: 'Maintenance',
+    href: '/maintenance',
+    icon: Wrench,
   },
   {
     title: 'Credentials',

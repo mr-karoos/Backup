@@ -14,7 +14,8 @@ export type PlatformPermission =
   | 'backup_artifact:delete'
   | 'storage_target:read'
   | 'storage_target:write'
-  | 'audit_log:read';
+  | 'audit_log:read'
+  | 'maintenance:read';
 
 /**
  * Checks whether a given membership contains a specific backend permission.
@@ -82,6 +83,7 @@ export function usePermissions() {
     canDownloadArtifact: checkPermission('backup_artifact:download'),
     canDeleteArtifact: checkPermission('backup_artifact:delete'),
     canViewAuditLogs: checkPermission('audit_log:read'),
+    canViewMaintenance: checkPermission('maintenance:read'),
 
     canUpdateOrganization: isOrgAdmin || isSystemAdmin,
   };

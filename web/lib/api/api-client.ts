@@ -1,4 +1,10 @@
-import { ApiError, type ApiResponseEnvelope, type ApiErrorEnvelope } from '@/types/api';
+import {
+  ApiError,
+  type ApiResponseEnvelope,
+  type ApiErrorEnvelope,
+  type PaginatedResult,
+  type PaginatedResponseEnvelope,
+} from '@/types/api';
 import { tokenRefreshManager } from '@/lib/auth/token-refresh';
 
 export interface RequestOptions extends RequestInit {
@@ -6,6 +12,7 @@ export interface RequestOptions extends RequestInit {
   skipOrgHeader?: boolean;
   tenantOrgId?: string;
   _isRetry?: boolean;
+  rawEnvelope?: boolean;
 }
 
 export type TokenProvider = () => string | null;
@@ -51,7 +58,14 @@ class ApiClient {
   }
 
   public async request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-    const { skipAuth = false, skipOrgHeader = false, tenantOrgId, _isRetry = false, ...fetchOptions } = options;
+    const {
+      skipAuth = false,
+      skipOrgHeader = false,
+      tenantOrgId,
+      _isRetry = false,
+      rawEnvelope = false,
+      ...fetchOptions
+    } = options;
 
     const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
     const url = `/api/v1${cleanEndpoint}`;
@@ -165,6 +179,10 @@ class ApiClient {
     // Parse JSON response
     const json = await response.json();
 
+    if (rawEnvelope) {
+      return json as T;
+    }
+
     // Check if wrapped in standard ApiResponseEnvelope
     if (json && typeof json === 'object' && 'data' in json) {
       return (json as ApiResponseEnvelope<T>).data;
@@ -176,6 +194,32 @@ class ApiClient {
 
   public get<T>(endpoint: string, options?: RequestOptions): Promise<T> {
     return this.request<T>(endpoint, { ...options, method: 'GET' });
+  }
+
+  /**
+   * Fetches paginated list endpoint preserving data array and pagination metadata.
+   */
+  public async getPaginated<T>(endpoint: string, options?: RequestOptions): Promise<PaginatedResult<T>> {
+    const envelope = await this.request<PaginatedResponseEnvelope<T>>(endpoint, {
+      ...options,
+      method: 'GET',
+      rawEnvelope: true,
+    });
+
+    return {
+      data: (envelope?.data as T[]) || [],
+      page: {
+        next_cursor: envelope?.page?.next_cursor ?? null,
+        has_more: Boolean(envelope?.page?.has_more),
+      },
+    };
+  }
+
+  /**
+   * Requests an endpoint and returns the full JSON response envelope without unwrapping data.
+   */
+  public requestEnvelope<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
+    return this.request<T>(endpoint, { ...options, rawEnvelope: true });
   }
 
   public post<T>(endpoint: string, data?: unknown, options?: RequestOptions): Promise<T> {

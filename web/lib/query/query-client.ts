@@ -40,6 +40,11 @@ export const queryKeys = {
       all: () => ['org', orgId, 'credentials'] as const,
       detail: (id: string) => ['org', orgId, 'credentials', id] as const,
     },
+    maintenance: {
+      all: (filters?: Record<string, unknown>) => ['org', orgId, 'maintenance', filters ?? {}] as const,
+      list: (filters?: Record<string, unknown>) => ['org', orgId, 'maintenance', 'list', filters ?? {}] as const,
+      detail: (id: string) => ['org', orgId, 'maintenance', 'detail', id] as const,
+    },
   }),
 };
 

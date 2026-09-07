@@ -233,6 +233,200 @@ describe('Central ApiClient', () => {
     expect(capturedHeaders[1]?.get('X-Organization-ID')).toBe(customOrgId);
     expect(capturedHeaders[1]?.get('Authorization')).toBe('Bearer fresh-token');
   });
+
+  describe('Paginated API Support', () => {
+    it('getPaginated preserves data array and page metadata', async () => {
+      global.fetch = vi.fn().mockImplementation(() => {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              data: [
+                { id: 'job-1', operation_type: 'restic_prune', status: 'completed' },
+                { id: 'job-2', operation_type: 'restic_forget', status: 'pending' },
+              ],
+              page: {
+                next_cursor: 'eyJpZCI6ImpvYi0yIn0=',
+                has_more: true,
+              },
+            }),
+        });
+      });
+
+      apiClient.configure({
+        getToken: () => 'token-123',
+        getOrgId: () => 'org-abc',
+        onTokenUpdate: vi.fn(),
+        onAuthFailure: vi.fn(),
+      });
+
+      const res = await apiClient.getPaginated<{ id: string; operation_type: string; status: string }>(
+        '/maintenance-jobs'
+      );
+
+      expect(res.data).toHaveLength(2);
+      expect(res.data[0]!.id).toBe('job-1');
+      expect(res.page).toEqual({
+        next_cursor: 'eyJpZCI6ImpvYi0yIn0=',
+        has_more: true,
+      });
+    });
+
+    it('legacy apiClient.get continues unwrapping data only', async () => {
+      global.fetch = vi.fn().mockImplementation(() => {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              data: [{ id: 'job-1' }],
+              page: {
+                next_cursor: 'cursor-abc',
+                has_more: true,
+              },
+            }),
+        });
+      });
+
+      const data = await apiClient.get<{ id: string }[]>('/maintenance-jobs');
+      // Should be array unwrapped from data, NOT the envelope
+      expect(Array.isArray(data)).toBe(true);
+      expect(data).toEqual([{ id: 'job-1' }]);
+    });
+
+    it('getPaginated preserves Bearer token and X-Organization-ID injection', async () => {
+      const captured = { headers: null as Headers | null };
+
+      global.fetch = vi.fn().mockImplementation((_url, init) => {
+        captured.headers = new Headers(init.headers);
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              data: [],
+              page: { next_cursor: null, has_more: false },
+            }),
+        });
+      });
+
+      apiClient.configure({
+        getToken: () => 'valid-jwt',
+        getOrgId: () => 'tenant-uuid-999',
+        onTokenUpdate: vi.fn(),
+        onAuthFailure: vi.fn(),
+      });
+
+      await apiClient.getPaginated('/maintenance-jobs');
+
+      expect(captured.headers?.get('Authorization')).toBe('Bearer valid-jwt');
+      expect(captured.headers?.get('X-Organization-ID')).toBe('tenant-uuid-999');
+    });
+
+    it('propagates AbortSignal to native fetch in getPaginated', async () => {
+      let capturedSignal: AbortSignal | null | undefined;
+
+      global.fetch = vi.fn().mockImplementation((_url, init) => {
+        capturedSignal = init?.signal;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            Promise.resolve({
+              data: [],
+              page: { next_cursor: null, has_more: false },
+            }),
+        });
+      });
+
+      const controller = new AbortController();
+      await apiClient.getPaginated('/maintenance-jobs', { signal: controller.signal });
+
+      expect(capturedSignal).toBe(controller.signal);
+    });
+
+    it('preserves tenantOrgId snapshot and paginated envelope across 401 token refresh replay', async () => {
+      let callCount = 0;
+      const capturedHeaders: Headers[] = [];
+      let currentToken = 'expired-token';
+      let currentOrgProvider = 'initial-org-111';
+
+      global.fetch = vi.fn().mockImplementation((url: string, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+
+        if (url === '/api/v1/auth/refresh') {
+          currentToken = 'fresh-replayed-token';
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                data: {
+                  tokens: {
+                    access_token: 'fresh-replayed-token',
+                    token_type: 'Bearer',
+                    expires_in: 900,
+                  },
+                },
+              }),
+          });
+        }
+
+        if (url.startsWith('/api/v1/maintenance-jobs')) {
+          callCount++;
+          capturedHeaders.push(headers);
+
+          if (headers.get('Authorization') === 'Bearer expired-token') {
+            // Simulate changing org provider in the middle of request/refresh
+            currentOrgProvider = 'changed-org-222';
+
+            return Promise.resolve({
+              ok: false,
+              status: 401,
+              json: () => Promise.resolve({ error: { code: 'UNAUTHORIZED', message: 'Token expired' } }),
+            });
+          }
+
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                data: [{ id: 'job-replayed-1', operation_type: 'restic_prune', status: 'completed' }],
+                page: { next_cursor: 'cursor-after-replay', has_more: true },
+              }),
+          });
+        }
+
+        return Promise.reject(new Error(`Unexpected url: ${url}`));
+      });
+
+      apiClient.configure({
+        getToken: () => currentToken,
+        getOrgId: () => currentOrgProvider,
+        onTokenUpdate: (t) => {
+          currentToken = t;
+        },
+        onAuthFailure: vi.fn(),
+      });
+
+      const result = await apiClient.getPaginated<{ id: string; operation_type: string; status: string }>(
+        '/maintenance-jobs',
+        { tenantOrgId: 'pinned-snapshot-org-999' }
+      );
+
+      expect(callCount).toBe(2);
+      // Both initial and replayed call must retain the pinned tenantOrgId snapshot, NOT the changed provider
+      expect(capturedHeaders[0]?.get('X-Organization-ID')).toBe('pinned-snapshot-org-999');
+      expect(capturedHeaders[1]?.get('X-Organization-ID')).toBe('pinned-snapshot-org-999');
+      expect(capturedHeaders[1]?.get('Authorization')).toBe('Bearer fresh-replayed-token');
+
+      // Paginated result envelope intact
+      expect(result.data).toHaveLength(1);
+      expect(result.data[0]!.id).toBe('job-replayed-1');
+      expect(result.page.next_cursor).toBe('cursor-after-replay');
+      expect(result.page.has_more).toBe(true);
+    });
+  });
 });
-
-

@@ -23,6 +23,7 @@ describe('Permissions & RBAC Utilities', () => {
       'backup_artifact:delete',
       'organization:update',
       'audit_log:read',
+      'maintenance:read',
     ],
   };
 
@@ -39,6 +40,7 @@ describe('Permissions & RBAC Utilities', () => {
       'backup_plan:read',
       'backup_job:execute',
       'backup_run:verify',
+      'maintenance:read',
     ],
   };
 
@@ -53,6 +55,7 @@ describe('Permissions & RBAC Utilities', () => {
       'resource:read',
       'storage_target:read',
       'backup_plan:read',
+      'maintenance:read',
     ],
   };
 
@@ -91,11 +94,15 @@ describe('Permissions & RBAC Utilities', () => {
       expect(hasPermission(adminMembership, 'resource:write')).toBe(true);
       expect(hasPermission(adminMembership, 'backup_artifact:download')).toBe(true);
       expect(hasPermission(adminMembership, 'audit_log:read')).toBe(true);
+      expect(hasPermission(adminMembership, 'maintenance:read')).toBe(true);
       expect(hasPermission(memberMembership, 'backup_job:execute')).toBe(true);
       expect(hasPermission(memberMembership, 'backup_run:verify')).toBe(true);
+      expect(hasPermission(memberMembership, 'maintenance:read')).toBe(true);
+      expect(hasPermission(viewerMembership, 'maintenance:read')).toBe(true);
     });
 
     it('returns false when permission is missing in membership', () => {
+      expect(hasPermission(suspendedMembership, 'maintenance:read')).toBe(false);
       expect(hasPermission(memberMembership, 'resource:write')).toBe(false);
       expect(hasPermission(memberMembership, 'backup_artifact:download')).toBe(false);
       expect(hasPermission(memberMembership, 'backup_artifact:delete')).toBe(false);

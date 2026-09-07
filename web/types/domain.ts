@@ -372,3 +372,48 @@ export interface UpdateOrganizationRequest {
 export interface HealthResponse {
   status: 'ok' | 'unavailable';
 }
+
+// -------------------------------------------------------------
+// Repository Maintenance DTOs (Future Phase A Step A.5.1 / F2D)
+// -------------------------------------------------------------
+export type MaintenanceOperationType = 'restic_forget' | 'restic_prune' | 'restic_deep_check';
+
+export type MaintenanceJobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+
+export type MaintenanceRunStatus = 'running' | 'completed' | 'failed' | 'cancelled';
+
+export interface MaintenanceJobResponse {
+  id: string;
+  repository_id: string;
+  operation_type: MaintenanceOperationType;
+  status: MaintenanceJobStatus;
+  artifact_id?: string | null;
+  snapshot_id?: string | null;
+  subset_index?: number | null;
+  subset_total?: number | null;
+  attempt_count: number;
+  max_attempts: number;
+  next_attempt_at?: string | null;
+  phase?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MaintenanceRunSummaryResponse {
+  id: string;
+  job_id: string;
+  attempt_number: number;
+  status: MaintenanceRunStatus;
+  started_at: string;
+  ended_at?: string | null;
+  heartbeat_at: string;
+  created_at: string;
+  updated_at: string;
+  duration_ms?: number | null;
+  error_summary?: string | null;
+}
+
+export interface MaintenanceJobDetailResponse extends MaintenanceJobResponse {
+  runs: MaintenanceRunSummaryResponse[];
+}

@@ -68,6 +68,7 @@ export function getStatusBadgeVariant(status: string): {
     case 'verified':
     case 'active':
     case 'ok':
+    case 'completed':
       return { label: status, variant: 'success' };
     case 'running':
     case 'pending':
@@ -87,6 +88,19 @@ export function getStatusBadgeVariant(status: string): {
       return { label: status, variant: 'destructive' };
     default:
       return { label: status || 'unknown', variant: 'outline' };
+  }
+}
+
+export function formatMaintenanceOperation(op: string | null | undefined): string {
+  switch (op) {
+    case 'restic_forget':
+      return 'Forget';
+    case 'restic_prune':
+      return 'Prune';
+    case 'restic_deep_check':
+      return 'Deep Check';
+    default:
+      return op || '—';
   }
 }
 

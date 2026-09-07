@@ -8,6 +8,32 @@ export interface ApiResponseEnvelope<T> {
 }
 
 /**
+ * Pagination metadata matching Go backend PaginationMeta.
+ */
+export interface PaginationMeta {
+  next_cursor: string | null;
+  has_more: boolean;
+}
+
+/**
+ * Envelope for paginated API responses matching Go backend MaintenanceJobListResponse.
+ */
+export interface PaginatedResponseEnvelope<T> {
+  data: T[];
+  page: PaginationMeta;
+  message?: string;
+  request_id?: string;
+}
+
+/**
+ * Standard typed frontend structure for paginated results.
+ */
+export interface PaginatedResult<T> {
+  data: T[];
+  page: PaginationMeta;
+}
+
+/**
  * Detailed error object structure matching Go backend ErrorDetail.
  */
 export interface ApiErrorDetail {
