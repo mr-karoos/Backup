@@ -347,6 +347,15 @@ BackupArtifact + Update Run (success) + Update Job (completed)
   * [x] اعمال هدرهای ضدکش `Cache-Control: no-store` و `Pragma: no-cache` و پنهان‌سازی فیلدهای داخلی (`metadata`، `logs_summary`، `organization_id` و سکرت‌ها).
   * [x] انطباق با ضوابط ADR-035 (تداوم سیاست قطعی عدم آنلاک خودکار مخازن و عدم ارائه هرگونه اندپوینت دستی موتاسیون).
 
+* **گام A.5.2 — وب‌سرویس خواندنی لاگ‌های حسابرسی برای فرانت‌اند F2C (`Step A.5.2 — Read-Only Audit Log API for Frontend F2C`)**:
+  * [x] استفاده از دسترسی نوع‌دار `audit_log:read` در لایه RBAC با اعمال محدودیت دسترسی منحصراً برای نقش `admin` (نقش‌های `member` و `viewer` با خطای ۴۰۳ مسدود می‌گردند).
+  * [x] پیاده‌سازی مسیر خواندنی `GET /api/v1/audit-logs` همراه با Keyset Pagination قطعی بر پایه `(created_at DESC, id DESC)` و اعتبارسنجی فیلترها (`action`، `entity_type`، `entity_id`، `user_id`، `from`، `to`، `limit`، `cursor`).
+  * [x] ایزولاسیون کامل و سخت‌گیرانه مرز مستأجر (`WHERE organization_id = $1`) و عدم افشای رکوردهای سیستمی سراسری (`organization_id IS NULL`).
+  * [x] رعایت دقیق حریم خصوصی و امنیت داده در DTO عمومی (حذف فیلدهای حساس `metadata` و `organization_id`، عدم نشت سکرت‌ها، توکن‌ها یا پسوردها).
+  * [x] اعمال هدرهای ضدکش `Cache-Control: no-store` و `Pragma: no-cache`.
+  * [x] ماهیت کاملاً خواندنی و عدم ارائه هرگونه اندپوینت موتاسیون، حذف، ویرایش، خروج داده، پاکسازی یا بازپخش.
+  * [ ] رفع انسداد فرانت‌اند F2C پس از تایید و اعتبارسنجی نهایی بک‌اند A.5.2.
+
 
 
 ### Future Phase B — پشتیبانی از منابع داده تکمیلی (Additional Data Sources)

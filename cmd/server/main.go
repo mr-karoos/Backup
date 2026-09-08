@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"backup-platform/internal/artifactcrypto"
+	auditHttpapi "backup-platform/internal/audit/httpapi"
 	auditRepo "backup-platform/internal/audit/repository"
 	auditService "backup-platform/internal/audit/service"
 	backupEngine "backup-platform/internal/backup/engine"
@@ -321,6 +322,7 @@ func run() error {
 	backupHandler.SetStorageTargetService(storageTargetService)
 	maintenanceService := backupService.NewMaintenanceService(backupRepository, backupRepository, log)
 	backupHandler.SetMaintenanceService(maintenanceService)
+	auditHandler := auditHttpapi.NewHandler(auditRecorder, log)
 
 	// 15. Run Startup Recovery for Interrupted Backup Runs (Fail-fast)
 	recoveryCtx, recoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -494,6 +496,9 @@ func run() error {
 	// Tenant-scoped repository maintenance routes (Future Phase A Step A.5.1)
 	mux.Handle("GET /api/v1/maintenance-jobs", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionMaintenanceRead, log)(http.HandlerFunc(backupHandler.ListMaintenanceJobs)))))
 	mux.Handle("GET /api/v1/maintenance-jobs/{id}", authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionMaintenanceRead, log)(http.HandlerFunc(backupHandler.GetMaintenanceJob)))))
+
+	// Tenant-scoped audit log routes (Future Phase A Step A.5.2)
+	mux.Handle("GET /api/v1/audit-logs", auditHttpapi.NoStoreMiddleware(authMiddleware(orgContextMiddleware(orgHttpapi.RequirePermission(authz.PermissionAuditLogRead, log)(http.HandlerFunc(auditHandler.ListAuditLogs))))))
 
 	// Chain middlewares: RequestID -> Logging -> Route Handler
 	handler := httpserver.RequestIDMiddleware(httpserver.LoggingMiddleware(log)(mux))

@@ -1232,3 +1232,109 @@ Host: api.backup-platform.local
   "request_id": "req-9f2c8d1a-4e3b-4112-9c31-7e8a9d123457"
 }
 ```
+---
+
+## ۱۸. رابط‌های برنامه‌نویسی خواندنی لاگ‌های حسابرسی (Audit Logs Read-Only API — Step A.5.2)
+
+برای پشتیبانی از نیازمندی‌های مانیتورینگ امنیتی، انطباق و فرانت‌اند F2C، اندپوینت فقط-خواندنی لاگ‌های حسابرسی با ایزولاسیون کامل چندمستأجری و صفحه‌بندی پایدار پیاده‌سازی شده است.
+
+### اصول کلیدی طراحی و الزامات امنیتی:
+
+1. **انحصاری بودن دسترسی خواندن (Admin Only)**:
+   * این اندپوینت مستلزم مجوز `audit_log:read` است که منحصراً به نقش `admin` اختصاص دارد.
+   * تلاش کاربران با نقش‌های `member` یا `viewer` با خطای قطعی `403 Forbidden` (`INSUFFICIENT_PERMISSIONS`) رد می‌شود.
+   * درخواست‌های فاقد احراز هویت با `401 Unauthorized` و درخواست‌های فاقد زمینه سازمان معتبر با `400 Bad Request` یا `404 Not Found` مسدود می‌گردند.
+
+2. **ایزولاسیون مرز مستأجر (Strict Tenant Boundary)**:
+   * کوئری پایگاه‌داده همواره به صورت اجباری از شرط `WHERE organization_id = $1` به عنوان اولین عبارت فیلتر استفاده می‌کند.
+   * رکوردهای سیستمی یا سراسری (`organization_id IS NULL`) به هیچ عنوان از طریق این اندپوینت قابل مشاهده نیستند.
+   * رکوردهای لاگ حسابرسی متعلق به سایر سازمان‌ها تحت هیچ شرایطی در دسترس مستأجر جاری قرار نخواهند گرفت.
+
+3. **حفاظت از داده و محرمانگی (Data Protection & Privacy Boundary)**:
+   * مدل خروجی عمومی (DTO) منحصراً فیلدهای زیر را ارائه می‌دهد:
+     - `id` (شناسه UUID لاگ)
+     - `user_id` (شناسه کاربری که عملیات را انجام داده، در صورت وجود)
+     - `action` (عنوان عملیات انجام‌شده)
+     - `entity_type` (نوع موجودیت هدف)
+     - `entity_id` (شناسه موجودیت هدف، در صورت وجود)
+     - `ip_address` (آدرس IP مبدأ، در صورت ثبت)
+     - `user_agent` (رشته User-Agent کلاینت، در صورت ثبت)
+     - `created_at` (زمان وقوع رویداد به وقت UTC)
+   * فیلدهای حساس شامل `organization_id` و به ویژه `metadata` (که ممکن است حاوی مسیرهای داخلی فایل، توکن‌ها، مقادیر پیکربندی یا داده‌های حساس باشد) به طور کامل از خروجی حذف (Omit) شده‌اند.
+   * هیچ‌گونه پسورد، توکن، سکرت یا شناسه سازمانی نشت نمی‌کند.
+
+4. **صفحه‌بندی بر مبنای کلیدواژه (Keyset Pagination)**:
+   * مرتب‌سازی به صورت قطعی و پایدار بر اساس `(created_at DESC, id DESC)` انجام می‌شود.
+   * از الگوی شکننده `OFFSET` استفاده نشده است؛ کرسر به صورت رشته مات کانونی و URL-Safe بدون Padding (`base64.RawURLEncoding` شامل `<RFC3339Nano>,<UUID>`) امکان پیمایش بدون سربار و مصون در برابر درج‌های همزمان را فراهم می‌سازد؛ این کرسر صرفاً یک نشانگر صفحه‌بندی (Pagination Cursor) بوده و توکن امنیتی یا مجوزی (Authorization or Security Token) نیست.
+   * فیلد `limit` اختیاری بوده و مقداری بین ۱ تا ۱۰۰ می‌پذیرد (پیش‌فرض ۵۰).
+   * پاسخ ساختار استاندارد شامل `page: { next_cursor: string|null, has_more: bool }` را دارد.
+
+5. **فیلترهای پشتیبانی‌شده (Query Filters)**:
+   * `limit` (عدد صحیح بین ۱ تا ۱۰۰)
+   * `cursor` (رشته متنی کانونی URL-Safe Base64 بدون Padding)
+   * `action` (رشته متنی معتبر عملیات)
+   * `entity_type` (نوع موجودیت)
+   * `entity_id` (شناسه UUID معتبر)
+   * `user_id` (شناسه UUID معتبر کاربر)
+   * `from` (تاریخ شروع فیلتر به فرمت RFC3339)
+   * `to` (تاریخ پایان فیلتر به فرمت RFC3339 — شرط `from <= to` الزامی است)
+   * هر پارامتر ناشناخته، پارامتر تکراری، مقدار خالی یا فیلتر نامعتبر مستقیماً منجر به خطای `400 Bad Request` می‌شود.
+
+6. **هدرهای جلوگیری از حافظه پنهان (Anti-Caching Headers)**:
+   * تمامی پاسخ‌ها (شامل خطاها و موفقیت‌ها در کل زنجیره Middleware و Handler) حاوی هدرهای `Cache-Control: no-store` و `Pragma: no-cache` هستند تا از ذخیره لاگ‌های حسابرسی در پراکسی‌ها یا مرورگرها جلوگیری شود.
+
+7. **ماهیت صرفاً خواندنی (Strictly Read-Only)**:
+   * در اسکوپ این فاز (A.5.2 / V1 API)، هیچ اندپوینت حذف، تغییر، خروج داده، پاکسازی (purge/clear) یا بازپخش (replay) وجود ندارد و کلیه درخواست‌های جهش‌دهنده مسدود هستند.
+
+---
+
+### دریافت فهرست لاگ‌های حسابرسی (`GET /api/v1/audit-logs`)
+
+* **متد و مسیر**: `GET /api/v1/audit-logs`
+* **هدرهای الزامی**:
+  * `Authorization: Bearer <token>`
+  * `X-Organization-ID: <organization_uuid>`
+* **مجوز مورد نیاز**: `audit_log:read` (منحصراً نقش `admin`)
+* **هدرهای پاسخ**:
+  * `Cache-Control: no-store`
+  * `Pragma: no-cache`
+  * `Content-Type: application/json`
+
+#### نمونه درخواست:
+```http
+GET /api/v1/audit-logs?limit=2&action=backup.run.verified HTTP/1.1
+Host: api.backup.internal
+Authorization: Bearer <admin-token>
+X-Organization-ID: 7b1029c3-324e-473d-9d41-45f8e5d2639a
+```
+
+#### نمونه پاسخ موفق (`200 OK`):
+```json
+{
+  "data": [
+    {
+      "id": "e6a0d4cf-c2ea-4977-bfcb-96cf5d5d852a",
+      "user_id": "8a9d1234-5678-4321-abcd-ef0123456789",
+      "action": "backup.run.verified",
+      "entity_type": "backup_run",
+      "entity_id": "550e8400-e29b-41d4-a716-446655440000",
+      "ip_address": "192.168.1.100",
+      "user_agent": "Mozilla/5.0 (X11; Linux x86_64)",
+      "created_at": "2026-09-08T10:00:00Z"
+    }
+  ],
+  "page": {
+    "next_cursor": "MjAyNi0wOS0wOFQxMDowMDowMFosZTZhMGQ0Y2YtYzJlYS00OTc3LWJmY2ItOTZjZjVkNWQ4NTJh",
+    "has_more": false
+  },
+  "message": "audit logs retrieved successfully",
+  "request_id": "req-7b3e1c2a-9f4a-4a21-9876-123456789abc"
+}
+```
+
+#### خطاهای استاندارد:
+* **۴۰۰ Bad Request**: پارامتر نامعتبر (مانند limit بزرگتر از ۱۰۰، کرسر خراب، فرمت تاریخ نامعتبر، شرط from > to یا UUID نامعتبر).
+* **۴۰۱ Unauthorized**: توکن غایب یا منقضی‌شده.
+* **۴۰۳ Forbidden**: کاربر دسترسی `audit_log:read` را ندارد (نقش‌های member و viewer).
+* **۴۰۴ Not Found**: سازمان مشخص‌شده در هدر برای کاربر وجود ندارد یا عضو آن نیست.
+* **۵۰۳ Service Unavailable**: بروز قطعی یا عدم دسترسی به پایگاه‌داده حسابرسی.

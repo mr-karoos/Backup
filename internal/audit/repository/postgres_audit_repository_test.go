@@ -17,7 +17,8 @@ import (
 )
 
 type mockQuerier struct {
-	execFunc func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	execFunc  func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+	queryFunc func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 func (m *mockQuerier) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
@@ -28,6 +29,9 @@ func (m *mockQuerier) Exec(ctx context.Context, sql string, args ...any) (pgconn
 }
 
 func (m *mockQuerier) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	if m.queryFunc != nil {
+		return m.queryFunc(ctx, sql, args...)
+	}
 	return nil, nil
 }
 
@@ -184,3 +188,189 @@ func TestPostgresAuditRepository_Insert(t *testing.T) {
 		}
 	})
 }
+
+func TestPostgresAuditRepository_ListPaginated(t *testing.T) {
+	orgID := uuid.New()
+	action := "backup.download"
+	entityType := "backup_artifact"
+	entityID := uuid.New()
+	userID := uuid.New()
+	now := time.Now().UTC()
+	from := now.Add(-1 * time.Hour)
+	to := now
+	cursorID := uuid.New()
+
+	t.Run("nil orgID returns error", func(t *testing.T) {
+		repo := NewPostgresAuditRepository(&mockTxManager{querier: &mockQuerier{}})
+		_, _, err := repo.ListPaginated(context.Background(), uuid.Nil, domain.AuditLogFilter{})
+		if err == nil {
+			t.Fatalf("expected error when orgID is uuid.Nil")
+		}
+	})
+
+	t.Run("constructs correct parameterized SQL query with all filters and cursor", func(t *testing.T) {
+		var capturedSQL string
+		var capturedArgs []any
+
+		q := &mockQuerier{
+			queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				capturedSQL = sql
+				capturedArgs = args
+				return &mockRows{}, nil
+			},
+		}
+
+		repo := NewPostgresAuditRepository(&mockTxManager{querier: q})
+
+		filter := domain.AuditLogFilter{
+			Limit:           25,
+			CursorCreatedAt: &from,
+			CursorID:        &cursorID,
+			Action:          &action,
+			EntityType:      &entityType,
+			EntityID:        &entityID,
+			UserID:          &userID,
+			From:            &from,
+			To:              &to,
+		}
+
+		_, _, err := repo.ListPaginated(context.Background(), orgID, filter)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// Verify organization_id is always the first predicate
+		if !strings.Contains(capturedSQL, "WHERE organization_id = $1") {
+			t.Errorf("expected SQL to contain 'WHERE organization_id = $1', got: %s", capturedSQL)
+		}
+		if capturedArgs[0] != orgID {
+			t.Errorf("arg 0 (orgID) mismatch: expected %v, got %v", orgID, capturedArgs[0])
+		}
+
+		// Verify other filter clauses are present
+		if !strings.Contains(capturedSQL, "AND action = $") {
+			t.Errorf("expected SQL to contain 'AND action = $', got: %s", capturedSQL)
+		}
+		if !strings.Contains(capturedSQL, "AND entity_type = $") {
+			t.Errorf("expected SQL to contain 'AND entity_type = $', got: %s", capturedSQL)
+		}
+		if !strings.Contains(capturedSQL, "AND entity_id = $") {
+			t.Errorf("expected SQL to contain 'AND entity_id = $', got: %s", capturedSQL)
+		}
+		if !strings.Contains(capturedSQL, "AND user_id = $") {
+			t.Errorf("expected SQL to contain 'AND user_id = $', got: %s", capturedSQL)
+		}
+		if !strings.Contains(capturedSQL, "AND created_at >= $") {
+			t.Errorf("expected SQL to contain 'AND created_at >= $', got: %s", capturedSQL)
+		}
+		if !strings.Contains(capturedSQL, "AND created_at <= $") {
+			t.Errorf("expected SQL to contain 'AND created_at <= $', got: %s", capturedSQL)
+		}
+		if !strings.Contains(capturedSQL, "AND (created_at < $") || !strings.Contains(capturedSQL, "ORDER BY created_at DESC, id DESC LIMIT $") {
+			t.Errorf("expected SQL to contain keyset predicate and order/limit, got: %s", capturedSQL)
+		}
+
+		// Check limit + 1 = 26
+		lastArg := capturedArgs[len(capturedArgs)-1]
+		if lastArg != 26 {
+			t.Errorf("expected last argument (limit+1) to be 26, got: %v", lastArg)
+		}
+	})
+
+	t.Run("non-nil zero From and To include created_at predicates in SQL", func(t *testing.T) {
+		var capturedSQL string
+		var capturedArgs []any
+
+		q := &mockQuerier{
+			queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				capturedSQL = sql
+				capturedArgs = args
+				return &mockRows{}, nil
+			},
+		}
+
+		repo := NewPostgresAuditRepository(&mockTxManager{querier: q})
+
+		zeroFrom := time.Time{}
+		zeroTo := time.Time{}
+		filter := domain.AuditLogFilter{
+			From: &zeroFrom,
+			To:   &zeroTo,
+		}
+
+		_, _, err := repo.ListPaginated(context.Background(), orgID, filter)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if !strings.Contains(capturedSQL, "AND created_at >= $") {
+			t.Errorf("expected SQL to contain 'AND created_at >= $' for zero From, got: %s", capturedSQL)
+		}
+		if !strings.Contains(capturedSQL, "AND created_at <= $") {
+			t.Errorf("expected SQL to contain 'AND created_at <= $' for zero To, got: %s", capturedSQL)
+		}
+
+		// Ensure zero times are passed in args
+		foundFrom := false
+		foundTo := false
+		for _, arg := range capturedArgs {
+			if tm, ok := arg.(time.Time); ok && tm.IsZero() {
+				if !foundFrom {
+					foundFrom = true
+				} else {
+					foundTo = true
+				}
+			}
+		}
+		if !foundFrom || !foundTo {
+			t.Errorf("expected both zero From and To to be passed in query args")
+		}
+	})
+
+	t.Run("defaults limit to 50 when <= 0 or > 100", func(t *testing.T) {
+		for _, invalidLimit := range []int{0, -10, 101, 500} {
+			var capturedArgs []any
+			q := &mockQuerier{
+				queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+					capturedArgs = args
+					return &mockRows{}, nil
+				},
+			}
+			repo := NewPostgresAuditRepository(&mockTxManager{querier: q})
+			_, _, err := repo.ListPaginated(context.Background(), orgID, domain.AuditLogFilter{Limit: invalidLimit})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			lastArg := capturedArgs[len(capturedArgs)-1]
+			if lastArg != 51 { // 50 + 1
+				t.Errorf("expected default limit+1 to be 51 for limit %d, got: %v", invalidLimit, lastArg)
+			}
+		}
+	})
+
+	t.Run("propagates query error", func(t *testing.T) {
+		dbErr := errors.New("db connection down")
+		q := &mockQuerier{
+			queryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+				return nil, dbErr
+			},
+		}
+		repo := NewPostgresAuditRepository(&mockTxManager{querier: q})
+		_, _, err := repo.ListPaginated(context.Background(), orgID, domain.AuditLogFilter{})
+		if err == nil || !strings.Contains(err.Error(), "db connection down") {
+			t.Fatalf("expected db connection error, got: %v", err)
+		}
+	})
+}
+
+type mockRows struct{}
+
+func (m *mockRows) Close()                                       {}
+func (m *mockRows) Err() error                                   { return nil }
+func (m *mockRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (m *mockRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (m *mockRows) Next() bool                                   { return false }
+func (m *mockRows) Scan(dest ...any) error                       { return nil }
+func (m *mockRows) Values() ([]any, error)                       { return nil, nil }
+func (m *mockRows) RawValues() [][]byte                          { return nil }
+func (m *mockRows) Conn() *pgx.Conn                              { return nil }
