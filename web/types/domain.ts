@@ -417,3 +417,28 @@ export interface MaintenanceRunSummaryResponse {
 export interface MaintenanceJobDetailResponse extends MaintenanceJobResponse {
   runs: MaintenanceRunSummaryResponse[];
 }
+
+// -------------------------------------------------------------
+// Audit Logs (Backend A.5.2 Read-Only Contract)
+// -------------------------------------------------------------
+export interface AuditLogDTO {
+  id: string;
+  user_id: string | null;
+  action: string;
+  entity_type: string;
+  entity_id: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  created_at: string;
+}
+
+export interface AuditLogFilterParams {
+  limit?: number;
+  cursor?: string;
+  action?: string;
+  entity_type?: string;
+  entity_id?: string;
+  user_id?: string;
+  from?: string;
+  to?: string;
+}

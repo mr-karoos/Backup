@@ -15,6 +15,7 @@ import {
   Settings,
   Activity,
   Wrench,
+  FileText,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -23,6 +24,7 @@ interface NavItem {
   href: string;
   icon: LucideIcon;
   adminOnly?: boolean;
+  requiredPermission?: 'canViewCredentials' | 'canViewAuditLogs';
 }
 
 const navItems: NavItem[] = [
@@ -62,6 +64,12 @@ const navItems: NavItem[] = [
     icon: Wrench,
   },
   {
+    title: 'Audit Logs',
+    href: '/audit-logs',
+    icon: FileText,
+    requiredPermission: 'canViewAuditLogs',
+  },
+  {
     title: 'Credentials',
     href: '/credentials',
     icon: KeyRound,
@@ -81,10 +89,13 @@ const navItems: NavItem[] = [
 
 export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
   const pathname = usePathname();
-  const { canViewCredentials } = usePermissions();
+  const { canViewCredentials, canViewAuditLogs } = usePermissions();
 
   const visibleItems = navItems.filter((item) => {
     if (item.adminOnly && !canViewCredentials) {
+      return false;
+    }
+    if (item.requiredPermission === 'canViewAuditLogs' && !canViewAuditLogs) {
       return false;
     }
     return true;
