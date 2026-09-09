@@ -1,0 +1,492 @@
+'use client';
+
+import * as React from 'react';
+import Link from 'next/link';
+import { useParams, useRouter } from 'next/navigation';
+import { useQuery } from '@tanstack/react-query';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { useAuth } from '@/lib/auth/auth-context';
+import { apiClient } from '@/lib/api/api-client';
+import { queryKeys } from '@/lib/query/query-client';
+import { usePermissions } from '@/lib/auth/permissions';
+import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
+import { useUnsavedChanges } from '@/lib/hooks/use-unsaved-changes';
+import { useUpdateStorageTarget, useDeleteStorageTarget } from '@/lib/api/mutations';
+import {
+  storageEditSchema,
+  type StorageEditFormValues,
+} from '@/lib/forms/schemas';
+import { type StorageTargetResponse, type UpdateStorageTargetRequest } from '@/types/domain';
+import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { ErrorState } from '@/components/ui/error-state';
+import { ConfirmDialog } from '@/components/ui/confirm-dialog';
+import { FormField } from '@/components/ui/form-field';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog';
+import { formatDate, getStatusBadgeVariant, formatStorageTargetType } from '@/lib/format/formatters';
+import { ArrowLeft, HardDrive, Cloud, Server, ShieldCheck, Check, Pencil, Trash2 } from 'lucide-react';
+
+export interface EditStorageTargetDialogProps {
+  target: StorageTargetResponse | null;
+  open: boolean;
+  onClose: () => void;
+}
+
+export function EditStorageTargetDialog({
+  target,
+  open,
+  onClose,
+}: EditStorageTargetDialogProps) {
+  const updateTarget = useUpdateStorageTarget();
+
+  const {
+    register,
+    handleSubmit,
+    reset,
+    formState: { errors, isDirty, isSubmitting },
+  } = useForm<StorageEditFormValues>({
+    resolver: zodResolver(storageEditSchema),
+    defaultValues: {
+      name: '',
+      type: undefined,
+      bucket: '',
+      region: '',
+      endpoint: '',
+      force_path_style: false,
+    },
+  });
+
+  const { bypassGuard } = useUnsavedChanges(open && isDirty);
+
+  React.useEffect(() => {
+    if (open && target) {
+      reset({
+        name: target.name,
+        type: target.type,
+        bucket: target.s3_config?.bucket || '',
+        region: target.s3_config?.region || '',
+        endpoint: target.s3_config?.endpoint || '',
+        force_path_style: target.s3_config?.force_path_style ?? false,
+      });
+    }
+  }, [open, target, reset]);
+
+  const clearFormAndReset = React.useCallback(() => {
+    reset({
+      name: '',
+      type: undefined,
+      bucket: '',
+      region: '',
+      endpoint: '',
+      force_path_style: false,
+    });
+  }, [reset]);
+
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      clearFormAndReset();
+      onClose();
+    },
+  });
+
+  const handleClose = React.useCallback(() => {
+    if (isDirty) {
+      const confirmed =
+        typeof window !== 'undefined'
+          ? window.confirm('You have unsaved changes. Are you sure you want to discard them?')
+          : true;
+      if (!confirmed) return;
+    }
+    clearFormAndReset();
+    onClose();
+  }, [isDirty, clearFormAndReset, onClose]);
+
+  const onSubmit = async (values: StorageEditFormValues) => {
+    if (!target) return;
+
+    const payload: UpdateStorageTargetRequest = {
+      name: values.name.trim() || undefined,
+    };
+
+    if (target.type === 's3') {
+      payload.s3_config = {
+        bucket: values.bucket?.trim() || '',
+        region: values.region?.trim() || '',
+        endpoint: values.endpoint?.trim() || '',
+        force_path_style: Boolean(values.force_path_style),
+      };
+    }
+
+    try {
+      await updateTarget.mutateAsync({ id: target.id, data: payload });
+      bypassGuard();
+      clearFormAndReset();
+      onClose();
+    } catch {
+      // Handled by onError toast; form remains dirty and open for retry
+    }
+  };
+
+  if (!target) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Pencil className="h-5 w-5 text-primary" />
+            Edit Storage Target
+          </DialogTitle>
+          <DialogDescription>
+            Update configuration parameters for {target.name}.
+          </DialogDescription>
+        </DialogHeader>
+
+        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 py-2" noValidate>
+          <FormField
+            label="Target Name"
+            htmlFor="edit-target-name"
+            required
+            error={errors.name?.message}
+          >
+            <input
+              id="edit-target-name"
+              type="text"
+              {...register('name')}
+              aria-invalid={Boolean(errors.name)}
+              aria-describedby={errors.name ? 'edit-target-name-error' : undefined}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </FormField>
+
+          {target.type === 's3_compatible' && (
+            <div className="rounded-md border border-amber-800/40 bg-amber-950/20 p-3 text-xs text-amber-300">
+              Endpoint and bucket parameters for S3-compatible targets are immutable in this version. Only the display name can be updated.
+            </div>
+          )}
+
+          {target.type === 's3' && (
+            <>
+              <FormField
+                label="Bucket Name"
+                htmlFor="edit-bucket"
+                required
+                error={errors.bucket?.message}
+              >
+                <input
+                  id="edit-bucket"
+                  type="text"
+                  {...register('bucket')}
+                  aria-invalid={Boolean(errors.bucket)}
+                  aria-describedby={errors.bucket ? 'edit-bucket-error' : undefined}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </FormField>
+
+              <FormField
+                label="Region"
+                htmlFor="edit-region"
+                required
+                error={errors.region?.message}
+              >
+                <input
+                  id="edit-region"
+                  type="text"
+                  {...register('region')}
+                  aria-invalid={Boolean(errors.region)}
+                  aria-describedby={errors.region ? 'edit-region-error' : undefined}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </FormField>
+
+              <FormField
+                label="Endpoint (Optional)"
+                htmlFor="edit-endpoint"
+                error={errors.endpoint?.message}
+              >
+                <input
+                  id="edit-endpoint"
+                  type="text"
+                  {...register('endpoint')}
+                  aria-invalid={Boolean(errors.endpoint)}
+                  placeholder="https://s3.amazonaws.com"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+              </FormField>
+
+              <div className="pt-2">
+                <label className="flex items-center gap-2 text-sm text-foreground cursor-pointer">
+                  <input
+                    type="checkbox"
+                    {...register('force_path_style')}
+                    className="rounded border-input text-primary focus:ring-ring"
+                  />
+                  <span>Force Path Style</span>
+                </label>
+              </div>
+            </>
+          )}
+
+          <div className="flex justify-end gap-3 pt-4 border-t">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={handleClose}
+              disabled={isSubmitting || updateTarget.isPending}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={isSubmitting || updateTarget.isPending}
+            >
+              {updateTarget.isPending || isSubmitting ? 'Saving...' : 'Save Changes'}
+            </Button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export default function StorageTargetDetailPage() {
+  const params = useParams();
+  const id = params?.id as string;
+  const router = useRouter();
+  const { activeOrgId } = useAuth();
+  const { canManageStorage } = usePermissions();
+
+  const [editDialogOpen, setEditDialogOpen] = React.useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = React.useState(false);
+
+  const deleteTarget = useDeleteStorageTarget();
+
+  useTenantFormGuard({
+    onTenantChanged: () => {
+      setEditDialogOpen(false);
+      setDeleteDialogOpen(false);
+      router.push('/storage');
+    },
+  });
+
+  const { data, isLoading, isError, error, refetch } = useQuery<StorageTargetResponse>({
+    queryKey: activeOrgId && id ? queryKeys.org(activeOrgId).storageTargets.detail(id) : ['disabled'],
+    queryFn: () => apiClient.get<StorageTargetResponse>(`/storage-targets/${id}`),
+    enabled: !!activeOrgId && !!id,
+  });
+
+  const handleDelete = async () => {
+    await deleteTarget.mutateAsync(id);
+    setDeleteDialogOpen(false);
+    router.push('/storage');
+  };
+
+  if (isLoading) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-48 w-full" />
+      </div>
+    );
+  }
+
+  if (isError || !data) {
+    return (
+      <div className="space-y-6">
+        <Link href="/storage">
+          <Button variant="ghost" size="sm" className="gap-2">
+            <ArrowLeft className="h-4 w-4" />
+            Back to Storage Targets
+          </Button>
+        </Link>
+        <ErrorState
+          title="Could not load storage target details"
+          error={error}
+          onRetry={() => refetch()}
+        />
+      </div>
+    );
+  }
+
+  const { label, variant } = getStatusBadgeVariant(data.status);
+  const isCloud = data.type === 's3' || data.type === 's3_compatible';
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-col gap-2">
+        <Link href="/storage" className="w-fit">
+          <Button variant="ghost" size="sm" className="gap-2 -ml-2 text-muted-foreground hover:text-foreground">
+            <ArrowLeft className="h-4 w-4" />
+            Back to Storage Targets
+          </Button>
+        </Link>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary">
+              {isCloud ? <Cloud className="h-5 w-5 text-sky-500" /> : <HardDrive className="h-5 w-5" />}
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-2xl font-bold tracking-tight text-foreground">{data.name}</h1>
+                {data.is_default && (
+                  <Badge variant="secondary" className="gap-1 text-xs">
+                    <Check className="h-3 w-3" />
+                    Default Destination
+                  </Badge>
+                )}
+                <Badge variant={variant} className="capitalize text-sm px-2.5 py-0.5">
+                  {label}
+                </Badge>
+              </div>
+              <p className="text-xs font-mono text-muted-foreground mt-0.5">ID: {data.id}</p>
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          {canManageStorage && (
+            <div className="flex items-center gap-2">
+              {data.type !== 'local' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setEditDialogOpen(true)}
+                  className="gap-1.5"
+                >
+                  <Pencil className="h-4 w-4" />
+                  Edit Target
+                </Button>
+              )}
+
+              {!data.is_default && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setDeleteDialogOpen(true)}
+                  className="gap-1.5 text-rose-500 hover:text-rose-400 hover:bg-rose-950/20"
+                >
+                  <Trash2 className="h-4 w-4" />
+                  Delete
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Detail Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Core Attributes Card */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              <Server className="h-4 w-4 text-muted-foreground" />
+              Target Attributes
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4 text-sm">
+            <div className="grid grid-cols-2 gap-2 border-b pb-3">
+              <span className="text-muted-foreground">Target Type</span>
+              <span className="font-medium text-foreground">{formatStorageTargetType(data.type)}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 border-b pb-3">
+              <span className="text-muted-foreground">Operating Status</span>
+              <span className="font-medium capitalize text-foreground">{data.status}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 border-b pb-3">
+              <span className="text-muted-foreground">Default Allocation</span>
+              <span className="font-medium text-foreground">
+                {data.is_default ? 'Assigned as default for new plans' : 'Secondary destination'}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <span className="text-muted-foreground">Configured At</span>
+              <span className="font-medium text-foreground">{formatDate(data.created_at)}</span>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Cloud / Destination Specs */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+              Destination Configuration
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4 text-sm">
+            {data.s3_config ? (
+              <>
+                <div className="grid grid-cols-2 gap-2 border-b pb-3">
+                  <span className="text-muted-foreground">S3 Bucket</span>
+                  <span className="font-mono font-medium text-foreground">
+                    {data.s3_config.bucket}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 border-b pb-3">
+                  <span className="text-muted-foreground">Region</span>
+                  <span className="font-mono text-foreground">{data.s3_config.region || 'default'}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 border-b pb-3">
+                  <span className="text-muted-foreground">Endpoint</span>
+                  <span className="font-mono text-xs text-foreground truncate">
+                    {data.s3_config.endpoint || 'AWS Default'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <span className="text-muted-foreground">Path Style</span>
+                  <span className="font-mono text-foreground">
+                    {data.s3_config.force_path_style ? 'Force Path Style' : 'Virtual Hosted'}
+                  </span>
+                </div>
+              </>
+            ) : isCloud ? (
+              <div className="py-4 space-y-2 text-muted-foreground text-xs">
+                <p className="font-medium text-foreground">S3-Compatible Object Storage Target</p>
+                <p>
+                  Artifacts are streamed directly to external S3-compatible cloud storage. Bucket and endpoint parameters are managed securely via platform configuration.
+                </p>
+              </div>
+            ) : (
+              <div className="py-4 space-y-2 text-muted-foreground text-xs">
+                <p className="font-medium text-foreground">Platform-Managed Local Storage Target</p>
+                <p>
+                  Artifacts are isolated and stored within platform-managed secure volumes. Physical disk paths and server mounts remain strictly concealed in compliance with security guidelines.
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Edit Storage Target Modal */}
+      <EditStorageTargetDialog
+        target={data}
+        open={editDialogOpen}
+        onClose={() => setEditDialogOpen(false)}
+      />
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title="Delete Storage Target"
+        description="Are you sure you want to delete this storage destination? Any active plans using this target must be updated before deletion."
+        objectName={data.name}
+        confirmText="Delete Target"
+        destructive
+        isLoading={deleteTarget.isPending}
+        onConfirm={handleDelete}
+      />
+    </div>
+  );
+}
