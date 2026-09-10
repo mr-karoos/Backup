@@ -1,12 +1,11 @@
 # ==============================================================================
-# Docker Compose Definition for Backup Platform (Internal V1)
+# Docker Compose Definition for Backup Platform (Internal V1 Full-Stack)
 # ==============================================================================
 
 services:
   # Metadata Database & Durable Task Queue
   postgres:
     image: postgres:15-alpine
-    container_name: backup-platform-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
@@ -33,7 +32,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: backup-platform-app
     hostname: backup-platform-node-1
     restart: unless-stopped
     depends_on:
@@ -56,8 +54,8 @@ services:
       MAINTENANCE_DEEP_CHECK_ENABLED: ${MAINTENANCE_DEEP_CHECK_ENABLED:-true}
       MAINTENANCE_DEEP_CHECK_INTERVAL: ${MAINTENANCE_DEEP_CHECK_INTERVAL:-24h}
       MAINTENANCE_DEEP_CHECK_SUBSETS: ${MAINTENANCE_DEEP_CHECK_SUBSETS:-4}
-    ports:
-      - "${BACKUP_PLATFORM_BIND_IP:-127.0.0.1}:${BACKUP_PLATFORM_PORT:-8080}:8080"
+    expose:
+      - "8080"
     volumes:
       - "${BACKUP_PLATFORM_STORAGE_PATH:-/srv/backup-platform}:/srv/backup-platform"
     security_opt:
@@ -81,11 +79,45 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  # Frontend Web UI (Next.js Standalone Production Runner)
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+      args:
+        BACKEND_ORIGIN: http://app:8080
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      HOSTNAME: "0.0.0.0"
+      BACKEND_ORIGIN: http://app:8080
+    ports:
+      - "${BACKUP_PLATFORM_WEB_BIND_IP:-127.0.0.1}:${BACKUP_PLATFORM_WEB_PORT:-13000}:3000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - platform_net
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/login').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))\""]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 volumes:
   postgres_data:
-    name: backup_platform_postgres_data
 
 networks:
   platform_net:
-    name: backup_platform_network
     driver: bridge

@@ -30,6 +30,9 @@ COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
 
+ARG BACKEND_ORIGIN=http://app:8080
+ENV BACKEND_ORIGIN=${BACKEND_ORIGIN}
+
 # Build standalone Next.js bundle
 RUN pnpm build
 
