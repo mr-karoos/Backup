@@ -13,7 +13,7 @@ import { usePermissions } from '@/lib/auth/permissions';
 import { useTenantFormGuard } from '@/lib/hooks/use-tenant-form-guard';
 import { FormField } from '@/components/ui/form-field';
 import { Select } from '@/components/ui/select';
-import type { BackupType, EngineType, StorageTargetResponse } from '@/types/domain';
+import type { BackupType, EngineType, StorageTargetResponse, CreateBackupJobRequest } from '@/types/domain';
 
 export interface ManualBackupDialogProps {
   open: boolean;
@@ -58,12 +58,31 @@ export function ManualBackupDialog({
 
   // Ad-hoc form state
   const [backupType, setBackupType] = React.useState<BackupType>('mysql_database');
-  const [selectedStorageTargetId, setSelectedStorageTargetId] = React.useState<string>('');
+  const [selectedStorageTargetId, setSelectedStorageTargetId] = React.useState<string | null>(null);
+
+  const activeStorageTargets = React.useMemo(
+    () => storageTargets?.filter((t) => t.status === 'active') || [],
+    [storageTargets]
+  );
+
   const defaultStorageTargetId =
-    storageTargets?.find((t) => t.is_default && t.status === 'active')?.id ||
-    storageTargets?.find((t) => t.status === 'active')?.id ||
+    activeStorageTargets.find((t) => t.is_default)?.id ||
+    activeStorageTargets[0]?.id ||
     '';
-  const storageTargetId = selectedStorageTargetId || defaultStorageTargetId;
+
+  const storageTargetId =
+    selectedStorageTargetId !== null ? selectedStorageTargetId : defaultStorageTargetId;
+
+  const storageOptions = React.useMemo(() => {
+    return [
+      { value: '', label: 'Platform Default Local Storage (auto-provisioned)' },
+      ...activeStorageTargets.map((t) => ({
+        value: t.id,
+        label: `${t.name} (${t.type})${t.is_default ? ' [Default]' : ''}`,
+      })),
+    ];
+  }, [activeStorageTargets]);
+
   const [databasesInput, setDatabasesInput] = React.useState<string>('');
   const [pathsInput, setPathsInput] = React.useState<string>('/var/www/html');
   const [excludeInput, setExcludeInput] = React.useState<string>('');
@@ -72,6 +91,7 @@ export function ManualBackupDialog({
   const handleOpenChange = (newOpen: boolean) => {
     if (!newOpen) {
       setValidationError(null);
+      setSelectedStorageTargetId(null);
       setDatabasesInput('');
       setPathsInput('/var/www/html');
       setExcludeInput('');
@@ -106,10 +126,6 @@ export function ManualBackupDialog({
 
     // Ad-hoc validation
     if (!resource) return;
-    if (!storageTargetId) {
-      setValidationError('Please select a storage target.');
-      return;
-    }
 
     const engineType: EngineType = 'direct_stream';
     let targetSpec: { databases?: string[]; paths?: string[]; exclude_patterns?: string[] } = {};
@@ -140,13 +156,15 @@ export function ManualBackupDialog({
       targetSpec = { paths, exclude_patterns: excludes };
     }
 
-    await createJob.mutateAsync({
+    const payload: CreateBackupJobRequest = {
       resource_id: resource.id,
       backup_type: backupType,
       engine_type: engineType,
-      storage_target_id: storageTargetId,
+      ...(storageTargetId ? { storage_target_id: storageTargetId } : {}),
       target_spec: targetSpec,
-    });
+    };
+
+    await createJob.mutateAsync(payload);
     handleOpenChange(false);
     router.push('/runs');
   };
@@ -236,7 +254,6 @@ export function ManualBackupDialog({
                 <FormField
                   label="Storage Target"
                   htmlFor="storage-target"
-                  required
                   description="Target destination for generated backup archives"
                 >
                   <Select
@@ -244,14 +261,7 @@ export function ManualBackupDialog({
                     value={storageTargetId}
                     onChange={(e) => setSelectedStorageTargetId(e.target.value)}
                     disabled={loadingStorage}
-                    options={
-                      storageTargets
-                        ?.filter((t) => t.status === 'active')
-                        .map((t) => ({
-                          value: t.id,
-                          label: `${t.name} (${t.type})`,
-                        })) || []
-                    }
+                    options={storageOptions}
                   />
                 </FormField>
 

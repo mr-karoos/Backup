@@ -192,6 +192,53 @@ describe('Form Schemas & Resource Eligibility Validations', () => {
       expect(backupPlanSchema.safeParse(validFilesPlan).success).toBe(true);
     });
 
+    it('allows creating backup plan without explicit storage_target_id (auto-provisioned fallback)', () => {
+      const planWithoutStorage = {
+        name: 'Auto Storage Plan',
+        resource_id: 'res-1',
+        backup_type: 'mysql_database' as const,
+        is_enabled: false,
+        timezone: 'UTC',
+        db_mode: 'all' as const,
+        selected_databases: [],
+      };
+
+      const parsed = backupPlanSchema.safeParse(planWithoutStorage);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.storage_target_id).toBeUndefined();
+      }
+
+      const planWithEmptyStorage = {
+        ...planWithoutStorage,
+        storage_target_id: '',
+      };
+      const parsedEmpty = backupPlanSchema.safeParse(planWithEmptyStorage);
+      expect(parsedEmpty.success).toBe(true);
+      if (parsedEmpty.success) {
+        expect(parsedEmpty.data.storage_target_id).toBe('');
+      }
+    });
+
+    it('preserves explicit storage_target_id when provided in backup plan creation', () => {
+      const planWithExplicitStorage = {
+        name: 'Explicit Storage Plan',
+        resource_id: 'res-1',
+        backup_type: 'mysql_database' as const,
+        storage_target_id: 'st-explicit-uuid',
+        is_enabled: false,
+        timezone: 'UTC',
+        db_mode: 'all' as const,
+        selected_databases: [],
+      };
+
+      const parsed = backupPlanSchema.safeParse(planWithExplicitStorage);
+      expect(parsed.success).toBe(true);
+      if (parsed.success) {
+        expect(parsed.data.storage_target_id).toBe('st-explicit-uuid');
+      }
+    });
+
     it('validates backup plan edit schema with schedule toggle', () => {
       const editWithEnabledInvalidCron = {
         name: 'Updated Plan Name',

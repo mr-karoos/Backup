@@ -197,7 +197,7 @@ export const backupPlanSchema = z
     name: z.string().trim().min(1, 'Plan name is required').max(255),
     resource_id: z.string().min(1, 'Target resource is required'),
     backup_type: z.enum(['mysql_database', 'website_files']),
-    storage_target_id: z.string().min(1, 'Storage target is required'),
+    storage_target_id: z.string().optional(),
     is_enabled: z.boolean().default(true),
     cron_expression: z.string().trim().optional(),
     timezone: z.string().trim().min(1, 'Timezone is required').default('UTC'),

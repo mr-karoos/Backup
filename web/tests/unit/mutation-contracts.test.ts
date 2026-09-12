@@ -200,6 +200,38 @@ describe('Mutation Contract Conformance', () => {
       expect(res).toHaveProperty('id', 'plan-1');
     });
 
+    it('serializes Backup Plan creation without explicit storage_target_id (omitted for auto-provisioning)', async () => {
+      const postSpy = vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
+        id: 'plan-auto-1',
+        name: 'Auto Storage Plan',
+        resource_id: 'res-1',
+        engine_type: 'direct_stream',
+        storage_target_id: 'default-local-target-uuid',
+        status: 'active',
+        created_at: '2026-01-01T00:00:00Z',
+      });
+
+      const payload: CreateBackupPlanRequest = {
+        name: 'Auto Storage Plan',
+        resource_id: 'res-1',
+        backup_type: 'mysql_database',
+        engine_type: 'direct_stream',
+        database_selection: {
+          mode: 'all',
+        },
+        schedule: {
+          is_enabled: false,
+          timezone: 'UTC',
+        },
+      };
+
+      const res = await apiClient.post('/backup-plans', payload);
+
+      expect(postSpy).toHaveBeenCalledWith('/backup-plans', payload);
+      expect(payload).not.toHaveProperty('storage_target_id');
+      expect(res).toHaveProperty('id', 'plan-auto-1');
+    });
+
     it('serializes Backup Job execution request correctly and expects 202 status response', async () => {
       const postSpy = vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
         id: 'job-1',
@@ -223,6 +255,61 @@ describe('Mutation Contract Conformance', () => {
       expect(postSpy).toHaveBeenCalledWith('/backup-jobs', payload);
       expect(res).toHaveProperty('id', 'job-1');
       expect(res).toHaveProperty('status', 'pending');
+    });
+
+    it('serializes ad-hoc Backup Job execution omitting storage_target_id when default local storage is used', async () => {
+      const postSpy = vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
+        id: 'job-adhoc-auto',
+        resource_id: 'res-1',
+        backup_type: 'mysql_database',
+        engine_type: 'direct_stream',
+        storage_target_id: 'default-local-uuid',
+        target_spec: { databases: ['prod_db'] },
+        status: 'pending',
+        trigger_type: 'manual',
+        created_at: '2026-01-01T00:00:00Z',
+      });
+
+      const payload: CreateBackupJobRequest = {
+        resource_id: 'res-1',
+        backup_type: 'mysql_database',
+        engine_type: 'direct_stream',
+        target_spec: { databases: ['prod_db'] },
+      };
+
+      const res = await apiClient.post('/backup-jobs', payload);
+
+      expect(postSpy).toHaveBeenCalledWith('/backup-jobs', payload);
+      expect(payload).not.toHaveProperty('storage_target_id');
+      expect(res).toHaveProperty('id', 'job-adhoc-auto');
+    });
+
+    it('serializes ad-hoc Backup Job execution with explicit storage_target_id', async () => {
+      const postSpy = vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
+        id: 'job-adhoc-explicit',
+        resource_id: 'res-1',
+        backup_type: 'mysql_database',
+        engine_type: 'direct_stream',
+        storage_target_id: 'st-explicit-uuid',
+        target_spec: { databases: ['prod_db'] },
+        status: 'pending',
+        trigger_type: 'manual',
+        created_at: '2026-01-01T00:00:00Z',
+      });
+
+      const payload: CreateBackupJobRequest = {
+        resource_id: 'res-1',
+        backup_type: 'mysql_database',
+        engine_type: 'direct_stream',
+        storage_target_id: 'st-explicit-uuid',
+        target_spec: { databases: ['prod_db'] },
+      };
+
+      const res = await apiClient.post('/backup-jobs', payload);
+
+      expect(postSpy).toHaveBeenCalledWith('/backup-jobs', payload);
+      expect(payload.storage_target_id).toBe('st-explicit-uuid');
+      expect(res).toHaveProperty('id', 'job-adhoc-explicit');
     });
   });
 

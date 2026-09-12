@@ -124,8 +124,10 @@ export default function NewBackupPlanPage() {
   }, [resources, resourceId, setValue]);
 
   // Set default storage target once loaded
+  const storageDefaultInitialized = React.useRef(false);
   React.useEffect(() => {
-    if (storageTargets && !storageTargetId) {
+    if (storageTargets && !storageDefaultInitialized.current) {
+      storageDefaultInitialized.current = true;
       const defaultTarget =
         storageTargets.find((t) => t.is_default && t.status === 'active') ||
         storageTargets.find((t) => t.status === 'active');
@@ -133,7 +135,7 @@ export default function NewBackupPlanPage() {
         setValue('storage_target_id', defaultTarget.id);
       }
     }
-  }, [storageTargets, storageTargetId, setValue]);
+  }, [storageTargets, setValue]);
 
   const { bypassGuard, safeNavigate } = useUnsavedChanges(isDirty);
 
@@ -698,7 +700,6 @@ export default function NewBackupPlanPage() {
               <FormField
                 label="Storage Target"
                 htmlFor="storage-target-plan"
-                required
                 error={errors.storage_target_id?.message}
                 description="Destination for backup archives"
               >
@@ -712,7 +713,7 @@ export default function NewBackupPlanPage() {
                       onChange={field.onChange}
                       disabled={loadingStorage}
                       options={[
-                        { value: '', label: '-- Select Storage Target --' },
+                        { value: '', label: 'Platform Default Local Storage (auto-provisioned)' },
                         ...(storageTargets
                           ?.filter((t) => t.status === 'active')
                           .map((t) => ({
@@ -783,7 +784,9 @@ export default function NewBackupPlanPage() {
                 </div>
                 <div className="flex justify-between border-b pb-2">
                   <span className="text-muted-foreground">Storage Destination:</span>
-                  <span className="text-foreground">{selectedStorage?.name || storageTargetId}</span>
+                  <span className="text-foreground">
+                    {selectedStorage?.name || 'Platform Default Local Storage (auto-provisioned)'}
+                  </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Retention Policy:</span>
