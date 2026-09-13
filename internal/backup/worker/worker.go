@@ -18,6 +18,7 @@ import (
 	"backup-platform/internal/backup/service"
 	"backup-platform/internal/backup/verification"
 	"backup-platform/internal/connector"
+	"backup-platform/internal/connector/cpanel"
 	"backup-platform/internal/connector/sshconn"
 	credDomain "backup-platform/internal/credential/domain"
 	"backup-platform/internal/credential/payload"
@@ -65,24 +66,25 @@ type databaseDiscoverer interface {
 
 // WorkerPool manages concurrent worker goroutines consuming jobs from the durable PostgreSQL queue.
 type WorkerPool struct {
-	cfg                    WorkerPoolConfig
-	repo                   repository.BackupRepository
-	resFinder              ResourceConnectorFinder
-	vault                  CredentialVault
-	capabilityRegistry     *connector.BackupCapabilityRegistry
-	fileCapabilityRegistry *connector.FileBackupCapabilityRegistry
-	engine                 engine.BackupEngine
-	storageProvider        storage.StorageProvider
-	storageResolver        storage.StorageProviderResolver
-	verifier               verification.Verifier
-	mutexManager           *PerResourceMutexManager
-	logger                 *slog.Logger
-	nowFunc                func() time.Time
-	cancel                 context.CancelFunc
-	wg                     sync.WaitGroup
-	databaseDiscoverer     databaseDiscoverer
-	retentionManager       RetentionManager
-	keyProvider            artifactcrypto.KeyProvider
+	cfg                      WorkerPoolConfig
+	repo                     repository.BackupRepository
+	resFinder                ResourceConnectorFinder
+	vault                    CredentialVault
+	capabilityRegistry       *connector.BackupCapabilityRegistry
+	fileCapabilityRegistry   *connector.FileBackupCapabilityRegistry
+	engine                   engine.BackupEngine
+	storageProvider          storage.StorageProvider
+	storageResolver          storage.StorageProviderResolver
+	verifier                 verification.Verifier
+	mutexManager             *PerResourceMutexManager
+	logger                   *slog.Logger
+	nowFunc                  func() time.Time
+	cancel                   context.CancelFunc
+	wg                       sync.WaitGroup
+	databaseDiscoverer       databaseDiscoverer
+	cpanelDatabaseDiscoverer databaseDiscoverer
+	retentionManager         RetentionManager
+	keyProvider              artifactcrypto.KeyProvider
 
 	// Restic dependencies
 	resticEngine   ResticEngine
@@ -153,19 +155,20 @@ func NewWorkerPool(
 	}
 
 	wp := &WorkerPool{
-		cfg:                    cfg,
-		repo:                   repo,
-		resFinder:              resFinder,
-		vault:                  vault,
-		capabilityRegistry:     capabilityRegistry,
-		fileCapabilityRegistry: fileCapabilityRegistry,
-		engine:                 engine,
-		storageProvider:        storageProvider,
-		verifier:               verifier,
-		mutexManager:           mutexManager,
-		logger:                 log,
-		nowFunc:                time.Now,
-		databaseDiscoverer:     sshconn.NewSSHDatabaseDiscoverer(nil),
+		cfg:                      cfg,
+		repo:                     repo,
+		resFinder:                resFinder,
+		vault:                    vault,
+		capabilityRegistry:       capabilityRegistry,
+		fileCapabilityRegistry:   fileCapabilityRegistry,
+		engine:                   engine,
+		storageProvider:          storageProvider,
+		verifier:                 verifier,
+		mutexManager:             mutexManager,
+		logger:                   log,
+		nowFunc:                  time.Now,
+		databaseDiscoverer:       sshconn.NewSSHDatabaseDiscoverer(nil),
+		cpanelDatabaseDiscoverer: cpanel.NewCPanelDatabaseDiscoverer(nil),
 	}
 
 	return wp
@@ -652,7 +655,7 @@ func (p *WorkerPool) executeBackupPipeline(
 	if resWithConn.Resource.Status == resDomain.StatusArchived {
 		return domain.ErrResourceArchived
 	}
-	if resWithConn.Resource.Type != resDomain.TypeUbuntuSSH {
+	if resWithConn.Resource.Type != resDomain.TypeUbuntuSSH && resWithConn.Resource.Type != resDomain.TypeCPanel {
 		return domain.ErrUnsupportedResourceType
 	}
 	if resWithConn.Connector == nil {
@@ -709,6 +712,9 @@ func (p *WorkerPool) executeBackupPipeline(
 		return nil
 
 	case domain.BackupTypeWebsiteFiles:
+		if resWithConn.Resource.Type != resDomain.TypeUbuntuSSH {
+			return domain.ErrUnsupportedResourceType
+		}
 		fileCap, ok := p.fileCapabilityRegistry.Get(resWithConn.Resource.Type)
 		if !ok || fileCap == nil {
 			return domain.ErrUnsupportedResourceType
@@ -753,7 +759,9 @@ func (p *WorkerPool) executeDatabaseTarget(
 
 	// Validate AuthType vs Stored Credential Type compatibility
 	if (resWithConn.Connector.AuthType == resDomain.AuthTypeSSHKey && credType != credDomain.TypeSSHPrivateKey) ||
-		(resWithConn.Connector.AuthType == resDomain.AuthTypeSSHPassword && credType != credDomain.TypeSSHPassword) {
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeSSHPassword && credType != credDomain.TypeSSHPassword) ||
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeCPanelAPIToken && credType != credDomain.TypeCPanelAPIToken) ||
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeCPanelPassword && credType != credDomain.TypeCPanelPassword) {
 		secretcrypto.ZeroBytes(plaintextBytes)
 		return connector.ErrInvalidCredentialFormat
 	}
@@ -772,6 +780,7 @@ func (p *WorkerPool) executeDatabaseTarget(
 		AuthType:           resWithConn.Connector.AuthType,
 		HostKeyFingerprint: resWithConn.Connector.HostKeyFingerprint,
 		ConnectionTimeout:  resWithConn.Connector.Config.ConnectionTimeoutSeconds,
+		UseHTTPS:           resWithConn.Connector.Config.UseHTTPS,
 	}
 
 	artifactID := uuid.New()
@@ -1038,8 +1047,8 @@ func (p *WorkerPool) resolveMySQLDatabases(
 		return job.TargetSpec.Databases, nil
 	}
 
-	// Mode "all": discover non-system databases dynamically via SSH
-	if resWithConn.Resource.Type != resDomain.TypeUbuntuSSH {
+	// Mode "all": discover non-system databases dynamically
+	if resWithConn.Resource.Type != resDomain.TypeUbuntuSSH && resWithConn.Resource.Type != resDomain.TypeCPanel {
 		return nil, domain.ErrUnsupportedResourceType
 	}
 
@@ -1049,7 +1058,9 @@ func (p *WorkerPool) resolveMySQLDatabases(
 	}
 
 	if (resWithConn.Connector.AuthType == resDomain.AuthTypeSSHKey && credType != credDomain.TypeSSHPrivateKey) ||
-		(resWithConn.Connector.AuthType == resDomain.AuthTypeSSHPassword && credType != credDomain.TypeSSHPassword) {
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeSSHPassword && credType != credDomain.TypeSSHPassword) ||
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeCPanelAPIToken && credType != credDomain.TypeCPanelAPIToken) ||
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeCPanelPassword && credType != credDomain.TypeCPanelPassword) {
 		secretcrypto.ZeroBytes(plaintextBytes)
 		return nil, connector.ErrInvalidCredentialFormat
 	}
@@ -1068,11 +1079,20 @@ func (p *WorkerPool) resolveMySQLDatabases(
 		AuthType:           resWithConn.Connector.AuthType,
 		HostKeyFingerprint: resWithConn.Connector.HostKeyFingerprint,
 		ConnectionTimeout:  resWithConn.Connector.Config.ConnectionTimeoutSeconds,
+		UseHTTPS:           resWithConn.Connector.Config.UseHTTPS,
 	}
 
-	discoverer := p.databaseDiscoverer
-	if discoverer == nil {
-		discoverer = sshconn.NewSSHDatabaseDiscoverer(nil)
+	var discoverer databaseDiscoverer
+	if resWithConn.Resource.Type == resDomain.TypeCPanel {
+		discoverer = p.cpanelDatabaseDiscoverer
+		if discoverer == nil {
+			discoverer = cpanel.NewCPanelDatabaseDiscoverer(nil)
+		}
+	} else {
+		discoverer = p.databaseDiscoverer
+		if discoverer == nil {
+			discoverer = sshconn.NewSSHDatabaseDiscoverer(nil)
+		}
 	}
 	discovered, discErr := discoverer.DiscoverDatabases(ctx, target, credPayload)
 	if discErr != nil {
@@ -1136,7 +1156,9 @@ func (p *WorkerPool) executeResticDatabaseTarget(
 		return credErr
 	}
 	if (resWithConn.Connector.AuthType == resDomain.AuthTypeSSHKey && targetCredType != credDomain.TypeSSHPrivateKey) ||
-		(resWithConn.Connector.AuthType == resDomain.AuthTypeSSHPassword && targetCredType != credDomain.TypeSSHPassword) {
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeSSHPassword && targetCredType != credDomain.TypeSSHPassword) ||
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeCPanelAPIToken && targetCredType != credDomain.TypeCPanelAPIToken) ||
+		(resWithConn.Connector.AuthType == resDomain.AuthTypeCPanelPassword && targetCredType != credDomain.TypeCPanelPassword) {
 		secretcrypto.ZeroBytes(plaintextBytes)
 		return connector.ErrInvalidCredentialFormat
 	}
@@ -1154,6 +1176,7 @@ func (p *WorkerPool) executeResticDatabaseTarget(
 		AuthType:           resWithConn.Connector.AuthType,
 		HostKeyFingerprint: resWithConn.Connector.HostKeyFingerprint,
 		ConnectionTimeout:  resWithConn.Connector.Config.ConnectionTimeoutSeconds,
+		UseHTTPS:           resWithConn.Connector.Config.UseHTTPS,
 	}
 
 	artifactID := uuid.New()

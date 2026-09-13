@@ -25,6 +25,7 @@ const (
 	FailureKindLeaseInterrupted     FailureKind = "lease_interrupted"
 	FailureKindAuthentication       FailureKind = "authentication"
 	FailureKindHostKeyMismatch      FailureKind = "host_key_mismatch"
+	FailureKindTLSVerification      FailureKind = "tls_verification"
 	FailureKindInvalidCredential    FailureKind = "invalid_credential"
 	FailureKindInvalidConfiguration FailureKind = "invalid_configuration"
 	FailureKindUnsupportedResource  FailureKind = "unsupported_resource"
@@ -75,6 +76,8 @@ func (k FailureKind) SafeMessage() string {
 		return "authentication failed with remote host"
 	case FailureKindHostKeyMismatch:
 		return "remote host key mismatch detected"
+	case FailureKindTLSVerification:
+		return "remote TLS certificate verification failed"
 	case FailureKindInvalidCredential:
 		return "invalid credential for resource"
 	case FailureKindInvalidConfiguration:
@@ -202,6 +205,21 @@ func ClassifyError(err error) *ExecutionFailure {
 	}
 	if errors.Is(err, connector.ErrRemoteCommandStderrOverflow) {
 		return NewExecutionFailure(FailureKindInternal, err)
+	}
+	if errors.Is(err, connector.ErrCPanelTimeout) {
+		return NewExecutionFailure(FailureKindTimeout, err)
+	}
+	if errors.Is(err, connector.ErrCPanelNetwork) {
+		return NewExecutionFailure(FailureKindNetwork, err)
+	}
+	if errors.Is(err, connector.ErrCPanelTLSVerification) {
+		return NewExecutionFailure(FailureKindTLSVerification, err)
+	}
+	if errors.Is(err, connector.ErrCPanelAuthentication) {
+		return NewExecutionFailure(FailureKindAuthentication, err)
+	}
+	if errors.Is(err, connector.ErrCPanelDumpFailed) {
+		return NewExecutionFailure(FailureKindDumpCommandFailed, err)
 	}
 
 	// 6. Resource & Configuration Errors

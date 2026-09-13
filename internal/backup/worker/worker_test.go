@@ -226,6 +226,36 @@ func TestErrorClassification(t *testing.T) {
 			expectedKind: FailureKindPlatformDependency,
 			retryable:    true,
 		},
+		{
+			name:         "cPanel timeout is retryable timeout",
+			err:          connector.ErrCPanelTimeout,
+			expectedKind: FailureKindTimeout,
+			retryable:    true,
+		},
+		{
+			name:         "cPanel network is retryable network",
+			err:          connector.ErrCPanelNetwork,
+			expectedKind: FailureKindNetwork,
+			retryable:    true,
+		},
+		{
+			name:         "cPanel TLS verification is non-retryable tls_verification",
+			err:          connector.ErrCPanelTLSVerification,
+			expectedKind: FailureKindTLSVerification,
+			retryable:    false,
+		},
+		{
+			name:         "cPanel auth failed is non-retryable authentication",
+			err:          connector.ErrCPanelAuthentication,
+			expectedKind: FailureKindAuthentication,
+			retryable:    false,
+		},
+		{
+			name:         "cPanel dump failed is non-retryable dump_command_failed",
+			err:          connector.ErrCPanelDumpFailed,
+			expectedKind: FailureKindDumpCommandFailed,
+			retryable:    false,
+		},
 	}
 
 	for _, tc := range cases {
@@ -3684,4 +3714,288 @@ func TestWorkerPool_ResticExecution(t *testing.T) {
 			t.Errorf("expected no fallback to local storage on restic verification failure")
 		}
 	})
+}
+
+type fakeCPanelCredentialVault struct {
+	payloadBytes []byte
+	credType     credDomain.Type
+}
+
+func (f *fakeCPanelCredentialVault) LoadCredentialForUse(ctx context.Context, orgID, credID uuid.UUID) (credDomain.Type, []byte, error) {
+	copyBuf := make([]byte, len(f.payloadBytes))
+	copy(copyBuf, f.payloadBytes)
+	return f.credType, copyBuf, nil
+}
+
+func TestWorkerPool_CPanelSuccessfulBackup(t *testing.T) {
+	tempDir := t.TempDir()
+	storageProvider, _ := local.NewLocalStorageProvider(tempDir)
+	_ = storageProvider.EnsureStorageRoot(context.Background())
+
+	orgID := uuid.New()
+	resID := uuid.New()
+	credID := uuid.New()
+
+	validTokenJSON, _ := payload.EncodeV1("cpanel-token-123", nil)
+
+	useHTTPS := true
+	timeout := 10
+	port := 2083
+	resWithConn := &resDomain.ResourceWithConnector{
+		Resource: &resDomain.Resource{
+			ID:             resID,
+			OrganizationID: orgID,
+			Type:           resDomain.TypeCPanel,
+			Status:         resDomain.StatusActive,
+		},
+		Connector: &resDomain.ResourceConnector{
+			ID:           uuid.New(),
+			ResourceID:   resID,
+			CredentialID: credID,
+			Host:         "cpanel.example.com",
+			Port:         port,
+			AuthType:     resDomain.AuthTypeCPanelAPIToken,
+			Config: resDomain.ConnectorConfig{
+				Username:                 "cpaneluser",
+				ConnectionTimeoutSeconds: &timeout,
+				UseHTTPS:                 &useHTTPS,
+			},
+		},
+	}
+
+	repo := newFakeWorkerRepo(orgID)
+	job := &domain.BackupJob{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		ResourceID:     resID,
+		TriggerType:    domain.TriggerTypeManual,
+		BackupType:     domain.BackupTypeMySQLDatabase,
+		TargetSpec:     domain.TargetSpec{Databases: []string{"ecommerce_prod"}},
+		Status:         domain.JobStatusPending,
+		CreatedAt:      time.Now(),
+	}
+	repo.jobs[job.ID] = job
+
+	reg := connector.NewBackupCapabilityRegistry()
+	reg.Register(resDomain.TypeCPanel, &fakeCapability{
+		sqlDump: "-- MySQL dump 10.13\nCREATE DATABASE `ecommerce_prod`;\nINSERT INTO t VALUES (1);\n",
+	})
+
+	verifier := verification.NewVerificationEngine()
+	workerPool := newTestWorkerPool(
+		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+		repo,
+		&fakeResourceFinder{resWithConn: resWithConn},
+		&fakeCPanelCredentialVault{payloadBytes: validTokenJSON, credType: credDomain.TypeCPanelAPIToken},
+		reg,
+		connector.NewFileBackupCapabilityRegistry(),
+		engine.NewDirectStreamBackupEngine(),
+		storageProvider,
+		verifier,
+		NewPerResourceMutexManager(),
+		slog.Default(),
+	)
+
+	workerPool.processNextAvailableJob(context.Background(), 1)
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+
+	if repo.finalizedJob == nil || repo.finalizedJob.Status != domain.JobStatusCompleted {
+		t.Fatalf("expected job completed, got: %+v", repo.finalizedJob)
+	}
+	if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusSuccess {
+		t.Fatalf("expected run success, got: %+v", repo.finalizedRun)
+	}
+	if len(repo.artifacts) != 1 {
+		t.Fatalf("expected 1 artifact created, got %d", len(repo.artifacts))
+	}
+}
+
+func TestWorkerPool_CPanelWebsiteFilesRejected(t *testing.T) {
+	tempDir := t.TempDir()
+	storageProvider, _ := local.NewLocalStorageProvider(tempDir)
+	_ = storageProvider.EnsureStorageRoot(context.Background())
+
+	orgID := uuid.New()
+	resID := uuid.New()
+	credID := uuid.New()
+
+	validTokenJSON, _ := payload.EncodeV1("cpanel-token-123", nil)
+
+	useHTTPS := true
+	timeout := 10
+	port := 2083
+	resWithConn := &resDomain.ResourceWithConnector{
+		Resource: &resDomain.Resource{
+			ID:             resID,
+			OrganizationID: orgID,
+			Type:           resDomain.TypeCPanel,
+			Status:         resDomain.StatusActive,
+		},
+		Connector: &resDomain.ResourceConnector{
+			ID:           uuid.New(),
+			ResourceID:   resID,
+			CredentialID: credID,
+			Host:         "cpanel.example.com",
+			Port:         port,
+			AuthType:     resDomain.AuthTypeCPanelAPIToken,
+			Config: resDomain.ConnectorConfig{
+				Username:                 "cpaneluser",
+				ConnectionTimeoutSeconds: &timeout,
+				UseHTTPS:                 &useHTTPS,
+			},
+		},
+	}
+
+	repo := newFakeWorkerRepo(orgID)
+	job := &domain.BackupJob{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		ResourceID:     resID,
+		TriggerType:    domain.TriggerTypeManual,
+		BackupType:     domain.BackupTypeWebsiteFiles, // WebsiteFiles for cPanel must be rejected
+		TargetSpec:     domain.TargetSpec{Paths: []string{"/home/cpaneluser/public_html"}},
+		Status:         domain.JobStatusPending,
+		CreatedAt:      time.Now(),
+	}
+	repo.jobs[job.ID] = job
+
+	reg := connector.NewBackupCapabilityRegistry()
+	verifier := verification.NewVerificationEngine()
+	workerPool := newTestWorkerPool(
+		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+		repo,
+		&fakeResourceFinder{resWithConn: resWithConn},
+		&fakeCPanelCredentialVault{payloadBytes: validTokenJSON, credType: credDomain.TypeCPanelAPIToken},
+		reg,
+		connector.NewFileBackupCapabilityRegistry(),
+		engine.NewDirectStreamBackupEngine(),
+		storageProvider,
+		verifier,
+		NewPerResourceMutexManager(),
+		slog.Default(),
+	)
+
+	workerPool.processNextAvailableJob(context.Background(), 1)
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+
+	if repo.finalizedJob == nil || repo.finalizedJob.Status != domain.JobStatusFailed {
+		t.Fatalf("expected job to fail on website files for cpanel, got: %+v", repo.finalizedJob)
+	}
+	if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusFailed {
+		t.Fatalf("expected run to fail on website files for cpanel, got: %+v", repo.finalizedRun)
+	}
+}
+
+func TestWorkerPool_CPanelAllDatabases(t *testing.T) {
+	tempDir := t.TempDir()
+	storageProvider, _ := local.NewLocalStorageProvider(tempDir)
+	_ = storageProvider.EnsureStorageRoot(context.Background())
+
+	orgID := uuid.New()
+	resID := uuid.New()
+	credID := uuid.New()
+
+	validTokenJSON, _ := payload.EncodeV1("cpanel-token-123", nil)
+
+	useHTTPS := true
+	timeout := 10
+	port := 2083
+	resWithConn := &resDomain.ResourceWithConnector{
+		Resource: &resDomain.Resource{
+			ID:             resID,
+			OrganizationID: orgID,
+			Type:           resDomain.TypeCPanel,
+			Status:         resDomain.StatusActive,
+		},
+		Connector: &resDomain.ResourceConnector{
+			ID:           uuid.New(),
+			ResourceID:   resID,
+			CredentialID: credID,
+			Host:         "cpanel.example.com",
+			Port:         port,
+			AuthType:     resDomain.AuthTypeCPanelAPIToken,
+			Config: resDomain.ConnectorConfig{
+				Username:                 "cpaneluser",
+				ConnectionTimeoutSeconds: &timeout,
+				UseHTTPS:                 &useHTTPS,
+			},
+		},
+	}
+
+	repo := newFakeWorkerRepo(orgID)
+	job := &domain.BackupJob{
+		ID:             uuid.New(),
+		OrganizationID: orgID,
+		ResourceID:     resID,
+		TriggerType:    domain.TriggerTypeManual,
+		BackupType:     domain.BackupTypeMySQLDatabase,
+		TargetSpec:     domain.TargetSpec{Databases: []string{}}, // Mode "all databases"
+		Status:         domain.JobStatusPending,
+		CreatedAt:      time.Now(),
+	}
+	repo.jobs[job.ID] = job
+
+	reg := connector.NewBackupCapabilityRegistry()
+	reg.Register(resDomain.TypeCPanel, &fakeCapability{
+		sqlDump: "-- MySQL dump 10.13\nCREATE DATABASE `db`;\n",
+	})
+
+	verifier := verification.NewVerificationEngine()
+	workerPool := newTestWorkerPool(
+		WorkerPoolConfig{NumWorkers: 1, PollInterval: 10 * time.Millisecond},
+		repo,
+		&fakeResourceFinder{resWithConn: resWithConn},
+		&fakeCPanelCredentialVault{payloadBytes: validTokenJSON, credType: credDomain.TypeCPanelAPIToken},
+		reg,
+		connector.NewFileBackupCapabilityRegistry(),
+		engine.NewDirectStreamBackupEngine(),
+		storageProvider,
+		verifier,
+		NewPerResourceMutexManager(),
+		slog.Default(),
+	)
+
+	// Poison SSH databaseDiscoverer to verify SSH discoverer is NEVER invoked
+	workerPool.databaseDiscoverer = &fakeDatabaseDiscoverer{
+		err: errors.New("SSH discoverer must not be called for cPanel"),
+	}
+
+	// Inject fake cPanel discoverer returning exactly 2 databases
+	workerPool.cpanelDatabaseDiscoverer = &fakeDatabaseDiscoverer{
+		discovered: []connector.DatabaseInfo{
+			{Name: "cpanel_db1", SizeBytes: 1024, Status: connector.DatabaseStatusAccessible},
+			{Name: "cpanel_db2", SizeBytes: 2048, Status: connector.DatabaseStatusAccessible},
+		},
+	}
+
+	workerPool.processNextAvailableJob(context.Background(), 1)
+
+	repo.mu.Lock()
+	defer repo.mu.Unlock()
+
+	if repo.finalizedJob == nil || repo.finalizedJob.Status != domain.JobStatusCompleted {
+		t.Fatalf("expected job completed, got: %+v", repo.finalizedJob)
+	}
+	if repo.finalizedRun == nil || repo.finalizedRun.Status != domain.RunStatusSuccess {
+		t.Fatalf("expected run success, got: %+v", repo.finalizedRun)
+	}
+	if len(repo.artifacts) != 2 {
+		t.Fatalf("expected exactly 2 artifacts created for cpanel all databases, got %d", len(repo.artifacts))
+	}
+
+	targets := make([]string, 0, 2)
+	for _, art := range repo.artifacts {
+		targets = append(targets, art.TargetName)
+		if art.VerificationStatus != domain.VerificationStatusVerified {
+			t.Errorf("expected artifact %s verified, got %s", art.ID, art.VerificationStatus)
+		}
+	}
+	sort.Strings(targets)
+	if targets[0] != "cpanel_db1" || targets[1] != "cpanel_db2" {
+		t.Fatalf("unexpected targets: %v", targets)
+	}
 }
