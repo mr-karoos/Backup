@@ -2,7 +2,6 @@ package cpanel
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 
 	"backup-platform/internal/connector"
@@ -28,13 +27,6 @@ func NewCPanelConnectionTester(client HTTPDoer) *CPanelConnectionTester {
 	}
 }
 
-type uapiResultWrapper struct {
-	APIVersion int `json:"apiversion"`
-	Result     struct {
-		Status int `json:"status"`
-	} `json:"result"`
-}
-
 // TestConnection executes an authenticated live probe to cPanel UAPI Variables/get_user_information.
 func (t *CPanelConnectionTester) TestConnection(
 	ctx context.Context,
@@ -56,9 +48,8 @@ func (t *CPanelConnectionTester) TestConnection(
 	}
 	defer clear(body)
 
-	// Decode UAPI Response JSON into strictly typed struct
-	var uapiResp uapiResultWrapper
-	if err := json.Unmarshal(body, &uapiResp); err != nil {
+	norm, err := parseNormalizedUAPIResponse(body)
+	if err != nil {
 		return &connector.ProbeResult{
 			Success:     false,
 			Latency:     latency,
@@ -68,19 +59,8 @@ func (t *CPanelConnectionTester) TestConnection(
 		}, nil
 	}
 
-	// Validate typed API version
-	if uapiResp.APIVersion <= 0 {
-		return &connector.ProbeResult{
-			Success:     false,
-			Latency:     latency,
-			CheckedAt:   checkedAt,
-			FailureKind: connector.FailureKindRemoteAPIFailed,
-			SafeReason:  "remote connection failed",
-		}, nil
-	}
-
-	// UAPI result status 1 indicates API execution success. Status != 1 is a remote API failure.
-	if uapiResp.Result.Status != 1 {
+	// UAPI status 1 indicates API execution success. Status != 1 is a remote API failure.
+	if norm.Status != 1 {
 		return &connector.ProbeResult{
 			Success:     false,
 			Latency:     latency,
@@ -92,7 +72,9 @@ func (t *CPanelConnectionTester) TestConnection(
 
 	details := map[string]any{
 		"auth_method": authMethodName,
-		"api_version": uapiResp.APIVersion,
+	}
+	if norm.APIVersion > 0 {
+		details["api_version"] = norm.APIVersion
 	}
 
 	return &connector.ProbeResult{

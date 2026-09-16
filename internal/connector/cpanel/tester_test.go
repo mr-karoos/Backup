@@ -630,3 +630,226 @@ func TestCPanelConnectionTester_CallerCancellation(t *testing.T) {
 		t.Errorf("expected context.Canceled, got: %v", err)
 	}
 }
+
+// 1. Connection tester wrapped success
+func TestCPanelConnectionTester_WrappedSuccess(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"apiversion":3,"result":{"status":1,"data":{"user":"mycpanel"}}}`))
+	}))
+	defer server.Close()
+
+	host, port := parseServerHostPort(t, server)
+	tester := NewCPanelConnectionTester(server.Client())
+	target := connector.Target{
+		ResourceID:     uuid.New(),
+		OrganizationID: uuid.New(),
+		ResourceType:   resDomain.TypeCPanel,
+		Host:           host,
+		Port:           port,
+		AuthType:       resDomain.AuthTypeCPanelAPIToken,
+		Username:       "mycpanel",
+	}
+
+	result, err := tester.TestConnection(context.Background(), target, &payload.PayloadV1{Version: 1, Secret: "token"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected probe success for wrapped response, got: %v", result.FailureKind)
+	}
+	if result.Details["auth_method"] != "api_token" {
+		t.Errorf("expected auth_method 'api_token', got: %v", result.Details["auth_method"])
+	}
+	if result.Details["api_version"] != 3 {
+		t.Errorf("expected api_version 3, got: %v", result.Details["api_version"])
+	}
+}
+
+// 2 & 7 & 8. Connection tester flat success without apiversion, and details does not create fake api_version
+func TestCPanelConnectionTester_FlatSuccess_NoFakeAPIVersion(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":1,"data":{"user":"mycpanel"},"metadata":{}}`))
+	}))
+	defer server.Close()
+
+	host, port := parseServerHostPort(t, server)
+	tester := NewCPanelConnectionTester(server.Client())
+	target := connector.Target{
+		ResourceID:     uuid.New(),
+		OrganizationID: uuid.New(),
+		ResourceType:   resDomain.TypeCPanel,
+		Host:           host,
+		Port:           port,
+		AuthType:       resDomain.AuthTypeCPanelAPIToken,
+		Username:       "mycpanel",
+	}
+
+	result, err := tester.TestConnection(context.Background(), target, &payload.PayloadV1{Version: 1, Secret: "token"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected probe success for flat response, got: %v", result.FailureKind)
+	}
+	if result.Details["auth_method"] != "api_token" {
+		t.Errorf("expected auth_method 'api_token', got: %v", result.Details["auth_method"])
+	}
+	// Verify no fake api_version was fabricated for flat schema
+	if result.Details["api_version"] != nil {
+		t.Errorf("expected nil api_version in flat schema details, got: %v", result.Details["api_version"])
+	}
+}
+
+// 3 & 17. Flat status=0 failure without leaking sensitive error text
+func TestCPanelConnectionTester_FlatStatusZero_Failure(t *testing.T) {
+	secretToHide := "SUPER-SENSITIVE-INTERNAL-KEY-456"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":0,"errors":["Database connection refused for ` + secretToHide + `"]}`))
+	}))
+	defer server.Close()
+
+	host, port := parseServerHostPort(t, server)
+	tester := NewCPanelConnectionTester(server.Client())
+	target := connector.Target{
+		ResourceID:     uuid.New(),
+		OrganizationID: uuid.New(),
+		ResourceType:   resDomain.TypeCPanel,
+		Host:           host,
+		Port:           port,
+		AuthType:       resDomain.AuthTypeCPanelAPIToken,
+		Username:       "mycpanel",
+	}
+
+	result, err := tester.TestConnection(context.Background(), target, &payload.PayloadV1{Version: 1, Secret: "token"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected probe failure when flat status is 0")
+	}
+	if result.FailureKind != connector.FailureKindRemoteAPIFailed {
+		t.Errorf("expected FailureKindRemoteAPIFailed, got: %v", result.FailureKind)
+	}
+	if strings.Contains(result.SafeReason, secretToHide) {
+		t.Fatalf("CRITICAL: sensitive error details leaked in SafeReason: %s", result.SafeReason)
+	}
+}
+
+// 4. Wrapped status=0 failure
+func TestCPanelConnectionTester_WrappedStatusZero_Failure(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"apiversion":3,"result":{"status":0,"errors":["Access denied"]}}`))
+	}))
+	defer server.Close()
+
+	host, port := parseServerHostPort(t, server)
+	tester := NewCPanelConnectionTester(server.Client())
+	target := connector.Target{
+		ResourceID:     uuid.New(),
+		OrganizationID: uuid.New(),
+		ResourceType:   resDomain.TypeCPanel,
+		Host:           host,
+		Port:           port,
+		AuthType:       resDomain.AuthTypeCPanelAPIToken,
+		Username:       "mycpanel",
+	}
+
+	result, err := tester.TestConnection(context.Background(), target, &payload.PayloadV1{Version: 1, Secret: "token"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected probe failure when wrapped result status is 0")
+	}
+	if result.FailureKind != connector.FailureKindRemoteAPIFailed {
+		t.Errorf("expected FailureKindRemoteAPIFailed, got: %v", result.FailureKind)
+	}
+}
+
+// 5. Flat malformed or missing status failure
+func TestCPanelConnectionTester_FlatMissingStatus_Failure(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":{"user":"mycpanel"}}`))
+	}))
+	defer server.Close()
+
+	host, port := parseServerHostPort(t, server)
+	tester := NewCPanelConnectionTester(server.Client())
+	target := connector.Target{
+		ResourceID:     uuid.New(),
+		OrganizationID: uuid.New(),
+		ResourceType:   resDomain.TypeCPanel,
+		Host:           host,
+		Port:           port,
+		AuthType:       resDomain.AuthTypeCPanelAPIToken,
+		Username:       "mycpanel",
+	}
+
+	result, err := tester.TestConnection(context.Background(), target, &payload.PayloadV1{Version: 1, Secret: "token"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Success {
+		t.Fatalf("expected probe failure when flat response is missing status")
+	}
+	if result.FailureKind != connector.FailureKindRemoteAPIFailed {
+		t.Errorf("expected FailureKindRemoteAPIFailed, got: %v", result.FailureKind)
+	}
+}
+
+// 6. Wrapped malformed or missing result failure
+func TestCPanelConnectionTester_WrappedMissingOrMalformedResult_Failure(t *testing.T) {
+	responses := []string{
+		`{"apiversion":3}`,
+		`{"apiversion":3,"result":{}}`,
+		`{"apiversion":3,"result":{"data":[]}}`,
+		`{"apiversion":3,"result":null}`,
+		`{"apiversion":3,"result":null,"status":1,"data":[]}`,
+		`{"apiversion":3,"result":"not-an-object"}`,
+		`{"apiversion":3,"result":[1,2,3]}`,
+	}
+
+	for _, respBody := range responses {
+		t.Run(respBody, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(respBody))
+			}))
+			defer server.Close()
+
+			host, port := parseServerHostPort(t, server)
+			tester := NewCPanelConnectionTester(server.Client())
+			target := connector.Target{
+				ResourceID:     uuid.New(),
+				OrganizationID: uuid.New(),
+				ResourceType:   resDomain.TypeCPanel,
+				Host:           host,
+				Port:           port,
+				AuthType:       resDomain.AuthTypeCPanelAPIToken,
+				Username:       "mycpanel",
+			}
+
+			result, err := tester.TestConnection(context.Background(), target, &payload.PayloadV1{Version: 1, Secret: "token"})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Success {
+				t.Fatalf("expected probe failure for malformed wrapped result: %s", respBody)
+			}
+			if result.FailureKind != connector.FailureKindRemoteAPIFailed {
+				t.Errorf("expected FailureKindRemoteAPIFailed, got: %v", result.FailureKind)
+			}
+		})
+	}
+}

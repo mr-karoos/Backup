@@ -1,9 +1,11 @@
 package cpanel
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -216,4 +218,103 @@ func isNetTimeout(err error) bool {
 	}
 	errStr := strings.ToLower(err.Error())
 	return strings.Contains(errStr, "i/o timeout") || strings.Contains(errStr, "deadline exceeded")
+}
+
+// UAPISchemaType represents the format of the cPanel UAPI response envelope.
+type UAPISchemaType string
+
+const (
+	UAPISchemaWrapped UAPISchemaType = "wrapped"
+	UAPISchemaFlat    UAPISchemaType = "flat"
+)
+
+// normalizedUAPIResponse contains the normalized result of a cPanel UAPI response.
+type normalizedUAPIResponse struct {
+	Schema      UAPISchemaType
+	Status      int
+	APIVersion  int // >0 if present and valid; 0 if omitted/not present
+	Data        json.RawMessage
+	DataPresent bool
+}
+
+type rawUAPIEnvelope struct {
+	APIVersion *int            `json:"apiversion"`
+	Status     *int            `json:"status"`
+	Data       json.RawMessage `json:"data"`
+}
+
+// parseNormalizedUAPIResponse inspects the UAPI response body and normalizes wrapped and flat schemas.
+func parseNormalizedUAPIResponse(body []byte) (*normalizedUAPIResponse, error) {
+	var topMap map[string]json.RawMessage
+	if err := json.Unmarshal(body, &topMap); err != nil {
+		return nil, fmt.Errorf("failed to decode uapi response map: %w", err)
+	}
+
+	var env rawUAPIEnvelope
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, fmt.Errorf("failed to decode uapi response: %w", err)
+	}
+
+	rawResult, hasResult := topMap["result"]
+	if hasResult {
+		// Wrapped schema: top-level "result" key exists.
+		// It MUST NOT fallback to Flat under any circumstances.
+
+		trimmedResult := bytes.TrimSpace(rawResult)
+		if len(trimmedResult) == 0 || trimmedResult[0] != '{' || bytes.Equal(trimmedResult, []byte("null")) {
+			return nil, errors.New("invalid or malformed uapi result")
+		}
+
+		// Wrapped schema requires valid apiversion > 0
+		if env.APIVersion == nil || *env.APIVersion <= 0 {
+			return nil, errors.New("invalid cpanel api version")
+		}
+
+		// Unmarshal the result object
+		var resObj struct {
+			Status *int            `json:"status"`
+			Data   json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(trimmedResult, &resObj); err != nil {
+			return nil, errors.New("invalid or malformed uapi result object")
+		}
+
+		if resObj.Status == nil {
+			return nil, errors.New("missing uapi result status")
+		}
+
+		var resMap map[string]json.RawMessage
+		dataPresent := false
+		if err := json.Unmarshal(trimmedResult, &resMap); err == nil {
+			_, dataPresent = resMap["data"]
+		}
+
+		return &normalizedUAPIResponse{
+			Schema:      UAPISchemaWrapped,
+			Status:      *resObj.Status,
+			APIVersion:  *env.APIVersion,
+			Data:        resObj.Data,
+			DataPresent: dataPresent,
+		}, nil
+	}
+
+	// Flat schema: "result" key must NOT exist; status is required; apiversion is optional
+	if env.Status == nil {
+		return nil, errors.New("missing uapi status")
+	}
+
+	apiVersion := 0
+	if env.APIVersion != nil && *env.APIVersion > 0 {
+		apiVersion = *env.APIVersion
+	}
+
+	_, dataPresent := topMap["data"]
+
+	return &normalizedUAPIResponse{
+		Schema:      UAPISchemaFlat,
+		Status:      *env.Status,
+		APIVersion:  apiVersion,
+		Data:        env.Data,
+		DataPresent: dataPresent,
+	}, nil
 }
