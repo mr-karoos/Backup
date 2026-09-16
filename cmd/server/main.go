@@ -232,8 +232,10 @@ func run() error {
 
 	// 13. Initialize Backup Engine, Capability Registries & Verification Engine (Phase 5 & Phase 6A)
 	sshBackupCap := sshconn.NewSSHDatabaseBackupCapability(nil)
+	cpanelBackupCap := cpanel.NewCPanelDatabaseBackupCapability(nil)
 	backupCapRegistry := connector.NewBackupCapabilityRegistry()
 	backupCapRegistry.Register(resDomain.TypeUbuntuSSH, sshBackupCap)
+	backupCapRegistry.Register(resDomain.TypeCPanel, cpanelBackupCap)
 
 	sshFileCap := sshconn.NewSSHFileBackupCapability(nil)
 	fileCapRegistry := connector.NewFileBackupCapabilityRegistry()

@@ -35,4 +35,19 @@ var (
 
 	// ErrInvalidFileBackupConfig indicates that the file backup configuration or target spec is invalid.
 	ErrInvalidFileBackupConfig = errors.New("invalid file backup configuration")
+
+	// ErrCPanelTimeout indicates a connection or handshake timeout over cPanel transport.
+	ErrCPanelTimeout = errors.New("cpanel timeout")
+
+	// ErrCPanelNetwork indicates a network or transport failure during cPanel connection.
+	ErrCPanelNetwork = errors.New("cpanel network failure")
+
+	// ErrCPanelAuthentication indicates that cPanel authentication failed (401/403).
+	ErrCPanelAuthentication = errors.New("cpanel authentication failed")
+
+	// ErrCPanelTLSVerification indicates a TLS certificate validation failure.
+	ErrCPanelTLSVerification = errors.New("cpanel tls verification failed")
+
+	// ErrCPanelDumpFailed indicates that cPanel closed the dump stream with a non-normal close code or error.
+	ErrCPanelDumpFailed = errors.New("cpanel mysql dump failed")
 )

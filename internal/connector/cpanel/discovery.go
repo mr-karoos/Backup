@@ -1,6 +1,7 @@
 package cpanel
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,15 +30,9 @@ func NewCPanelDatabaseDiscoverer(client HTTPDoer) *CPanelDatabaseDiscoverer {
 	}
 }
 
-type cpanelListDatabasesResponse struct {
-	APIVersion int `json:"apiversion"`
-	Result     struct {
-		Status int `json:"status"`
-		Data   []struct {
-			Database  string `json:"database"`
-			DiskUsage int64  `json:"disk_usage"`
-		} `json:"data"`
-	} `json:"result"`
+type cpanelDatabaseItem struct {
+	Database  string `json:"database"`
+	DiskUsage int64  `json:"disk_usage"`
 }
 
 // DiscoverDatabases queries cPanel UAPI Mysql/list_databases over HTTPS and returns normalized DatabaseInfo.
@@ -61,24 +56,43 @@ func (d *CPanelDatabaseDiscoverer) DiscoverDatabases(
 	}
 	defer clear(body)
 
-	var uapiResp cpanelListDatabasesResponse
-	if err := json.Unmarshal(body, &uapiResp); err != nil {
+	norm, err := parseNormalizedUAPIResponse(body)
+	if err != nil {
 		return nil, errors.New("failed to parse cpanel mysql database list response")
-	}
-	clear(body)
-
-	// Validate typed API version
-	if uapiResp.APIVersion <= 0 {
-		return nil, errors.New("invalid cpanel api version")
 	}
 
 	// Validate UAPI result status
-	if uapiResp.Result.Status != 1 {
+	if norm.Status != 1 {
 		return nil, errors.New("cpanel uapi returned non-success status")
 	}
 
-	result := make([]connector.DatabaseInfo, 0, len(uapiResp.Result.Data))
-	for _, item := range uapiResp.Result.Data {
+	// Data field must be explicitly present in response
+	if !norm.DataPresent {
+		return nil, errors.New("missing cpanel mysql database list data")
+	}
+
+	// data: null => success with zero databases
+	trimmedData := bytes.TrimSpace(norm.Data)
+	if bytes.Equal(trimmedData, []byte("null")) {
+		clear(body)
+		return []connector.DatabaseInfo{}, nil
+	}
+
+	// data must be a JSON array; non-array (e.g. object, string, number) must fail
+	if len(trimmedData) == 0 || trimmedData[0] != '[' {
+		clear(body)
+		return nil, errors.New("invalid cpanel mysql database list data format")
+	}
+
+	var items []cpanelDatabaseItem
+	if err := json.Unmarshal(trimmedData, &items); err != nil {
+		clear(body)
+		return nil, errors.New("failed to parse cpanel mysql database list items")
+	}
+	clear(body)
+
+	result := make([]connector.DatabaseInfo, 0, len(items))
+	for _, item := range items {
 		if item.DiskUsage < 0 {
 			return nil, errors.New("cpanel database disk_usage is negative")
 		}
