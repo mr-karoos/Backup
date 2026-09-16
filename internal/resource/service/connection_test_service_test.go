@@ -807,16 +807,18 @@ func TestConnectionTestService_CPanel_APIVersionValidation(t *testing.T) {
 	payloadBytes, _ := payload.EncodeV1("token", nil)
 
 	testCases := []struct {
-		name        string
-		details     map[string]any
-		expectValid bool
+		name               string
+		details            map[string]any
+		expectValid        bool
+		expectedAPIVersion any
 	}{
-		{"Valid api_version 3", map[string]any{"api_version": 3}, true},
-		{"Missing api_version", map[string]any{}, false},
-		{"String api_version", map[string]any{"api_version": "3"}, false},
-		{"Zero api_version", map[string]any{"api_version": 0}, false},
-		{"Negative api_version", map[string]any{"api_version": -1}, false},
-		{"Nil details map", nil, false},
+		{"Valid api_version 3", map[string]any{"api_version": 3}, true, 3},
+		{"Missing api_version (Flat schema)", map[string]any{}, true, nil},
+		{"String api_version", map[string]any{"api_version": "3"}, false, nil},
+		{"Zero api_version", map[string]any{"api_version": 0}, false, nil},
+		{"Negative api_version", map[string]any{"api_version": -1}, false, nil},
+		{"Nil api_version", map[string]any{"api_version": nil}, false, nil},
+		{"Nil details map", nil, false, nil},
 	}
 
 	for _, tc := range testCases {
@@ -843,11 +845,32 @@ func TestConnectionTestService_CPanel_APIVersionValidation(t *testing.T) {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
 				}
-				if resp.Details["api_version"] != 3 {
-					t.Errorf("expected api_version 3, got: %v", resp.Details["api_version"])
+				if resp.Status != "success" {
+					t.Errorf("expected status 'success', got: %v", resp.Status)
+				}
+				if tc.expectedAPIVersion != nil {
+					if resp.Details["api_version"] != tc.expectedAPIVersion {
+						t.Errorf("expected api_version %v, got: %v", tc.expectedAPIVersion, resp.Details["api_version"])
+					}
+				} else {
+					if _, exists := resp.Details["api_version"]; exists {
+						t.Errorf("expected api_version to be absent, got: %v", resp.Details["api_version"])
+					}
+				}
+				if resp.Details["auth_method"] != "api_token" {
+					t.Errorf("expected auth_method 'api_token', got: %v", resp.Details["auth_method"])
 				}
 				if repo.updateTestStateCalls != 1 {
 					t.Errorf("expected 1 DB update call")
+				}
+				if repo.lastUpdatedStatus != domain.ConnectionStatusSuccess {
+					t.Errorf("expected ConnectionStatusSuccess, got: %v", repo.lastUpdatedStatus)
+				}
+				if repo.lastUpdatedResourceStat != domain.StatusActive {
+					t.Errorf("expected StatusActive, got: %v", repo.lastUpdatedResourceStat)
+				}
+				if repo.lastUpdatedError != nil {
+					t.Errorf("expected nil lastUpdatedError, got: %v", *repo.lastUpdatedError)
 				}
 			} else {
 				if !errors.Is(err, domain.ErrResourceServiceUnavailable) {
@@ -858,6 +881,172 @@ func TestConnectionTestService_CPanel_APIVersionValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidateAndDeriveFailureReason_CPanel_APIVersion(t *testing.T) {
+	now := time.Now().UTC()
+
+	tests := []struct {
+		name        string
+		probe       *connector.ProbeResult
+		expectError bool
+	}{
+		{
+			name: "cPanel success + api_version absent",
+			probe: &connector.ProbeResult{
+				Success:     true,
+				FailureKind: connector.FailureKindNone,
+				CheckedAt:   now,
+				Latency:     10 * time.Millisecond,
+				Details:     map[string]any{},
+			},
+			expectError: false,
+		},
+		{
+			name: "cPanel success + api_version=3",
+			probe: &connector.ProbeResult{
+				Success:     true,
+				FailureKind: connector.FailureKindNone,
+				CheckedAt:   now,
+				Latency:     10 * time.Millisecond,
+				Details:     map[string]any{"api_version": 3},
+			},
+			expectError: false,
+		},
+		{
+			name: "cPanel success + api_version=0",
+			probe: &connector.ProbeResult{
+				Success:     true,
+				FailureKind: connector.FailureKindNone,
+				CheckedAt:   now,
+				Latency:     10 * time.Millisecond,
+				Details:     map[string]any{"api_version": 0},
+			},
+			expectError: true,
+		},
+		{
+			name: "cPanel success + api_version negative",
+			probe: &connector.ProbeResult{
+				Success:     true,
+				FailureKind: connector.FailureKindNone,
+				CheckedAt:   now,
+				Latency:     10 * time.Millisecond,
+				Details:     map[string]any{"api_version": -1},
+			},
+			expectError: true,
+		},
+		{
+			name: "cPanel success + api_version wrong type string",
+			probe: &connector.ProbeResult{
+				Success:     true,
+				FailureKind: connector.FailureKindNone,
+				CheckedAt:   now,
+				Latency:     10 * time.Millisecond,
+				Details:     map[string]any{"api_version": "3"},
+			},
+			expectError: true,
+		},
+		{
+			name: "cPanel success + api_version nil value",
+			probe: &connector.ProbeResult{
+				Success:     true,
+				FailureKind: connector.FailureKindNone,
+				CheckedAt:   now,
+				Latency:     10 * time.Millisecond,
+				Details:     map[string]any{"api_version": nil},
+			},
+			expectError: true,
+		},
+		{
+			name: "cPanel success + Details nil",
+			probe: &connector.ProbeResult{
+				Success:     true,
+				FailureKind: connector.FailureKindNone,
+				CheckedAt:   now,
+				Latency:     10 * time.Millisecond,
+				Details:     nil,
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, err := validateAndDeriveFailureReason(domain.TypeCPanel, tt.probe)
+			if tt.expectError {
+				if err == nil {
+					t.Fatalf("expected error, got nil (reason: %q)", reason)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if reason != "" {
+					t.Errorf("expected empty reason for success, got %q", reason)
+				}
+			}
+		})
+	}
+}
+
+func TestConnectionTestService_CPanel_FlatSuccess_EndToEnd(t *testing.T) {
+	ctx := context.Background()
+	orgID := uuid.New()
+	resID := uuid.New()
+	credID := uuid.New()
+	useHTTPS := true
+
+	payloadBytes, _ := payload.EncodeV1("token", nil)
+	existingError := "previous connection failure"
+
+	repo := &fakeConnectionTestRepo{
+		resource:         sampleCPanelResource(orgID, resID, credID, domain.StatusUnreachable, "mycpanel", &useHTTPS),
+		lastUpdatedError: &existingError,
+	}
+	vault := &fakeVaultReader{credType: credDomain.TypeCPanelAPIToken, payloadBytes: payloadBytes}
+	tester := &fakeConnectionTester{
+		result: &connector.ProbeResult{
+			Success:     true,
+			FailureKind: connector.FailureKindNone,
+			CheckedAt:   time.Now().UTC(),
+			Latency:     15 * time.Millisecond,
+			Details: map[string]any{
+				"auth_method": "ignored_probe_value",
+			},
+		},
+	}
+	registry := connector.NewRegistry()
+	registry.Register(domain.TypeCPanel, tester)
+
+	svc := NewConnectionTestService(repo, vault, registry, &fakeTxManager{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	resp, err := svc.TestConnection(ctx, orgID, resID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if resp.Status != "success" {
+		t.Fatalf("expected status 'success', got %q", resp.Status)
+	}
+	if resp.Details["auth_method"] != "api_token" {
+		t.Errorf("expected local derived auth_method 'api_token', got %v", resp.Details["auth_method"])
+	}
+	if _, exists := resp.Details["api_version"]; exists {
+		t.Errorf("expected api_version to be absent, got %v", resp.Details["api_version"])
+	}
+
+	// Verify DB state persisted
+	if repo.updateTestStateCalls != 1 {
+		t.Errorf("expected 1 DB update call, got %d", repo.updateTestStateCalls)
+	}
+	if repo.lastUpdatedStatus != domain.ConnectionStatusSuccess {
+		t.Errorf("expected ConnectionStatusSuccess, got %v", repo.lastUpdatedStatus)
+	}
+	if repo.lastUpdatedResourceStat != domain.StatusActive {
+		t.Errorf("expected StatusActive, got %v", repo.lastUpdatedResourceStat)
+	}
+	if repo.lastUpdatedError != nil {
+		t.Errorf("expected last_error to be cleared, got %v", *repo.lastUpdatedError)
 	}
 }
 

@@ -278,9 +278,11 @@ func validateAndDeriveFailureReason(resType domain.Type, probe *connector.ProbeR
 			if probe.Details == nil {
 				return "", errors.New("cPanel success probe missing details map")
 			}
-			apiVer, ok := probe.Details["api_version"].(int)
-			if !ok || apiVer <= 0 {
-				return "", errors.New("cPanel success probe missing or invalid integer api_version")
+			if val, exists := probe.Details["api_version"]; exists {
+				apiVer, ok := val.(int)
+				if !ok || apiVer <= 0 {
+					return "", errors.New("cPanel success probe has invalid integer api_version")
+				}
 			}
 		}
 		return "", nil
