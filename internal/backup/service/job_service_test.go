@@ -615,4 +615,191 @@ func TestBackupJobService_CreateManualJob(t *testing.T) {
 			t.Fatalf("expected EngineType %s, got %s", domain.EngineTypeDirectStream, job.EngineType)
 		}
 	})
+
+	t.Run("Resource eligibility - cPanel with mysql_database succeeds", func(t *testing.T) {
+		cpanelResID := uuid.New()
+		cpanelResource := &resDomain.Resource{
+			ID:             cpanelResID,
+			OrganizationID: orgID,
+			Name:           "Production cPanel Server",
+			Type:           resDomain.TypeCPanel,
+			Status:         resDomain.StatusActive,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		repo := &mockBackupRepo{jobs: make(map[uuid.UUID]*domain.BackupJob)}
+		rf := &mockResourceFinder{resources: map[uuid.UUID]*resDomain.Resource{cpanelResID: cpanelResource}}
+		svc := NewBackupJobService(repo, rf)
+
+		input := CreateManualJobInput{
+			ResourceID: &cpanelResID,
+			BackupType: domain.BackupTypeMySQLDatabase,
+			TargetSpec: &domain.TargetSpec{
+				Databases: []string{"brbdprxw_backup_e2e"},
+			},
+		}
+
+		job, err := svc.CreateManualJob(ctx, orgDomain.RoleAdmin, orgID, userID, input)
+		if err != nil {
+			t.Fatalf("unexpected error creating cPanel mysql job: %v", err)
+		}
+		if job.ResourceID != cpanelResID {
+			t.Fatalf("expected resource id %s, got %s", cpanelResID, job.ResourceID)
+		}
+		if job.BackupType != domain.BackupTypeMySQLDatabase {
+			t.Fatalf("expected backup type %s, got %s", domain.BackupTypeMySQLDatabase, job.BackupType)
+		}
+	})
+
+	t.Run("Resource eligibility - cPanel with website_files rejected", func(t *testing.T) {
+		cpanelResID := uuid.New()
+		cpanelResource := &resDomain.Resource{
+			ID:             cpanelResID,
+			OrganizationID: orgID,
+			Name:           "Production cPanel Server",
+			Type:           resDomain.TypeCPanel,
+			Status:         resDomain.StatusActive,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		repo := &mockBackupRepo{jobs: make(map[uuid.UUID]*domain.BackupJob)}
+		rf := &mockResourceFinder{resources: map[uuid.UUID]*resDomain.Resource{cpanelResID: cpanelResource}}
+		svc := NewBackupJobService(repo, rf)
+
+		emptyExclude := []string{}
+		input := CreateManualJobInput{
+			ResourceID: &cpanelResID,
+			BackupType: domain.BackupTypeWebsiteFiles,
+			TargetSpec: &domain.TargetSpec{
+				Paths:           []string{"/home/cpuser/public_html"},
+				ExcludePatterns: &emptyExclude,
+			},
+		}
+
+		_, err := svc.CreateManualJob(ctx, orgDomain.RoleAdmin, orgID, userID, input)
+		if !errors.Is(err, domain.ErrUnsupportedResourceType) {
+			t.Fatalf("expected ErrUnsupportedResourceType for cPanel website_files, got: %v", err)
+		}
+	})
+
+	t.Run("Resource eligibility - ubuntu_ssh with mysql_database succeeds", func(t *testing.T) {
+		repo := &mockBackupRepo{jobs: make(map[uuid.UUID]*domain.BackupJob)}
+		rf := &mockResourceFinder{resources: map[uuid.UUID]*resDomain.Resource{resID: activeResource}}
+		svc := NewBackupJobService(repo, rf)
+
+		input := CreateManualJobInput{
+			ResourceID: &resID,
+			BackupType: domain.BackupTypeMySQLDatabase,
+			TargetSpec: &domain.TargetSpec{
+				Databases: []string{"testdb"},
+			},
+		}
+
+		job, err := svc.CreateManualJob(ctx, orgDomain.RoleAdmin, orgID, userID, input)
+		if err != nil {
+			t.Fatalf("unexpected error creating ubuntu mysql job: %v", err)
+		}
+		if job.BackupType != domain.BackupTypeMySQLDatabase {
+			t.Fatalf("expected mysql_database, got: %s", job.BackupType)
+		}
+	})
+
+	t.Run("Resource eligibility - ubuntu_ssh with website_files succeeds", func(t *testing.T) {
+		repo := &mockBackupRepo{jobs: make(map[uuid.UUID]*domain.BackupJob)}
+		rf := &mockResourceFinder{resources: map[uuid.UUID]*resDomain.Resource{resID: activeResource}}
+		svc := NewBackupJobService(repo, rf)
+
+		emptyExclude := []string{}
+		input := CreateManualJobInput{
+			ResourceID: &resID,
+			BackupType: domain.BackupTypeWebsiteFiles,
+			TargetSpec: &domain.TargetSpec{
+				Paths:           []string{"/var/www"},
+				ExcludePatterns: &emptyExclude,
+			},
+		}
+
+		job, err := svc.CreateManualJob(ctx, orgDomain.RoleAdmin, orgID, userID, input)
+		if err != nil {
+			t.Fatalf("unexpected error creating ubuntu website_files job: %v", err)
+		}
+		if job.BackupType != domain.BackupTypeWebsiteFiles {
+			t.Fatalf("expected website_files, got: %s", job.BackupType)
+		}
+	})
+
+	t.Run("Resource eligibility - unsupported resource type returns ErrUnsupportedResourceType", func(t *testing.T) {
+		unsupportedResID := uuid.New()
+		unsupportedResource := &resDomain.Resource{
+			ID:             unsupportedResID,
+			OrganizationID: orgID,
+			Name:           "Windows Server",
+			Type:           "windows_smb",
+			Status:         resDomain.StatusActive,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		repo := &mockBackupRepo{jobs: make(map[uuid.UUID]*domain.BackupJob)}
+		rf := &mockResourceFinder{resources: map[uuid.UUID]*resDomain.Resource{unsupportedResID: unsupportedResource}}
+		svc := NewBackupJobService(repo, rf)
+
+		input := CreateManualJobInput{
+			ResourceID: &unsupportedResID,
+			BackupType: domain.BackupTypeMySQLDatabase,
+			TargetSpec: &domain.TargetSpec{
+				Databases: []string{"db"},
+			},
+		}
+
+		_, err := svc.CreateManualJob(ctx, orgDomain.RoleAdmin, orgID, userID, input)
+		if !errors.Is(err, domain.ErrUnsupportedResourceType) {
+			t.Fatalf("expected ErrUnsupportedResourceType for unsupported resource type, got: %v", err)
+		}
+	})
+
+	t.Run("Resource eligibility - plan-triggered cPanel with mysql_database succeeds", func(t *testing.T) {
+		cpanelResID := uuid.New()
+		cpanelResource := &resDomain.Resource{
+			ID:             cpanelResID,
+			OrganizationID: orgID,
+			Name:           "Production cPanel Server",
+			Type:           resDomain.TypeCPanel,
+			Status:         resDomain.StatusActive,
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		planID := uuid.New()
+		plan := &domain.BackupPlan{
+			ID:              planID,
+			OrganizationID:  orgID,
+			ResourceID:      cpanelResID,
+			Name:            "cPanel Daily MySQL",
+			BackupType:      domain.BackupTypeMySQLDatabase,
+			EngineType:      domain.EngineTypeDirectStream,
+			StorageTargetID: uuid.New(),
+			TargetSpec:      domain.TargetSpec{Databases: []string{"brbdprxw_backup_e2e"}},
+			Status:          domain.PlanStatusActive,
+		}
+		repo := &mockBackupRepo{
+			jobs:  make(map[uuid.UUID]*domain.BackupJob),
+			plans: map[uuid.UUID]*domain.BackupPlan{planID: plan},
+		}
+		rf := &mockResourceFinder{resources: map[uuid.UUID]*resDomain.Resource{cpanelResID: cpanelResource}}
+		svc := NewBackupJobService(repo, rf)
+
+		input := CreateManualJobInput{
+			BackupPlanID: &planID,
+		}
+
+		job, err := svc.CreateManualJob(ctx, orgDomain.RoleMember, orgID, userID, input)
+		if err != nil {
+			t.Fatalf("unexpected error creating plan-triggered cPanel job: %v", err)
+		}
+		if job.ResourceID != cpanelResID {
+			t.Fatalf("expected resource id %s, got %s", cpanelResID, job.ResourceID)
+		}
+		if job.BackupType != domain.BackupTypeMySQLDatabase {
+			t.Fatalf("expected backup type %s, got %s", domain.BackupTypeMySQLDatabase, job.BackupType)
+		}
+	})
 }

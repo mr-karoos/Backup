@@ -177,8 +177,16 @@ func (s *BackupJobService) CreateManualJob(
 	if resource.Status == resDomain.StatusDisabled {
 		return nil, domain.ErrResourceDisabled
 	}
-	if resource.Type != resDomain.TypeUbuntuSSH {
-		// cPanel or other unsupported connector types in V1
+	switch resource.Type {
+	case resDomain.TypeUbuntuSSH:
+		if targetBackupType != domain.BackupTypeMySQLDatabase && targetBackupType != domain.BackupTypeWebsiteFiles {
+			return nil, domain.ErrUnsupportedResourceType
+		}
+	case resDomain.TypeCPanel:
+		if targetBackupType != domain.BackupTypeMySQLDatabase {
+			return nil, domain.ErrUnsupportedResourceType
+		}
+	default:
 		return nil, domain.ErrUnsupportedResourceType
 	}
 
