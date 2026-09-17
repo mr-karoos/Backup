@@ -1,6 +1,7 @@
 'use client';
 
 import { useAuth } from '@/lib/auth/auth-context';
+import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,13 +38,15 @@ export function OrgSwitcher() {
         >
           <div className="flex items-center gap-2 truncate">
             <Building2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span className="truncate font-medium">{currentName}</span>
+            <span className="truncate font-medium text-foreground">{currentName}</span>
           </div>
           <ChevronsUpDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-56">
-        <DropdownMenuLabel>Organizations</DropdownMenuLabel>
+      <DropdownMenuContent align="start" className="w-60">
+        <DropdownMenuLabel className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          Organizations
+        </DropdownMenuLabel>
         <DropdownMenuSeparator />
         {memberships.map((membership) => {
           const isSelected = membership.organization_id === activeOrgId;
@@ -51,15 +54,17 @@ export function OrgSwitcher() {
             <DropdownMenuItem
               key={membership.organization_id}
               onClick={() => switchOrganization(membership.organization_id)}
-              className="flex items-center justify-between cursor-pointer"
+              className="flex items-center justify-between cursor-pointer py-2"
             >
               <div className="flex flex-col truncate pr-2">
-                <span className="font-medium truncate">{membership.organization_name}</span>
+                <span className={cn('text-sm truncate', isSelected ? 'font-semibold text-foreground' : 'font-medium text-foreground')}>
+                  {membership.organization_name}
+                </span>
                 <span className="text-xs text-muted-foreground capitalize">
                   {membership.role}
                 </span>
               </div>
-              {isSelected && <Check className="h-4 w-4 text-primary shrink-0" />}
+              {isSelected && <Check className="h-4 w-4 text-primary shrink-0 stroke-[2.5]" />}
             </DropdownMenuItem>
           );
         })}
