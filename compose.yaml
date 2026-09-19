@@ -5,6 +5,7 @@
 services:
   # Metadata Database & Durable Task Queue
   postgres:
+    container_name: backup-platform-postgres
     image: postgres:15-alpine
     restart: unless-stopped
     environment:
@@ -29,6 +30,7 @@ services:
 
   # Core Application (Modular Monolith: HTTP API + Worker Pool + Scheduler + Reaper)
   app:
+    container_name: backup-platform-app
     build:
       context: .
       dockerfile: Dockerfile
